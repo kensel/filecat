@@ -1,0 +1,115 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    name: tests (${{ matrix.os }}, py${{ matrix.python }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+        python: ["3.11", "3.13"]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v6
+        with:
+          python-version: ${{ matrix.python }}
+      - run: uv sync --all-extras
+      - run: uv run pytest -q
+
+  backends:
+    name: server backends
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:17
+        env:
+          POSTGRES_USER: filecat
+          POSTGRES_PASSWORD: filecat
+          POSTGRES_DB: filecat
+        ports: ["5432:5432"]
+        options: >-
+          --health-cmd "pg_isready -U filecat" --health-interval 5s --health-retries 20
+      mysql:
+        image: mysql:8.4
+        env:
+          MYSQL_ROOT_PASSWORD: filecat
+          MYSQL_DATABASE: filecat
+          MYSQL_USER: filecat
+          MYSQL_PASSWORD: filecat
+        ports: ["3306:3306"]
+        options: >-
+          --health-cmd "mysqladmin ping -h 127.0.0.1 -pfilecat" --health-interval 5s --health-retries 30
+      mssql:
+        image: mcr.microsoft.com/mssql/server:2022-latest
+        env:
+          ACCEPT_EULA: "Y"
+          MSSQL_SA_PASSWORD: "Filecat-Test-1"
+        ports: ["1433:1433"]
+        options: >-
+          --health-cmd "/opt/mssql-tools18/bin/sqlcmd -C -S localhost -U sa -P Filecat-Test-1 -Q 'SELECT 1' || exit 1"
+          --health-interval 10s --health-retries 20
+      mongodb:
+        image: mongo:8.0
+        ports: ["27017:27017"]
+        options: >-
+          --health-cmd "mongosh --quiet --eval 'db.adminCommand(\"ping\")'" --health-interval 5s --health-retries 20
+    env:
+      FILECAT_TEST_POSTGRES: postgresql://filecat:filecat@127.0.0.1:5432/filecat
+      FILECAT_TEST_MYSQL: mysql://filecat:filecat@127.0.0.1:3306/filecat
+      FILECAT_TEST_MSSQL: DRIVER={ODBC Driver 18 for SQL Server};SERVER=127.0.0.1,1433;DATABASE=master;UID=sa;PWD=Filecat-Test-1;TrustServerCertificate=yes
+      FILECAT_TEST_MONGODB: mongodb://127.0.0.1:27017/filecat_test
+    steps:
+      - uses: actions/checkout@v4
+      - name: ODBC Driver 18 for SQL Server
+        run: |
+          if ! odbcinst -q -d 2>/dev/null | grep -q "ODBC Driver 18 for SQL Server"; then
+            sudo apt-get update
+            sudo ACCEPT_EULA=Y apt-get install -y msodbcsql18 unixodbc
+          fi
+      - uses: astral-sh/setup-uv@v6
+        with:
+          python-version: "3.13"
+      - run: uv sync --all-extras
+      - run: uv run pytest -q -rs tests/test_backend_contract.py tests/test_browse.py tests/test_config.py
+
+  smb:
+    name: SMB share
+    runs-on: ubuntu-latest
+    services:
+      samba:
+        image: dockurr/samba:latest
+        env:
+          NAME: Data
+          USER: samba
+          PASS: filecat
+        ports: ["445:445"]
+    env:
+      FILECAT_TEST_SMB: /mnt/filecat-smb
+    steps:
+      - uses: actions/checkout@v4
+      - name: Mount the share
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y cifs-utils
+          sudo mkdir -p "$FILECAT_TEST_SMB"
+          for i in $(seq 1 30); do
+            sudo mount -t cifs //127.0.0.1/Data "$FILECAT_TEST_SMB" \
+              -o "username=samba,password=filecat,uid=$(id -u),gid=$(id -g),vers=3.0" && break
+            sleep 2
+          done
+          mountpoint "$FILECAT_TEST_SMB"
+      - uses: astral-sh/setup-uv@v6
+        with:
+          python-version: "3.13"
+      - run: uv sync --all-extras
+      - run: uv run pytest -q -rs tests/test_smb.py

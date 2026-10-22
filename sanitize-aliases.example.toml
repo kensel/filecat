@@ -1,0 +1,28 @@
+# Copy to sanitize-aliases.local.toml (gitignored) and fill in the real names.
+# scripts/sanitize.py replaces each key with its value in every file git
+# would commit: whole-word, case-insensitive, and the alias takes the
+# match's case when that is all caps (NAS-MAIN) or Title case. Longer keys
+# are applied first. Literal-string keys ('...') need no backslash escaping.
+#
+#   uv run python scripts/sanitize.py           # rewrite the files
+#   uv run python scripts/sanitize.py --check   # exit 1 if a real name is left
+
+[aliases]
+# Addresses -> RFC 5737 documentation range
+"10.0.0.10" = "192.0.2.13"
+
+# Servers
+"my-nas" = "nas-main"
+"old-nas" = "nas-old"
+"virtual-dsm" = "nas-vm"
+
+# Shares that are not a standard layout (homes, home, backup are fine)
+"my-private-share" = "data"
+
+# Accounts, machines and personal folders
+"myname" = "jdoe"
+"MYPC" = "homepc"
+'D:\src\filecat' = 'C:\code\filecat'
+
+# VM guests
+"Family-PC" = "vm-desktop-1"

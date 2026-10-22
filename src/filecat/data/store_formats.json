@@ -1,0 +1,636 @@
+{
+  "version": "1.0",
+  "description": "Folders that filecat recognises by their layout as a database server's data or a backup program's store, what it does with each, and what is known about them. The detection itself is code (module); this catalog is its reference, and filecat reads the measure thresholds (actions.measure_when) from it. tests/test_store_formats.py keeps the two in step. The \"archives\" and \"archives_identified_only\" lists sit beside it as reference only: file formats the probe lists (module and function named) or only identifies from freedesktop, with magic bytes, globs, a spec link and notes. No code reads them.",
+  "actions": {
+    "list": "Data file recorded from the directory listing only: name, size, created/modified times, kind 'data', probe.<data_tag> = <id>. Never opened.",
+    "measure": "Read, hashed and probed like any other file.",
+    "summarize": "When the walk finishes the folder, the module reads the program's own small metadata files and the folder's record gets probe.<summary_key>.",
+    "virtual": "Folder recorded with its summary but not walked: its files show data that lives elsewhere, and their sizes are not disk space.",
+    "in_use": "A data file the server holds open (Windows sharing or lock violation, WinError 32/33) when measured is recorded as probe.db_in_use instead of an error."
+  },
+  "formats": [
+    {
+      "id": "postgres",
+      "category": "database",
+      "name": "PostgreSQL cluster data directory (PGDATA)",
+      "module": "filecat.dbfiles.postgres",
+      "summary_key": "database",
+      "data_tag": "db_data",
+      "detection": {
+        "folder_contains_all": ["PG_VERSION", "base", "global"],
+        "description": "A folder holding the PG_VERSION file and the base/ and global/ folders."
+      },
+      "listed_only": ["base/**", "global/**", "pg_wal/**", "pg_xlog/**", "pg_xact/**", "pg_clog/**", "pg_multixact/**", "pg_subtrans/**", "pg_commit_ts/**", "pg_twophase/**", "pg_logical/**", "pg_replslot/**", "pg_serial/**", "pg_snapshots/**", "pg_stat/**", "pg_stat_tmp/**", "pg_notify/**", "pg_dynshmem/**"],
+      "measured_normally": ["PG_VERSION", "postgresql.conf", "postgresql.auto.conf", "pg_hba.conf", "pg_ident.conf", "postmaster.opts", "postmaster.pid", "log/**", "pg_log/**"],
+      "not_walked": ["pg_tblspc/<oid> (junctions to tablespaces, recorded as links)"],
+      "metadata_read": {
+        "PG_VERSION": "major version",
+        "global/pg_control": "first 32 bytes: system identifier, pg_control and catalog versions, cluster state, time of last update (little-endian)",
+        "postmaster.pid": "pid (line 1) and port (line 4); present while the server runs",
+        "base/<oid>/": "one folder per database: file count, bytes, newest time",
+        "pg_wal/": "segment count and bytes",
+        "pg_tblspc/": "tablespace OIDs and their link targets"
+      },
+      "actions": {
+        "default": "list",
+        "measure_flag": "--measure-databases",
+        "measure_when": {"quiet_seconds": 7776000, "min_bytes": 1048576, "text": "not modified for 90 days and at least 1 MiB"},
+        "enrich": "measures listed files once they are quiet, re-checking the file just before reading; --force does not override"
+      },
+      "instance_keys": "pg:<system identifier> -- shared by copies of the cluster and by physical replicas",
+      "problems": [
+        "global/pg_control missing or unreadable",
+        "pg_wal missing",
+        "pg_control says 'in production' but no postmaster.pid: a copy taken while the server ran, or a crash"
+      ],
+      "notes": [
+        "Relation files are 8 KB pages in 1 GB segments (<relfilenode>, .1, .2 ...; _fsm and _vm forks); a busy cluster has thousands of small ones, hence the 1 MiB floor.",
+        "Database names are in pg_database (global/1262) and are not read yet; databases are listed by OID, with oid 1 = template1."
+      ],
+      "todo": ["database names from global/1262", "table names from base/<oid>/1259 (pg_class)", "data_directory and tablespaces from postgresql.conf"]
+    },
+    {
+      "id": "mysql",
+      "category": "database",
+      "name": "MySQL / MariaDB data directory (datadir)",
+      "module": "filecat.dbfiles.mysql",
+      "summary_key": "database",
+      "data_tag": "db_data",
+      "detection": {
+        "folder_contains_any": ["ibdata1", "mysql.ibd", "ib_logfile0", "#innodb_redo", "aria_log_control"],
+        "and_any": ["mysql", "mysql.ibd"],
+        "description": "An InnoDB or Aria marker file plus the mysql system schema (folder, or mysql.ibd in 8.0+)."
+      },
+      "listed_only": ["*/** (schema folders, #innodb_redo, #innodb_temp)", "ibdata*", "ib_logfile*", "ibtmp*", "undo_*", "mysql.ibd", "ib_buffer_pool", "aria_log*", "binlog.*", "*-bin.*", "*-relay-bin.*", "every other top-level file not measured_normally"],
+      "measured_normally": ["*.cnf", "*.ini", "*.err", "*.pid", "*.pem", "*.log", "*.txt", "*.flag", "mysql_upgrade_info"],
+      "metadata_read": {
+        "auto.cnf": "server-uuid (MySQL 5.6+)",
+        "mysql_upgrade_info": "version of the last upgrade (MariaDB, MySQL before 8.0)",
+        "<schema>/": "table count from table file names (.ibd .frm .MYD/.MYI .MAD/.MAI .CSV .ARZ ...; #P# partitions folded), storage engines, bytes",
+        "<host>.pid": "present while the server runs"
+      },
+      "actions": {
+        "default": "list",
+        "measure_flag": "--measure-databases",
+        "measure_when": {"quiet_seconds": 7776000, "min_bytes": 1048576, "text": "not modified for 90 days and at least 1 MiB"},
+        "enrich": "measures listed files once they are quiet, re-checking the file just before reading; --force does not override"
+      },
+      "instance_keys": "mysql:<server-uuid> -- shared by copies of the datadir (a replica gets its own uuid)",
+      "problems": [],
+      "notes": [
+        "Flavor is MariaDB when aria_log_control exists or mysql_upgrade_info says MariaDB.",
+        "MySQL 8.0+ writes no plain version file; version_hint '8.0+' is given when mysql.ibd exists."
+      ],
+      "todo": ["MySQL 8 version from the .err log or mysql.ibd SDI", "datadir from my.ini / my.cnf and the service command line"]
+    },
+    {
+      "id": "mongodb",
+      "category": "database",
+      "name": "MongoDB dbPath",
+      "module": "filecat.dbfiles.mongodb",
+      "summary_key": "database",
+      "data_tag": "db_data",
+      "detection": {
+        "folder_contains_all": ["WiredTiger"],
+        "and_any": ["_mdb_catalog.wt", "storage.bson"],
+        "or": "MMAPv1 (before 4.2): mongod.lock plus any *.ns",
+        "description": "The WiredTiger version file plus MongoDB's catalog or storage.bson."
+      },
+      "listed_only": ["*.wt", "mongod.lock", "WiredTiger.lock", "journal/**", "diagnostic.data/**", "_tmp/**", "WiredTigerLog.N", "WiredTigerPreplog.N", "<db>.ns", "<db>.<n> (MMAPv1)"],
+      "measured_normally": ["WiredTiger", "WiredTiger.turtle", "storage.bson"],
+      "metadata_read": {
+        "WiredTiger": "WiredTiger version (line 2)",
+        "storage.bson": "storage engine and options: directoryPerDB, directoryForIndexes, groupCollections",
+        "mongod.lock": "size only: non-empty (holds the pid) while mongod runs, empty after a clean stop",
+        "collection-*.wt / index-*.wt": "counts, recursing into <db>/ with directoryPerDB",
+        "install folder in the path": "server version (version_source 'folder'): mongodb-win32-x86_64-windows-9.0.4\\data\\db, MongoDB\\Server\\8.0\\data"
+      },
+      "actions": {
+        "default": "list",
+        "measure_flag": "--measure-databases",
+        "measure_when": {"quiet_seconds": 7776000, "min_bytes": 1048576, "text": "not modified for 90 days and at least 1 MiB"},
+        "enrich": "measures listed files once they are quiet, re-checking the file just before reading; --force does not override"
+      },
+      "instance_keys": "none yet",
+      "problems": [],
+      "notes": [
+        "mongod holds mongod.lock and WiredTiger.lock locked on Windows (reading them fails with a sharing violation), so they are listed, never opened.",
+        "Collection and index files are named collection-<n>-<number>.wt before 8.0 and collection-<uuid>.wt since.",
+        "WiredTigerHS.wt is the history store (4.4+); _tmp/spilldb/ is a second WiredTiger instance for spilled query data (8.0+).",
+        "Which namespace a .wt file holds is in _mdb_catalog.wt, not read yet; databases are named only with directoryPerDB."
+      ],
+      "examples": [
+        {
+          "path": "C:\\Apps\\mongodb-win32-x86_64-windows-9.0.4\\data\\db",
+          "seen": "2026-10-18",
+          "what": "filecat's own catalog server, running: MongoDB 9.0.4 (from the folder), WiredTiger 12.0.0, flat layout (no directoryPerDB), 19 collections, 47 indexes, 2 journal files, 86 data files / 2.1 GiB; mongod.lock and WiredTiger.lock locked"
+        }
+      ],
+      "todo": ["namespaces from _mdb_catalog.wt", "server version from diagnostic.data (FTDC)", "storage.dbPath from mongod.cfg and the service command line"]
+    },
+    {
+      "id": "mssql",
+      "category": "database",
+      "name": "SQL Server database files",
+      "module": "filecat.dbfiles.mssql",
+      "summary_key": "database",
+      "data_tag": "db_data",
+      "detection": {
+        "folder_contains_any": ["*.mdf"],
+        "except": "an .mdf with an .mds of the same name beside it (Alcohol 120% disc image)",
+        "description": "Any folder holding a primary data file: instance DATA folders, LocalDB, App_Data, detached copies."
+      },
+      "listed_only": ["*.mdf", "*.ndf", "*.ldf (directly in the folder; a subfolder with an .mdf is its own store)"],
+      "measured_normally": ["everything else in the folder"],
+      "metadata_read": {
+        "path": "instance from MSSQLnn[_nn].NAME (MSSQL16 = 2022, MSSQL10_50 = 2008 R2) or Microsoft SQL Server\\<nnn>\\ (170 = 2025)",
+        "*.mdf/*.ndf/*.ldf": "size, modified time, quiet; data paired with its log by name (<db>_log.ldf, <db>.ldf, <db>log.ldf; system databases by their fixed names)"
+      },
+      "actions": {
+        "default": "list",
+        "measure_flag": "--measure-databases",
+        "measure_when": {"quiet_seconds": 3600, "min_bytes": 0, "text": "not modified for 1 hour, any size"},
+        "enrich": "measures listed files once they are quiet, re-checking the file just before reading; --force does not override"
+      },
+      "instance_keys": "none yet",
+      "problems": [],
+      "notes": [
+        "An attached database's files are held open by the server, and its modified time can stay old while attached; measuring then records probe.db_in_use.",
+        "Logs often sit on another drive, so an .mdf without an .ldf beside it is normal.",
+        "Real example: C:\\Program Files\\Microsoft SQL Server\\170\\LocalDB\\Binn\\Templates (master, model, msdb templates) and Binn (mssqlsystemresource)."
+      ],
+      "todo": ["database name, version and collation from the boot page (page 9) of quiet .mdf files", "DefaultData / DefaultLog / BackupDirectory from the registry"]
+    },
+    {
+      "id": "synology-abb",
+      "category": "backup",
+      "name": "Synology Active Backup for Business destination",
+      "module": "filecat.backup.abb",
+      "summary_key": "backup",
+      "data_tag": "backup_data",
+      "detection": {
+        "folder_name": "@ActiveBackup",
+        "folder_contains_all": ["@data", "storage_info.json"],
+        "description": "The @ActiveBackup folder of a destination share."
+      },
+      "listed_only": ["@data/**", "@Fuse/**"],
+      "measured_normally": ["storage_info.json", "storage.cache", "PC-<HOST>-<task>/** (config.json, target.db, version folders)"],
+      "metadata_read": {
+        "storage.cache": "backed-up bytes per task",
+        "@data/repo_size": "storage usage and compression saving",
+        "@data/file_map.db": "every volume image in the pool, with size",
+        "PC-<HOST>-<task>/config.json": "host, OS, device UUID, task settings (the agent token is not copied)",
+        "PC-<HOST>-<task>/target.db": "versions (status, times, UUID), objects, mount map"
+      },
+      "actions": {"default": "list", "measure_flag": "--measure-backups"},
+      "copy_keys": "abb version UUIDs", "machine_keys": "device UUID, host name",
+      "problems": ["failed versions (status 4)", "volume images missing from the pool or stopped part way (.suspend)", "small objects missing or of the wrong size", "version folders target.db does not know"],
+      "notes": ["The pool is ~32 MiB chunk buckets; listing a 1 TB pool takes about a minute instead of hours of reading."]
+    },
+    {
+      "id": "synology-abb-view",
+      "category": "backup",
+      "name": "Synology ABB virtual view",
+      "module": "filecat.backup.abb",
+      "summary_key": "backup",
+      "data_tag": "backup_data",
+      "detection": {"folder_name": "ActiveBackupData", "description": "The ActiveBackupData folder beside @ActiveBackup."},
+      "listed_only": ["** (not walked at all)"],
+      "measured_normally": [],
+      "metadata_read": {"PC-<HOST>-<task>/ActiveBackup_<date>_<time>/": "tasks, versions, apparent bytes"},
+      "actions": {"default": "virtual", "measure_flag": "--measure-backups (walks it)"},
+      "problems": [],
+      "notes": ["Every volume of every version appears as a full-size image served from the pool; its sizes are not disk space."]
+    },
+    {
+      "id": "synology-hyperbackup",
+      "category": "backup",
+      "name": "Synology Hyper Backup target (.hbk)",
+      "module": "filecat.backup.hyperbackup",
+      "summary_key": "backup",
+      "data_tag": "backup_data",
+      "detection": {
+        "folder_contains_any": ["SynologyHyperBackup.bkpi"],
+        "or": {"folder_name_suffix": ".hbk", "folder_contains_all": ["Config", "Pool"]},
+        "description": "A <task>_<n>.hbk folder on a local share, USB disk, rsync server or Hyper Backup Vault."
+      },
+      "listed_only": ["Pool/**", "Config/**", "Guard/**", "Versionlog/**", "Control/**"],
+      "measured_normally": ["_Syno_TaskConfig", "last_status.conf", "storage_statistics.db", "synobkpinfo.db", "*.prog"],
+      "metadata_read": {
+        "_Syno_TaskConfig": "task name, source host and model, unikey, backed-up folders and apps, encryption, rotation (named fields only)",
+        "Config/version_info.db": "every version: id, time, status, locked, shares, per-version file counts and sizes",
+        "storage_statistics.db": "target size over time (KiB)",
+        "last_status.conf": "the last backup's start, end and version",
+        "Guard/local_bucket.db, Guard/local_file.db": "every pool and index file with its size, checked against the walk's listing",
+        "Guard/detect.prog, Guard/detect/error.log": "the last integrity check"
+      },
+      "actions": {"default": "list", "measure_flag": "--measure-backups",
+                  "verify_flag": "--verify-backups (reads every file Guard lists and compares its CRC32)"},
+      "spec": "docs/formats/synology-hyperbackup.md",
+      "copy_keys": "task unikey + version id", "machine_keys": "source host name, the id at the front of the unikey",
+      "problems": ["files in Guard's manifest missing or of another size", "versions with a failed status", "errors in the last integrity check's log", "with --verify-backups: files whose CRC32 differs from Guard's"],
+      "notes": [
+        "Synology does not document the format; the layout was read from Hyper Backup 4.2 targets (target_ver 0.3, index_ver 0.9).",
+        "Buckets are Pool/0/<id // 2048>/<id % 2048>.bucket (~50 MiB) with .index and .lock beside them; a 3 TB target is about a million files, most of them small dedup index files under Config/@cand_file.",
+        "Each database is kept twice (name and name_dup); a _dup copy is read when the main one is unreadable."
+      ],
+      "todo": ["encrypted targets (enable_data_encrypt) are untested", "single-version and cloud targets are untested"]
+    },
+    {
+      "id": "thunderbird-ietng",
+      "category": "backup",
+      "name": "Thunderbird profile copy by ImportExportTools NG",
+      "module": "filecat.backup.thunderbird",
+      "summary_key": "backup",
+      "data_tag": "backup_data",
+      "detection": {
+        "folder_contains_all": ["Backup.log", "ExternalMailFolders"],
+        "description": "A <profile with . as _>-<yyyymmdd>-<hhmm> folder (or a fixed custom name) written by the add-on's profile backup."
+      },
+      "listed_only": ["everything except the files below"],
+      "measured_normally": ["Backup.log", "prefs.js", "compatibility.ini", "times.json"],
+      "metadata_read": {
+        "Backup.log": "backup date and every saved file by its original path (the manifest), copy errors",
+        "compatibility.ini": "Thunderbird version",
+        "prefs.js": "each mail account (mail.server.serverN): name, type, host, folder, message store (mbox or maildir)",
+        "layout": "per account from the listing: mbox folders (a file beside its .msf) and bytes, maildir message files; the host from maildir file names"
+      },
+      "actions": {"default": "list", "measure_flag": "--measure-backups"},
+      "spec": "https://github.com/thunderbird/import-export-tools-ng/blob/master/src/chrome/content/mboximport/autobackup.js",
+      "copy_keys": "tb-profile-backup:<profile>:<backup date>", "machine_keys": "host:<maildir host>, thunderbird-profile:<profile>",
+      "problems": ["files Backup.log saved that are not in the copy", "files in a dated copy the log does not name", "the log's copy errors"],
+      "notes": [
+        "Each run is a full plain copy of the profile, so generations are near duplicates; `filecat dupes` ignores clusters made only of backup data (--include-backups shows them).",
+        "The log has no sizes, checksums or end marker: presence is all that can be checked, and a run cut short looks like a smaller backup.",
+        "The add-on copies one file every 50 ms while Thunderbird runs: about 18 h for 480 000 files, so the copy is not a single point in time.",
+        "With a fixed custom folder name it copies only files changed since the last run, so files the log does not name are expected and not reported.",
+        "One profile can mix stores: each account is mbox (one file per folder, beside its .msf index; subfolders in <folder>.sbd/) or maildir (<folder>/cur/<message>.eml). The profile examined had two mbox accounts and four maildir ones."
+      ],
+      "todo": ["messages inside mbox folders are not counted (that needs reading them: one 'From ' line each)", "zip backups made by the add-on's manual export are not recognised"]
+    },
+    {
+      "id": "veeam",
+      "category": "backup",
+      "name": "Veeam backup job folder (.vbm / .vbk / .vib / .vrb)",
+      "module": "filecat.backup.veeam",
+      "summary_key": "backup",
+      "data_tag": "backup_data",
+      "detection": {
+        "folder_contains_any": ["*.vbm"],
+        "and_any": ["*.vbk", "*.vib", "*.vrb", "*.vlb", "*.vsb"],
+        "or": {"folder_contains_any": ["*<yyyy-mm-dd>T<hhmmss>[_<4 hex>].vbk|vib|vrb"]},
+        "description": "A Veeam Agent (Windows / Linux) or Backup & Replication job folder: the .vbm and one file per restore point. Without a .vbm only Veeam's timestamped file names count, so VMware .vib bundles and dictionary .vrb files are not taken for one."
+      },
+      "listed_only": ["*.vbk", "*.vib", "*.vrb", "*.vlb", "*.vsb"],
+      "measured_normally": ["*.vbm"],
+      "metadata_read": {
+        "<job>.vbm": "job name and ids, where it was written, encryption; every backup file with its time, BackupSize and DataSize; restore points with type, chain link, corrupt / consistent flags; machine name, BIOS UUID, OS and disks"
+      },
+      "actions": {"default": "list", "measure_flag": "--measure-backups",
+                  "verify_flag": "--verify-backups (reads each backup file's header, snapshot slots and metadata banks, ~0.02% of it, and checks their CRC32C and end-of-file; data blocks are not read)"},
+      "spec": "docs/formats/veeam-vbk.md",
+      "copy_keys": "veeam-point:<restore point id> of each point on disk and not corrupt",
+      "machine_keys": "host:<machine>, veeam-object:<BIOS UUID>",
+      "problems": ["backup files the .vbm lists that are missing or of another size", "restore points Veeam marked corrupt, partial increments, increments whose parent is not listed (with the number of later points that depend on a missing or corrupt one)", "backup files in the folder the .vbm does not list", "with --verify-backups: files without a valid snapshot slot, truncated files, metadata banks that fail their checksum"],
+      "notes": [
+        "Veeam does not document the format; the layout was read from Veeam Agent for Windows jobs (storage format 13, .vbm Version 22-5140).",
+        "BackupSize in the .vbm is the backup file's size in bytes; a point that never finished is marked IsCorrupted with BackupSize 0.",
+        "The .vbm keeps the path Veeam wrote to (DirPath, Storage FilePath); files are matched by name, so a moved job folder still checks."
+      ],
+      "todo": ["encrypted backups (EncryptionState != 0) are untested", "Backup & Replication per-machine chains (several .vbm per folder), reverse increments (.vrb) and log backups (.vlb) are untested"]
+    },
+    {
+      "id": "synology-abg",
+      "category": "backup",
+      "name": "Synology Active Backup for Google Workspace task",
+      "module": "filecat.backup.abg",
+      "summary_key": "backup",
+      "data_tag": "backup_data",
+      "detection": {
+        "folder_contains_any": ["@ActiveBackupGSuite-Databases"],
+        "description": "ActiveBackupForGoogleWorkspace/task_<n> on an Active Backup for Business share: one folder per user plus the databases."
+      },
+      "listed_only": ["<user>/Mail/**", "<user>/Calendar/**", "<user>/Contact/**", "**/#SynoVersionRepo/**", "**/#SynoRepo/**",
+                      "@ActiveBackupGSuite-Databases/** except *.sqlite (Lucene search indexes, single-instancing.db LevelDB)"],
+      "measured_normally": ["<user>/MyDrive/** (the latest copy of each Drive file, under its own name)", "@ActiveBackupGSuite-Databases/**/*.sqlite"],
+      "metadata_read": {
+        "task-config.sqlite": "task name, domain, admin, backup policy, retention (named fields only: it also holds an encrypted private key)",
+        "account.sqlite": "every user: id, name, email, status, folder, used bytes per service, enabled services (named fields only: it also holds OAuth tokens)",
+        "service-log.sqlite, <service>-log.sqlite": "runs: count, first and last, each user's latest run per service with its log text",
+        "<user id>/mail.sqlite, calendar-event.sqlite, contact.sqlite": "every item version, checked against the walk's listing"
+      },
+      "actions": {"default": "list", "measure_flag": "--measure-backups",
+                  "verify_flag": "--verify-backups (reads every META and Drive .metadata and checks the size and MD5 of what they name)"},
+      "spec": "docs/formats/synology-abg.md",
+      "copy_keys": "abg-task:<admin id>:<task id>:<task created>", "machine_keys": "google-workspace:<domain>",
+      "problems": ["message, event or contact versions with no folder or no META (or SKEL) fragment", "item folders no database lists",
+                   "MyDrive files with no version in #SynoVersionRepo, or of another size than the latest", "an active user's latest run of an enabled service that failed",
+                   "with --verify-backups: fragments and versions missing or whose size or MD5 differs from their metadata"],
+      "notes": [
+        "Synology does not document the layout; it was read from an ABG task with 50 users (task-config version 13).",
+        "Every message is its own folder of 2-4 small files, so a large mailbox is hundreds of thousands of files; listing them is the whole cost of a default scan.",
+        "Items deleted in Google keep their folders; their rows get an end_time instead of 4294967295.",
+        "A task backs up every few minutes, so items newer than every item the listing found are counted as backed up after the listing, not as missing.",
+        "Calendar event folders are often past MAX_PATH on Windows; a service with missing items that long is listed again with \\\\?\\ paths before they are reported."
+      ],
+      "todo": ["shared drives (team-drive.sqlite) are untested: none in the task examined", "the hash that picks the two <xx>/<yy> bucket folders is unknown",
+               "Active Backup for Microsoft 365 (ActiveBackupForMicrosoft365/task_<n>, @ActiveBackupOffice365-Databases) looks the same and is not handled yet"]
+    },
+    {
+      "id": "windows-backup",
+      "category": "backup",
+      "name": "Windows Backup and Restore file backup",
+      "module": "filecat.backup.windows",
+      "summary_key": "backup",
+      "data_tag": "backup_data",
+      "detection": {"folder_contains_any": ["Backup Set <yyyy-mm-dd hhmmss>"], "description": "A <COMPUTER> folder holding Backup Set folders."},
+      "listed_only": ["Backup Set */Backup Files */Backup files N.zip", "*.wbcat", "*.wbverify"],
+      "measured_normally": ["MediaID.bin", "everything else"],
+      "metadata_read": {"MediaID.bin": "16-byte id of the backup target", "layout": "zips against their per-zip catalogs"},
+      "actions": {"default": "list", "measure_flag": "--measure-backups"},
+      "copy_keys": "winbackup:<machine>:<Backup Files folder>", "machine_keys": "host:<machine>",
+      "problems": ["missing Backup files N.zip", "zip without its Catalogs/Backup files N.wbcat", "Catalogs/GlobalCatalog.wbcat missing"],
+      "notes": ["The .wbcat catalog format is not public; checks come from the layout."]
+    },
+    {
+      "id": "windows-image-backup",
+      "category": "backup",
+      "name": "Windows system image (WindowsImageBackup)",
+      "module": "filecat.backup.windows",
+      "summary_key": "backup",
+      "data_tag": "backup_data",
+      "detection": {"folder_contains_any": ["Backup <yyyy-mm-dd hhmmss>"], "and_any": ["Catalog", "MediaId"], "description": "WindowsImageBackup/<COMPUTER> with Backup folders."},
+      "listed_only": ["Backup */*.vhd", "Backup */*.vhdx"],
+      "measured_normally": ["*_Components.xml", "BackupSpecs.xml", "Catalog/**"],
+      "metadata_read": {"<guid>_Components.xml": "machine name and OS version (UTF-16)", "MediaId": "id of the backup target"},
+      "actions": {"default": "list", "measure_flag": "--measure-backups"},
+      "copy_keys": "wib:<machine>:<Backup folder>", "machine_keys": "host:<machine>",
+      "problems": ["Catalog folder missing", "Backup folder without a .vhd/.vhdx"],
+      "notes": []
+    },
+    {
+      "id": "duplicity",
+      "category": "backup",
+      "name": "duplicity / deja-dup target",
+      "module": "filecat.backup.duplicity",
+      "summary_key": "backup",
+      "data_tag": "backup_data",
+      "detection": {"folder_contains_any": ["duplicity-(full|inc|full-signatures|new-signatures).<time>...(manifest|volN.difftar|sigtar)"], "description": "A folder of duplicity set files."},
+      "listed_only": ["*.difftar*", "*.sigtar*"],
+      "measured_normally": ["*.manifest", "*.manifest.gpg"],
+      "metadata_read": {"*.manifest": "Hostname, Localdir and the volume list (unencrypted manifests only)"},
+      "actions": {"default": "list", "measure_flag": "--measure-backups"},
+      "copy_keys": "set times", "machine_keys": "host name",
+      "problems": ["set without a manifest (did not finish)", "missing signatures", "volume gaps or volumes the manifest lists that are missing", "incremental set that continues no chain"],
+      "notes": ["Encrypted (.gpg) manifests are not read."]
+    }
+  ],
+  "archives": [
+    {
+      "id": "7z",
+      "category": "archive",
+      "status": "implemented",
+      "name": "7-Zip archive",
+      "module": "filecat.probe.sevenzip",
+      "function": "probe_7z",
+      "dispatch": "filecat.probe._probe, step 5b (sevenzip.detect)",
+      "container": "7z",
+      "summary_key": "7z",
+      "mime": ["application/x-7z-compressed"],
+      "globs": ["*.7z", "*.7z.001"],
+      "magic": "offset 0: 37 7A BC AF 27 1C ('7z' BC AF 27 1C), then format version major.minor",
+      "spec": "https://github.com/ip7z/7zip/blob/main/DOC/7zFormat.txt",
+      "reads": "The 32-byte start header, then the header database at 32 + NextHeaderOffset (the end of the file). Never a member's packed bytes.",
+      "metadata_read": {
+        "start header": "version, next-header offset/size/CRC; start and header CRC mismatches are recorded",
+        "encoded header": "inflated when the one coder is Copy, LZMA or LZMA2 (the 7-Zip default); capped at 128 MiB",
+        "files info": "names (UTF-16), empty-stream / empty-file / directory flags, modified times, attributes",
+        "streams info": "folders (solid blocks), coders, packed sizes, per-file unpack sizes and CRC32s"
+      },
+      "member_fields": ["path", "size", "crc32", "method", "folder", "mtime_ns", "is_dir", "encrypted", "role"],
+      "probe_keys": ["probe.7z.{version, folders, packed_size, methods, solid, expected_size, header_encoded, header_encrypted, encrypted}", "probe.entry_count", "probe.uncompressed_size", "probe.members_count / member_roles / entries"],
+      "problems": [
+        "header ends past the end of the file (incomplete download, or a .7z.001 first volume): probe.truncated and an error, no members",
+        "start header or header CRC mismatch: probe.7z.start_header_crc_ok / header_crc_ok = false",
+        "encrypted header: probe.7z.header_encrypted, members not listed",
+        "header coder other than Copy/LZMA/LZMA2: error recorded, members not listed"
+      ],
+      "notes": [
+        "Packed size is per folder, not per file: a solid archive has no per-member compressed size.",
+        "A self-extracting .exe is a PE and is handled by the PE probe, not this one.",
+        "Checked on the 269 MB Cisco-IOU-L2-L3-Collection-v2.7z: one solid LZMA folder, 28 members, header length matches the file size exactly."
+      ]
+    },
+    {
+      "id": "zip",
+      "category": "archive",
+      "status": "implemented",
+      "name": "ZIP archive (and the formats built on it)",
+      "module": "filecat.probe.archive",
+      "function": "probe_zip",
+      "dispatch": "filecat.probe._probe, step 5",
+      "container": "zip",
+      "mime": ["application/zip", "application/java-archive", "application/epub+zip", "application/vnd.android.package-archive", "application/vnd.comicbook+zip", "application/appx", "application/msix", "application/x-modrinth-modpack+zip", "application/x-zip-compressed-fb2"],
+      "globs": ["*.zip", "*.zipx", "*.jar", "*.apk", "*.epub", "*.cbz", "*.appx", "*.msix", "*.mrpack", "*.fb2.zip"],
+      "magic": "offset 0: 50 4B 03 04 ('PK' 03 04)",
+      "spec": "https://pkware.cachefly.net/webdocs/casestudies/APPNOTE.TXT",
+      "reads": "The end-of-central-directory record and the central directory (zipfile.ZipFile on open). Never a local header or member data.",
+      "member_fields": ["path", "size", "csize", "crc32", "method", "offset", "flags", "mtime_ns", "is_dir", "encrypted", "role"],
+      "probe_keys": ["probe.entry_count", "probe.uncompressed_size", "probe.members_count / member_roles / entries"],
+      "problems": [],
+      "notes": [
+        "A first entry named [Content_Types].xml makes it kind=document (Office Open XML); container stays zip.",
+        "Only the local-header magic is sniffed: an empty ZIP (PK 05 06) and a spanned ZIP (PK 07 08) are not detected.",
+        "Times: the 0x5455 extended timestamp when present, otherwise DOS time read as UTC."
+      ]
+    },
+    {
+      "id": "gzip",
+      "category": "archive",
+      "status": "implemented",
+      "name": "gzip (and the XOR-wrapped gzip used by X3 .pck/.dat)",
+      "module": "filecat.probe.archive",
+      "function": "probe_gzip",
+      "dispatch": "filecat.probe._probe, step 6",
+      "container": "gzip, gzip_xored",
+      "mime": ["application/gzip", "application/x-compressed-tar"],
+      "globs": ["*.gz", "*.tgz", "*.tar.gz", "*.svgz"],
+      "magic": "offset 0: 1F 8B; or those two bytes (and the method byte) xor one key byte (gzip_xored)",
+      "spec": "https://www.rfc-editor.org/rfc/rfc1952",
+      "reads": "Inflates up to 4 MiB (GZIP_PROBE_CAP) to classify the content; if it is a tar, streams the tar up to archive_scan_cap, or to the end with --deep-archives.",
+      "member_fields": ["tar members only: see the tar entry"],
+      "probe_keys": ["probe.gzip.{method, flags, mtime, os, original_name, original_size}", "probe.inflate_truncated"],
+      "problems": [],
+      "notes": [
+        "original_size is the gzip ISIZE field: the size modulo 2**32, ambiguous above 4 GiB.",
+        "A gzip that is not a tar lists no members; kind comes from the inflated bytes (text, image, ...)."
+      ]
+    },
+    {
+      "id": "bzip2",
+      "category": "archive",
+      "status": "implemented",
+      "name": "bzip2",
+      "module": "filecat.probe.archive",
+      "function": "probe_bzip2",
+      "dispatch": "filecat.probe._probe, step 5b",
+      "container": "bzip2",
+      "mime": ["application/x-bzip2", "application/x-bzip2-compressed-tar"],
+      "globs": ["*.bz2", "*.tar.bz2", "*.tbz2"],
+      "magic": "offset 0: 'BZh', a block-size digit 1-9, then 31 41 59 26 53 59",
+      "spec": "https://sourceware.org/bzip2/ (libbzip2 source; there is no formal specification)",
+      "reads": "As gzip: classify the first 4 MiB inflated, list an embedded tar.",
+      "member_fields": ["tar members only: see the tar entry"],
+      "probe_keys": [],
+      "problems": [],
+      "notes": [
+        "bzip2 carries no uncompressed size, so none is reported without decompressing the whole stream.",
+        "The old bzip1 format (magic BZ0) is not recognised."
+      ]
+    },
+    {
+      "id": "xz",
+      "category": "archive",
+      "status": "implemented",
+      "name": "xz",
+      "module": "filecat.probe.archive",
+      "function": "probe_xz",
+      "dispatch": "filecat.probe._probe, step 5b",
+      "container": "xz",
+      "mime": ["application/x-xz", "application/x-xz-compressed-tar"],
+      "globs": ["*.xz", "*.tar.xz", "*.txz"],
+      "magic": "offset 0: FD 37 7A 58 5A 00",
+      "spec": "https://tukaani.org/xz/xz-file-format.txt",
+      "reads": "The stream footer and index for sizes; then as gzip for classification and an embedded tar.",
+      "member_fields": ["tar members only: see the tar entry"],
+      "probe_keys": ["probe.xz.{uncompressed_size, block_count}"],
+      "problems": [],
+      "notes": [
+        "The size comes from the index without decompressing anything.",
+        "A .raw-disk-image.xz / .img.xz is not unpacked to look at the disk inside."
+      ]
+    },
+    {
+      "id": "tar",
+      "category": "archive",
+      "status": "implemented",
+      "name": "tar (ustar, GNU, PAX, old V7)",
+      "module": "filecat.probe.tarball",
+      "function": "probe_tar",
+      "dispatch": "filecat.probe._probe, step 5b; walk() is also used for tars inside gzip/bzip2/xz",
+      "container": "plain",
+      "mime": ["application/x-tar", "application/x-ustar"],
+      "globs": ["*.tar", "*.gtar", "*.ustar", "*.gem"],
+      "magic": "offset 257: 'ustar' NUL or 'ustar  ' NUL; V7 tar has no magic and is accepted only when the header checksum validates",
+      "spec": "https://pubs.opengroup.org/onlinepubs/9699919799/utilities/pax.html",
+      "reads": "512-byte headers, seeking past member data. GNU long name/link (L, K), PAX extended headers (x, g) and base-256 sizes are handled.",
+      "member_fields": ["path", "size", "mtime_ns", "mode", "type", "offset", "link_target", "role"],
+      "probe_keys": ["probe.format = tar", "probe.members_count / member_roles / entries", "probe.scan_stopped_at (a compressed tar stopped at the cap)"],
+      "problems": [],
+      "notes": [
+        "Compressed tars are listed for gzip, bzip2 and xz only; zstd, lzma, lz4, lzip, lzop, brotli and .Z tars are identified by name but not unpacked.",
+        "docs/TODO.md: an .ova is a tar whose first member is an .ovf; not yet read."
+      ]
+    },
+    {
+      "id": "mpq",
+      "category": "archive",
+      "status": "implemented",
+      "name": "MPQ (Blizzard MoPaQ)",
+      "module": "filecat.probe.mpq",
+      "function": "probe_mpq",
+      "dispatch": "filecat.probe._probe, step 5b",
+      "container": "unknown",
+      "mime": ["application/x-mpq", "application/x-w3x", "application/x-w3m", "application/x-sc2map"],
+      "globs": ["*.mpq", "*.w3x", "*.w3m", "*.sc2map"],
+      "magic": "offset 0: 'MPQ' 1A (archive header) or 'MPQ' 1B (user-data header that points at the archive header)",
+      "spec": "http://www.zezula.net/en/mpq/mpqformat.html",
+      "reads": "The header (v1-v4), the encrypted hash and block tables, and the (listfile) member only.",
+      "member_fields": ["path", "size", "csize", "offset", "flags", "method", "role"],
+      "probe_keys": ["probe.format = mpq", "probe.mpq.{format_version, sector_size, archive_size, hash_table_entries, block_table_entries, unnamed_blocks, listfile}"],
+      "problems": ["no (listfile): members are listed as <block N>, names unknown", "(listfile) names that are not in the hash table are listed with an error"],
+      "notes": ["Blocks the (listfile) does not name are counted in probe.mpq.unnamed_blocks."]
+    },
+    {
+      "id": "godot-pck",
+      "category": "archive",
+      "status": "implemented",
+      "name": "Godot resource pack (.pck)",
+      "module": "filecat.probe.pck",
+      "function": "probe_godot",
+      "dispatch": "filecat.probe._probe, step 5b",
+      "container": "unknown",
+      "mime": ["application/x-pck"],
+      "globs": ["*.pck"],
+      "magic": "offset 0: 'GDPC'",
+      "spec": "https://github.com/godotengine/godot/blob/master/core/io/file_access_pack.cpp (no separate specification)",
+      "reads": "The pack directory only.",
+      "member_fields": ["path", "size", "offset", "flags", "role"],
+      "probe_keys": ["probe.pck_format = godot", "probe.format = godot-pck", "probe.godot"],
+      "problems": [],
+      "notes": ["Several unrelated formats use .pck (X3 gzip packs, Python pickles); the bytes decide, see probe/pck.py."]
+    },
+    {
+      "id": "disc-and-disk-images",
+      "category": "archive",
+      "status": "implemented",
+      "name": "ISO 9660 / UDF discs, SquashFS, and virtual or raw disk images",
+      "module": "filecat.probe.disk",
+      "function": "probe_disk",
+      "dispatch": "filecat.probe._probe, step 4b",
+      "container": "plain",
+      "mime": ["application/x-iso9660-image", "application/vnd.squashfs"],
+      "globs": ["*.iso", "*.img", "*.ima", "*.dd", "*.raw", "*.vhd", "*.vhdx", "*.vmdk", "*.vdi", "*.qcow", "*.qcow2", "*.hdd", "*.udf", "*.squashfs", "*.sfs"],
+      "magic": "'QFI' FB (qcow2), 'conectix' (VHD), 'vhdxfile' (VHDX), 'KDMV' (VMDK), 0xBEDA107F (VDI), plus ISO 9660 / UDF volume descriptors and 'hsqs' (SquashFS)",
+      "spec": "https://ecma-international.org/publications-and-standards/standards/ecma-119/ (ISO 9660); https://ecma-international.org/publications-and-standards/standards/ecma-167/ (ECMA-167, the base of UDF; OSTA's UDF 2.60 spec is osta.org/specs); https://dr-emann.github.io/squashfs/ (SquashFS)",
+      "reads": "Headers, a few sectors and mapping tables with targeted seeks; partitions become member rows (role volume) and ISO files become member rows by name.",
+      "member_fields": ["path", "size", "role"],
+      "probe_keys": ["see probe/disk.py and file-catalog-requirements.md, Probe order step 4b"],
+      "problems": [],
+      "notes": ["Listed here because freedesktop files SquashFS and compressed ISOs with the archives; the detail lives in probe/disk.py."]
+    }
+  ],
+  "archives_identified_only": [
+    {"id": "rar", "name": "RAR", "mime": "application/vnd.rar", "globs": ["*.rar", "*.cbr"], "magic": "offset 0: 'Rar!'", "spec": "https://www.rarlab.com/technote.htm", "notes": "Kind stays unknown (name and MIME only). RAR4 and RAR5 differ; multi-volume sets are *.partN.rar or *.r00. Header-encrypted archives hide the file names."},
+    {"id": "cab", "name": "Microsoft Cabinet", "mime": "application/vnd.ms-cab-compressed", "globs": ["*.cab", "*.msu", "*.themepack"], "magic": "offset 0: 'MSCF' 00 00 00 00", "spec": "https://learn.microsoft.com/en-us/windows/win32/msi/cabinet-files", "notes": "Windows Update (.msu) and installers. The CFFOLDER/CFFILE index at the front is cheap to read: a good next candidate."},
+    {"id": "msi", "name": "Windows Installer package / patch (OLE compound)", "mime": "application/x-msi", "globs": ["*.msi", "*.msp"], "magic": "offset 0: D0 CF 11 E0 A1 B1 1A E1 (OLE); the class id in the directory tells msi from other OLE files", "spec": "https://learn.microsoft.com/en-us/openspecs/windows_protocols/ms-cfb/", "notes": "Not an archive structure to list; product name and version are in the SummaryInformation stream."},
+    {"id": "wim", "name": "Windows Imaging (WIM / SWM)", "mime": "application/x-ms-wim", "globs": ["*.wim", "*.swm"], "magic": "offset 0: 'MSWIM' 00 00 00", "spec": "Microsoft 'Windows Imaging File Format (WIM)' specification", "notes": "Install media and deployment images. An XML block names the images, editions and sizes; one read would do."},
+    {"id": "zstd", "name": "Zstandard", "mime": "application/zstd", "globs": ["*.zst", "*.tar.zst", "*.tzst"], "magic": "offset 0: 28 B5 2F FD", "spec": "https://www.rfc-editor.org/rfc/rfc8878", "notes": "The frame header can carry the content size. A .tar.zst is not unpacked (Python has no zstd before 3.14). Used by pacman packages and many backup tools."},
+    {"id": "lz4", "name": "LZ4 frame", "mime": "application/x-lz4", "globs": ["*.lz4", "*.tar.lz4"], "magic": "offset 0: 04 22 4D 18 (legacy 02 21 4C 18)", "spec": "https://github.com/lz4/lz4/blob/dev/doc/lz4_Frame_format.md", "notes": "Content size is optional in the frame header."},
+    {"id": "lzma-alone", "name": "LZMA (.lzma, LZMA_Alone)", "mime": "application/x-lzma", "globs": ["*.lzma", "*.tar.lzma", "*.tlz"], "magic": "offset 0: 5D, then an 8-byte size field (often all FF)", "spec": "https://github.com/jljusten/LZMA-SDK/blob/master/DOC/lzma-specification.txt", "notes": "The magic is a single byte, so the name decides. Python's lzma.FORMAT_ALONE can read it."},
+    {"id": "lzip", "name": "lzip", "mime": "application/x-lzip", "globs": ["*.lz", "*.tar.lz"], "magic": "offset 0: 'LZIP'", "spec": "https://www.nongnu.org/lzip/manual/lzip_manual.html", "notes": "The trailer carries the data size and CRC."},
+    {"id": "compress-z", "name": "UNIX compress (.Z)", "mime": "application/x-compress", "globs": ["*.Z", "*.tar.Z", "*.taz"], "magic": "offset 0: 1F 9D", "spec": "none maintained; ncompress source", "notes": "Legacy; seen in old software mirrors."},
+    {"id": "brotli", "name": "Brotli", "mime": "application/x-brotli", "globs": ["*.br", "*.tar.br"], "magic": "none reliable (freedesktop lists CE B2 CF 81 for the framed form)", "spec": "https://www.rfc-editor.org/rfc/rfc7932", "notes": "Raw Brotli has no magic, so only the name identifies it."},
+    {"id": "bzip3", "name": "bzip3", "mime": "application/vnd.bzip3", "globs": ["*.bz3", "*.tar.bz3"], "magic": "offset 0: 'BZ3v1'", "spec": "https://github.com/kspalaiologos/bzip3", "notes": "Newer than bzip2 and unrelated to it."},
+    {"id": "lzop", "name": "lzop", "mime": "application/x-lzop", "globs": ["*.lzo", "*.tar.lzo"], "magic": "offset 0: 89 4C 5A 4F 00 0D 0A 1A 0A", "spec": "lzop source, doc/lzop.txt (https://www.lzop.org/)", "notes": "Fast compressor used in some backup scripts."},
+    {"id": "cpio", "name": "cpio (odc, newc, newc+CRC, binary)", "mime": "application/x-cpio", "globs": ["*.cpio", "*.sv4cpio", "*.sv4crc", "*.bcpio", "*.cpio.gz"], "magic": "offset 0: '070707' (odc), '070701' (newc), '070702' (newc+CRC)", "spec": "https://man.freebsd.org/cgi/man.cgi?query=cpio&sektion=5", "notes": "Linux initramfs images and RPM payloads are cpio; a good candidate beside tar since the walk has the same shape."},
+    {"id": "ar", "name": "ar archive (static libraries, Debian packages)", "mime": "application/x-archive", "globs": ["*.a", "*.ar", "*.lib", "*.deb", "*.udeb"], "magic": "offset 0: '!<arch>' 0A", "spec": "https://manpages.debian.org/deb.5 (Debian binary package)", "notes": "A .deb is an ar holding debian-binary, control.tar.* and data.tar.*."},
+    {"id": "rpm", "name": "RPM package", "mime": "application/x-rpm", "globs": ["*.rpm", "*.src.rpm", "*.spm"], "magic": "offset 0: ED AB EE DB", "spec": "https://rpm.org/docs/latest/manual/format_v4.html", "notes": "The header section carries name, version and architecture; the payload is a compressed cpio."},
+    {"id": "xar", "name": "XAR (eXtensible ARchive, macOS .pkg)", "mime": "application/x-xar", "globs": ["*.xar", "*.pkg"], "magic": "offset 0: 'xar!'", "spec": "https://github.com/mackyle/xar/wiki/xarformat", "notes": "A header plus a zlib-compressed XML table of contents that lists every member, so it can be listed cheaply."},
+    {"id": "arj", "name": "ARJ", "mime": "application/x-arj", "globs": ["*.arj"], "magic": "offset 0: 60 EA", "spec": "ARJ technical information file (ARJ source distribution)", "notes": "DOS-era; names sit in a chain of local headers."},
+    {"id": "lha", "name": "LHA / LZH", "mime": "application/x-lha", "globs": ["*.lha", "*.lzh", "*.lhz"], "magic": "offset 2: '-lh0-' .. '-lh7-' (method id)", "spec": "https://github.com/jca02266/lha (source)", "notes": "Common in Japanese software and Amiga collections."},
+    {"id": "ace", "name": "ACE", "mime": "application/x-ace", "globs": ["*.ace"], "magic": "offset 7: '**ACE**'", "spec": "none public; unace source", "notes": "Proprietary; extraction tools are scarce and old ones had unsafe path handling."},
+    {"id": "alz", "name": "ALZip", "mime": "application/x-alz", "globs": ["*.alz"], "magic": "offset 0: 'ALZ' 01", "spec": "none public", "notes": "Korean ALZip format."},
+    {"id": "zoo", "name": "Zoo", "mime": "application/x-zoo", "globs": ["*.zoo"], "magic": "offset 20: DC A7 C4 FD", "spec": "none public; zoo source", "notes": "DOS/Unix era."},
+    {"id": "arc", "name": "ARC (SEA)", "mime": "application/x-arc", "globs": [], "magic": "offset 0: 1A 08 / 1A 09 (method byte)", "spec": "none public", "notes": "freedesktop lists no extension; the magic is weak."},
+    {"id": "stuffit", "name": "StuffIt / StuffIt X", "mime": "application/x-stuffit", "globs": ["*.sit", "*.sitx"], "magic": "offset 0: 'StuffIt ' or 'SIT!' (classic); 'StuffIt!' (X)", "spec": "none public", "notes": "Classic Mac OS archives."},
+    {"id": "zpaq", "name": "ZPAQ journaling archive", "mime": "application/x-zpaq", "globs": ["*.zpaq"], "magic": "offset 0: '7kSt'", "spec": "http://mattmahoney.net/dc/zpaq.html", "notes": "Backup-style: each update appends a version, so one file holds a history."},
+    {"id": "dar", "name": "DAR (Disk ARchive)", "mime": "application/x-dar", "globs": ["*.dar"], "magic": "offset 0: '123' (slice header)", "spec": "http://dar.linux.free.fr/doc/", "notes": "Backup tool; archives are split into numbered slices <name>.<N>.dar. Belongs with the backup formats if it is added."},
+    {"id": "qpress", "name": "qpress", "mime": "application/x-qpress", "globs": ["*.qp"], "magic": "offset 0: 'qpress10'", "spec": "http://www.quicklz.com/ (QuickLZ)", "notes": "What xtrabackup --compress writes; see the planned xtrabackup entry."},
+    {"id": "rzip-lrzip", "name": "rzip / lrzip", "mime": "application/x-lrzip", "globs": ["*.rz", "*.lrz", "*.tar.rz", "*.tar.lrz"], "magic": "offset 0: 'RZIP' or 'LRZI'", "spec": "https://github.com/ckolivas/lrzip", "notes": "Long-range-redundancy compressors for very large files."},
+    {"id": "par2", "name": "Parchive (PAR2)", "mime": "application/x-par2", "globs": ["*.par2"], "magic": "offset 0: 'PAR2' 00 'PKT'", "spec": "https://parchive.github.io/ (links the PAR2 specification)", "notes": "Repair data for another set of files, not an archive of them; the set's names and sizes are in the main packet. Usually sits beside a split archive."},
+    {"id": "git-bundle", "name": "Git bundle", "mime": "application/x-git-bundle", "globs": ["*.bundle", "*.gitbundle", "*.bdl"], "magic": "offset 0: '# v2 git bundle' or '# v3 git bundle' LF", "spec": "https://git-scm.com/docs/gitformat-bundle", "notes": "A repository backup: a text header lists prerequisites and refs, then a pack follows. Cheap to read."},
+    {"id": "flatpak-bundle", "name": "Flatpak bundle", "mime": "application/vnd.flatpak", "globs": ["*.flatpak", "*.xdgapp"], "magic": "offset 0: 'flatpak' 00 01 00 89 E5", "spec": "https://docs.flatpak.org/en/latest/flatpak-command-reference.html#flatpak-build-bundle", "notes": "An OSTree commit wrapped as a single file."},
+    {"id": "alpine-apk", "name": "Alpine Package Keeper package", "mime": "application/x-alpine-package-keeper-package", "globs": ["*.apk"], "magic": "gzip-compressed tar segments (signature, control, data)", "spec": "https://wiki.alpinelinux.org/wiki/Apk_spec", "notes": "Shares *.apk with Android packages; the Android one is a ZIP, so the bytes tell them apart."},
+    {"id": "doom-wad", "name": "Doom WAD", "mime": "application/x-doom-wad", "globs": ["*.wad"], "magic": "offset 0: 'IWAD' or 'PWAD'", "spec": "https://doomwiki.org/wiki/WAD", "notes": "Game asset container with a flat lump directory; the same family as MPQ and PCK."},
+    {"id": "partial-download", "name": "Partially downloaded file", "mime": "application/x-partial-download", "globs": ["*.part", "*.crdownload", "*.wkdownload"], "magic": "none", "spec": "none", "notes": "Not an archive: browser temp files. Worth flagging in a catalog because the real file is incomplete."}
+  ],
+  "planned": [
+    {"id": "pg_basebackup", "category": "backup", "detection": "backup_label + backup_manifest (JSON)", "notes": "server version, start/stop LSN and time, file list with checksums"},
+    {"id": "pg_dump", "category": "backup", "detection": "PGDMP magic (custom format) or toc.dat (directory format)", "notes": "server and dump version, database, object list from the TOC"},
+    {"id": "mysqldump", "category": "backup", "detection": ".sql starting with '-- MySQL dump' / '-- MariaDB dump'", "notes": "server version, host, database from the header"},
+    {"id": "xtrabackup", "category": "backup", "detection": "xtrabackup_info + xtrabackup_checkpoints (also mariabackup)", "notes": "server version, LSNs, full or incremental"},
+    {"id": "mongodump", "category": "backup", "detection": "<db>/<coll>.bson with .metadata.json; prelude.json (100.x tools)", "notes": "namespaces, indexes, server version from prelude.json"},
+    {"id": "mssql-backup", "category": "backup", "detection": ".bak / .trn starting with an MTF 'TAPE' descriptor block", "notes": "server version, database, backup type, LSNs and dates, as RESTORE HEADERONLY shows them"}
+  ]
+}

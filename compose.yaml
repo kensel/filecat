@@ -1,0 +1,64 @@
+# Throwaway servers for the backend and SMB tests. Test-only credentials.
+#
+#   docker compose up -d            # all of them
+#   docker compose up -d postgres   # or one
+#   cp .env.example .env            # point the tests at them
+#   uv run pytest
+#
+# CI (.github/workflows/ci.yml) starts the same images as service containers.
+
+services:
+  postgres:
+    image: postgres:17
+    environment:
+      POSTGRES_USER: filecat
+      POSTGRES_PASSWORD: filecat
+      POSTGRES_DB: filecat
+    ports: ["5432:5432"]
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U filecat"]
+      interval: 5s
+      retries: 20
+
+  mysql:
+    image: mysql:8.4
+    environment:
+      MYSQL_ROOT_PASSWORD: filecat
+      MYSQL_DATABASE: filecat
+      MYSQL_USER: filecat
+      MYSQL_PASSWORD: filecat
+    ports: ["3306:3306"]
+    healthcheck:
+      test: ["CMD", "mysqladmin", "ping", "-h", "127.0.0.1", "-pfilecat"]
+      interval: 5s
+      retries: 30
+
+  mssql:
+    image: mcr.microsoft.com/mssql/server:2022-latest
+    environment:
+      ACCEPT_EULA: "Y"
+      MSSQL_SA_PASSWORD: "Filecat-Test-1"
+    ports: ["1433:1433"]
+    healthcheck:
+      test: ["CMD-SHELL", "/opt/mssql-tools18/bin/sqlcmd -C -S localhost -U sa -P Filecat-Test-1 -Q 'SELECT 1' || exit 1"]
+      interval: 10s
+      retries: 20
+
+  mongodb:
+    image: mongo:8.0
+    ports: ["27017:27017"]
+    healthcheck:
+      test: ["CMD", "mongosh", "--quiet", "--eval", "db.adminCommand('ping')"]
+      interval: 5s
+      retries: 20
+
+  # One read-write share, \\localhost\Data (user samba / password filecat).
+  # On Linux: sudo mount -t cifs //127.0.0.1/Data /mnt/filecat-smb \
+  #   -o username=samba,password=filecat,uid=$(id -u),gid=$(id -g)
+  samba:
+    image: dockurr/samba:latest
+    environment:
+      NAME: Data
+      USER: samba
+      PASS: filecat
+    ports: ["445:445"]

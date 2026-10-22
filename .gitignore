@@ -218,3 +218,14 @@ __marimo__/
 
 # Streamlit
 .streamlit/secrets.toml
+
+# filecat
+catalog.*
+*.resume.json
+/signatures/*
+!/signatures/README.md
+tests/_fixtures/
+.claude/worktrees/
+/catalogs/
+/filecat.toml
+/sanitize-aliases.local.toml

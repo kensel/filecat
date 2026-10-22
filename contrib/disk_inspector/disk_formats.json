@@ -1,0 +1,133 @@
+{
+  "version": "2.1",
+  "volume_content_scan": {
+    "description": "When a partition/volume start falls inside the first 64 MiB, a lightweight string/UTF-16 scan looks for OS and role indicators plus interesting paths.",
+    "windows_indicators": ["Windows\\System32", "Program Files", "Users\\", "bootmgr", "pagefile.sys"],
+    "linux_indicators": ["/etc/", "/home/", "/usr/", "/var/", "/boot/", "lost+found"],
+    "user_extraction": ["Users\\<name>", "/home/<name>"],
+    "docker_paths": ["/var/lib/docker", "/var/lib/docker/overlay2", "/var/lib/docker/containers", "/var/lib/docker/volumes", "ProgramData\\Docker"],
+    "notes": "Heuristic only. Full directory listings require proper filesystem parsers and, for container formats, virtual-to-physical mapping. Encrypted volumes are skipped. Results appear under volume_summaries, os_hint, and volume_role."
+  },
+  "formats": [
+    {
+      "extension": ["raw", "img", "dd", "bin"],
+      "name": "Raw Disk Image",
+      "description": "Unstructured byte-for-byte copy of a disk, partition, or single volume. No container header.",
+      "identification": "No known container magic. May contain MBR (0x55AA at 510), GPT ('EFI PART' at 512), filesystem signatures at offset 0, LVM label at offset 512, or encryption headers.",
+      "notes": "v2.0 adds direct filesystem detection for single-partition images and LVM-on-raw detection. Sparse only if host FS supports holes.",
+      "sparse": "Depends on host FS; typically thick.",
+      "max_size": "File size",
+      "current_size": "File size"
+    },
+    {
+      "extension": ["qcow2", "qcow"],
+      "name": "QEMU Copy-On-Write v2/v3",
+      "description": "Sparse virtual disk format used by QEMU/KVM.",
+      "identification": "Magic 'QFI\\xfb' at offset 0. Virtual size (BE uint64) at offset 24.",
+      "notes": "Always sparse. Guest content requires cluster mapping. First 64MB contains header and tables.",
+      "sparse": true,
+      "max_size": "Virtual size from header",
+      "current_size": "Physical file size"
+    },
+    {
+      "extension": ["vhd"],
+      "name": "Virtual Hard Disk (VHD)",
+      "description": "Microsoft Virtual PC / Hyper-V legacy format. Fixed or dynamic.",
+      "identification": "Dynamic: 'conectix' at start, size at offset 40. Fixed: footer at end.",
+      "notes": "Dynamic = sparse. Fixed footer may be missed if only reading start of large files.",
+      "sparse": "Dynamic yes, fixed no",
+      "max_size": "Disk size from header/footer",
+      "current_size": "File size"
+    },
+    {
+      "extension": ["vhdx"],
+      "name": "Virtual Hard Disk v2 (VHDX)",
+      "description": "Modern Microsoft Hyper-V format.",
+      "identification": "Magic 'vhdxfile' at offset 0. Size in metadata region.",
+      "notes": "Typically sparse. Complex layout.",
+      "sparse": true,
+      "max_size": "Virtual Disk Size metadata",
+      "current_size": "File size"
+    },
+    {
+      "extension": ["vdi"],
+      "name": "VirtualBox Disk Image",
+      "description": "Oracle VirtualBox native format.",
+      "identification": "Magic 0xBEDA107F at offset 0x40. Size at offset 0x170. Type at ~0x4C.",
+      "notes": "Type 1 = dynamic (sparse), 2 = fixed.",
+      "sparse": "If type==1",
+      "max_size": "Disk size from header",
+      "current_size": "File size"
+    },
+    {
+      "extension": ["vmdk"],
+      "name": "VMware Virtual Machine Disk",
+      "description": "VMware format (ESXi, Workstation, etc.).",
+      "identification": "'KDMV' sparse header or '# Disk DescriptorFile' text.",
+      "notes": "Often sparse. Capacity in header or descriptor.",
+      "sparse": "Commonly yes",
+      "max_size": "Capacity * 512",
+      "current_size": "File size"
+    },
+    {
+      "extension": ["iso"],
+      "name": "ISO 9660 / UDF",
+      "description": "Optical disc image.",
+      "identification": "'CD001' or NSR* at offset 0x8000.",
+      "notes": "Volume size from PVD. Root directory records available for file listing.",
+      "sparse": false,
+      "max_size": "Volume space size * block size",
+      "current_size": "File size"
+    }
+  ],
+  "filesystem_signatures": [
+    {"name": "NTFS", "offset": 3, "magic": "NTFS    "},
+    {"name": "exFAT", "offset": 3, "magic": "EXFAT   "},
+    {"name": "FAT12/16", "offset": 0x36, "magic": "FAT12 / FAT16"},
+    {"name": "FAT32", "offset": 0x52, "magic": "FAT32   "},
+    {"name": "ext2/3/4", "offset": 0x438, "magic": "0xEF53 (LE)"},
+    {"name": "XFS", "offset": 0, "magic": "XFSB"},
+    {"name": "Btrfs", "offset": 0x10040, "magic": "_BHRfS_M"},
+    {"name": "HFS+", "offset": 1024, "magic": "H+ / HX"},
+    {"name": "APFS", "offset": 32, "magic": "NXSB"},
+    {"name": "Linux swap", "offset": 0xFF6, "magic": "SWAPSPACE2"},
+    {"name": "ReFS", "offset": "early", "magic": "ReFS"}
+  ],
+  "encryption_signatures": [
+    {
+      "name": "BitLocker (fixed)",
+      "offset": 3,
+      "magic": "-FVE-FS-",
+      "device_id": "GUID at offset 160 (bytes_le). Common identifier 4967D63B-2E29-4AD8-8399-F6A339E3D001",
+      "notes": "Volume header also contains metadata block offsets."
+    },
+    {
+      "name": "BitLocker To Go",
+      "offset": "variable (often 424)",
+      "magic": "BitLocker identifier GUID (3B D6 67 49 29 2E D8 4A 83 99 F6 A3 39 E3 D0 01)",
+      "device_id": "Same GUID family",
+      "notes": "Discovery volume may look like FAT/exFAT; scan first 512 bytes for the GUID."
+    },
+    {
+      "name": "LUKS",
+      "offset": 0,
+      "magic": "LUKS\\xba\\xbe",
+      "notes": "Version at offset 6 (BE uint16). LUKS1 has UUID at offset 168; LUKS2 has JSON metadata."
+    }
+  ],
+  "lvm": {
+    "name": "LVM2 Physical Volume",
+    "signature": "LABELONE",
+    "typical_offset": 512,
+    "type_indicator": "LVM2 001 at +24",
+    "notes": "Can appear on a raw whole-disk image (no partition table) or inside a partition. Label may be in any of the first 4 sectors. Contains PV UUID."
+  },
+  "general_notes": [
+    "v2.0 adds filesystem, encryption (BitLocker Device ID), and LVM detection.",
+    "Single-partition raw images are detected by scanning offset 0 for FS/encryption signatures.",
+    "When a partition table exists, filesystem signatures are also checked at each partition start (if within the 64 MiB window).",
+    "Container formats still require virtual-to-physical mapping for guest content analysis.",
+    "BitLocker Device ID is the volume GUID stored in the clear-text header.",
+    "Always prefer content signatures over file extensions."
+  ]
+}

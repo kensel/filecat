@@ -1,0 +1,22 @@
+[package]
+name = "filecat-agent"
+version = "0.1.0"
+edition = "2021"
+description = "Static root-level local filesystem & Synology block topology scanner for filecat"
+
+[dependencies]
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+sha2 = "0.10"
+base64 = "0.22"
+rustls = "0.23"
+rustls-pemfile = "2.1"
+rcgen = "0.13"
+libc = "0.2"
+glob = "0.3"
+
+# Build commands for Synology NAS targets using cargo-zigbuild:
+# NAS-MAIN (x86_64 DSM 7.x):
+#   cargo zigbuild --release --target x86_64-unknown-linux-musl
+# NAS-OLD (DS2015xs Annapurna Labs Alpine AL514 ARMv7 DSM 7.1.1):
+#   cargo zigbuild --release --target armv7-unknown-linux-musleabihf

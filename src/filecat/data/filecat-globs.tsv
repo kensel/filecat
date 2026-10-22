@@ -1,0 +1,124 @@
+# filecat-globs.tsv - local "well-known extensions" table layered on the
+# vendored freedesktop shared-mime-info globs (data/freedesktop.org.xml).
+#
+# Columns (TAB separated, UTF-8; blank lines and lines starting with # are ignored):
+#   pattern      glob such as *.mpq (case-insensitive; same matching rules as freedesktop globs)
+#   mime         MIME type. A real registered type when one exists, otherwise
+#                application/x-<name> (or <major>/x-<name> for text/audio/video).
+#                A type already in the freedesktop DB is reused as-is (its description wins).
+#   description  short, factual. When an extension is used by several unrelated formats the
+#                description says so and lists them; the byte probe decides, not this table.
+#   weight       0-100. Freedesktop's default is 50. A local weight HIGHER than the freedesktop
+#                match overrides it (the freedesktop type stays listed in
+#                probe.mime_glob_alternatives); EQUAL weight makes both candidates and magic or
+#                size settles it; LOWER is ignored for that name.
+#   note         free text for maintainers (not stored in the catalog)
+#   sub-class-of optional 6th column: comma separated parent MIME types. Default parent is
+#                application/octet-stream (text/* types are implicitly text/plain).
+#
+# Malformed lines are skipped and reported once per scan as a scan error (stage mime_local).
+# Weights used here: 50 = fills a gap or ties with freedesktop, 60 = deliberately overrides it.
+#
+# pattern	mime	description	weight	note	sub-class-of
+# --- Egosoft X-series (X3) game formats
+*.cat	application/x-x3-catalog	Egosoft X3 catalogue (index of the matching .dat payload)	60	freedesktop maps .cat to the Windows security catalog; X3 .cat files are XOR-obfuscated text indexes (see spec, X3 pack)	
+*.dat	application/x-dat	Data file (X3 catalogue payload, game and application data, others)	50	extremely generic; paired with a .cat it is an X3 payload (XOR 0x33); the byte probe decides	
+*.pck	application/x-pck	Package file (X3 compressed data, Godot pack, Python pickle, others)	50	several unrelated formats share .pck; do not assume one	
+*.bob	application/x-bob	Egosoft X-series 3D model (BOB) file	50	X3 BOB1 meshes; the probe verifies the BOB1 magic	
+*.bod	application/x-bod	Egosoft X-series model data (BOD) file	50	seen next to .bob in X3 installs	
+*.pbd	application/x-pbd	Egosoft X-series scene/data (PBD) file	50	X3 .pbd files seen as scene text (VER: grammar) or compressed; also used by other software	
+# --- Game archives and assets
+*.mpq	application/x-mpq	MPQ archive (Blizzard game data)	50	StarCraft, Diablo II, Warcraft III, WoW (older)	
+*.pak	application/x-pak-package	PAK archive (Quake and Half-Life, Unreal Engine, other games)	60	overrides freedesktop's Quake-only application/x-pak; several unrelated formats	
+*.vpk	application/x-vpk	Valve package (VPK) archive	50	Source engine games	
+*.wad	application/x-wad-archive	WAD archive (Doom, Quake, Half-Life, Wii channel, others)	50	ties with freedesktop's Doom WAD; magic settles it	
+*.bsa	application/x-bsa	Bethesda Softworks archive (BSA)	50		
+*.ba2	application/x-ba2	BA2 file (Bethesda Archive 2, also Windows Media Center log)	50	Fallout 4/Starfield archive; also ehRecvr.ba2 under Windows Media Center logs	
+*.esp	application/x-esp	Elder Scrolls/Fallout plugin (ESP)	50	Bethesda game plugin	
+*.esm	application/x-esm	Elder Scrolls/Fallout master file (ESM)	50	Bethesda game master data	
+*.blp	application/x-blp	Blizzard texture (BLP)	60	freedesktop maps .blp to text/x-blueprint (GNOME Blueprint); on game trees this is usually the Blizzard texture format	
+*.m2	application/x-wow-m2	World of Warcraft model (M2)	50		
+*.wmo	application/x-wow-wmo	World of Warcraft world map object (WMO)	50		
+*.w3x	application/x-w3x	Warcraft III map (expansion, W3X)	50	an MPQ archive	application/x-mpq
+*.w3m	application/x-w3m	Warcraft III map (W3M)	50	an MPQ archive	application/x-mpq
+*.w3z	application/x-w3z	Warcraft III campaign/saved game (W3Z)	50		
+*.sc2map	application/x-sc2map	StarCraft II map	50	an MPQ archive	application/x-mpq
+*.unitypackage	application/x-unitypackage	Unity asset package	50	gzip-compressed tar	application/gzip
+*.assets	application/x-assets	Assets file (Unity serialized assets, others)	50		
+*.resource	application/x-resource	Resource file (Unity streamed data, others)	50		
+*.big	application/x-big-archive	BIG archive (EA/Westwood and Relic game data)	50	several unrelated game archives share .big	
+*.scd	application/x-scd	Supreme Commander game archive (SCD)	50	ZIP-based	application/zip
+*.fsb	application/x-fsb	FMOD sound bank (FSB)	50		
+*.usm	application/x-usm	CRI USM video	50	CRIWARE game video	
+*.mve	application/x-mve	Interplay MVE video	50		
+*.datx	application/x-datx	Standing Stone Games data archive (DATX)	50	seen in The Lord of the Rings Online installs	
+*.nw	application/x-nw-package	NW.js application package	50	ZIP archive (package.nw)	application/zip
+*.wld	application/x-wld	World file (Terraria, others)	50	several games use .wld	
+*.mcworld	application/x-mcworld	Minecraft Bedrock world	50	ZIP archive	application/zip
+*.rxdata	application/x-rxdata	RPG Maker XP data (Ruby Marshal)	50		
+*.nsp	application/x-nsp	Nintendo Switch package (NSP)	50		
+# --- Disk images and virtual machines
+*.vhd	application/x-vhd-disk	Virtual hard disk (VHD)	50	also VHDL source in freedesktop (tie settled by magic/size)	
+*.vhdx	application/x-vhdx-disk	Virtual hard disk (VHDX)	50	already in freedesktop	
+*.vmdk	application/x-vmdk-disk	VMware virtual disk (VMDK)	50	already in freedesktop	
+*.vdi	application/x-vdi-disk	VirtualBox virtual disk (VDI)	50	already in freedesktop	
+*.qcow2	application/x-qemu-disk	QEMU QCOW2 disk image	50	already in freedesktop	
+*.dd	application/x-raw-disk-image	Raw disk image (dd)	50	filecat disk probe checks for a partition table or volume	
+*.ima	application/x-raw-disk-image	Raw floppy disk image	50		
+*.hdd	application/x-parallels-disk	Parallels virtual hard disk (HDD)	50		
+*.ova	application/x-ova	Open Virtualization Appliance (OVA, tar package)	60	freedesktop calls .ova an OVF disk image	
+*.ovf	application/ovf	Open Virtualization Format descriptor (OVF)	50		
+*.vmx	text/x-vmware-vmx	VMware virtual machine configuration	50		
+*.vmsd	text/x-vmware-vmsd	VMware snapshot metadata	50		
+*.vmem	application/x-vmware-vmem	VMware virtual machine memory file	50		
+*.vmss	application/x-vmware-vmss	VMware suspended state file	50		
+*.nvram	application/x-vmware-nvram	VMware virtual machine NVRAM	50		
+*.vbox-extpack	application/x-vbox-extpack	VirtualBox extension pack	50	gzip-compressed tar	application/gzip
+*.mdf	application/x-mdf	MDF file (SQL Server primary data file, Alcohol 120% disc image)	50	ambiguous	
+*.ldf	application/x-sqlserver-log	SQL Server transaction log	50		
+# --- NAS and backup formats
+*.hbk	application/x-hbk	Synology Hyper Backup data	50		
+*.bak	application/x-bak	Backup file (SQL Server backup, editor backups, others)	60	overrides freedesktop application/x-trash (generic backup file); kept in alternatives	
+*.nbk	application/x-nbk	NBK file (Nero backup, others)	50	ambiguous	
+*.vbk	application/x-veeam-vbk	Veeam full backup	50		
+*.vib	application/x-vib	VIB file (Veeam incremental backup, VMware software bundle)	50	two unrelated formats	
+*.vrb	application/x-vrb	VRB file (Veeam reverse incremental backup, dictionary index, others)	50	ambiguous	
+*.tib	application/x-acronis-tib	Acronis True Image backup	50		
+*.gho	application/x-ghost-image	Norton Ghost image	50		
+*.wim	application/x-ms-wim	Windows Imaging Format (WIM)	50	already in freedesktop	
+*.esd	application/x-ms-esd	Windows Electronic Software Download image (ESD)	50	WIM-style compressed Windows image	
+*.swm	application/x-ms-wim	Split Windows Imaging Format (SWM)	50	already in freedesktop	
+*.ost	application/x-outlook-ost	Outlook offline data file (OST)	50		
+*.pst	application/x-outlook-pst	Outlook personal folders file (PST)	50		
+*.partial	application/x-partial-download	Partially downloaded file	50		
+*.000	application/x-split-segment	Numbered segment file (split archive or backup volume)	50	also .001, .002 ...	
+*.001	application/x-split-segment	Numbered segment file (split archive or backup volume)	50		
+*.002	application/x-split-segment	Numbered segment file (split archive or backup volume)	50		
+# --- Windows / dev / data files missing from freedesktop
+*.bin	application/x-bin	Binary data file (firmware, disc image, game or application data, others)	50	generic extension	
+*.ini	text/x-ini	INI configuration file	50		
+*.cfg	text/x-config	Configuration file (text)	50		
+*.conf	text/x-config	Configuration file (text)	50		
+*.config	text/x-config	Configuration file (text)	50		
+*.inf	text/x-inf	Setup information (INF) file	50	Windows driver and setup	
+*.properties	text/x-java-properties	Java properties file	50		
+*.vim	text/x-vim	Vim script	50		
+*.gyp	text/x-gyp	GYP build description	50		
+*.gypi	text/x-gyp	GYP build description (include)	50		
+*.packlist	text/x-perl-packlist	Perl .packlist installed-files list	50		
+*.xmp	application/x-xmp	XMP metadata sidecar file	50	RDF/XML	application/xml
+*.sqlite	application/vnd.sqlite3	SQLite3 database	50	already a freedesktop type	
+*.accdb	application/x-msaccess-accdb	Microsoft Access database (ACCDB)	50		
+*.db	application/x-db	Database or cache file (SQLite, Thumbs.db, others)	50	ambiguous	
+*.pyd	application/x-python-pyd	Python extension module (Windows DLL)	50		
+*.sol	application/x-sol	SOL file (Adobe Flash local shared object, Solidity source)	50	ambiguous	
+*.tmp	application/x-tmp	Temporary file	50		
+*.cache	application/x-cache	Cache file (application-specific)	50		
+*.metadata	application/x-metadata	Metadata file (application-specific)	50		
+*.lit	application/x-ms-reader	Microsoft Reader eBook (LIT)	50		
+*.m4p	audio/x-m4p	iTunes protected AAC audio (M4P)	50		
+*.dvr-ms	video/x-ms-dvr	Microsoft Digital Video Recording (DVR-MS)	50		
+*.wtv	video/x-ms-wtv	Windows Recorded TV Show (WTV)	50		
+*.vsix	application/vnd.gallery.vsix	Visual Studio extension package (VSIX)	50	ZIP archive	application/zip
+*.msc	application/x-msc	MSC file (Microsoft Management Console snap-in, game data)	50	ambiguous	
+*.idx	application/x-idx	Index file (application-specific)	50	used by many applications	

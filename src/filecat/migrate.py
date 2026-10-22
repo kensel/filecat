@@ -1,0 +1,247 @@
+"""filecat migrate: copy a catalog from one backend to another.
+
+Streams documents from the source (`Backend.list(root=...)`) into the target
+with `put_many`, then installed-programs records (`list_programs` ->
+`put_program`), then archive members (`iter_all_members`, grouped back into
+one `put_members` call per archive) -- a source backend that predates
+member storage raises `NotImplementedError` from `iter_all_members()`; that
+is treated as "nothing to migrate there", not an error. The target's
+aggregates are rebuilt once at the end with `rebuild_aggregates()`.
+
+Public API:
+    migrate(src, dst, *, roots=None, batch=2000, programs=True, members=True,
+            verify=False, progress=None) -> MigrateStats
+    run(args) -> int
+"""
+from __future__ import annotations
+
+import os
+import sys
+import time
+from collections import defaultdict
+from dataclasses import dataclass, field
+from typing import Any, Callable
+
+from .backends import open_backend
+from .backends.base import Backend, Document
+
+ProgressFn = Callable[["MigrateStats"], None]
+
+# Keys put_members() itself adds back onto each member row; stripped before
+# handing the group to the target's put_members() so it can add them again
+# (possibly under a different root_id, if the target hashes roots the same
+# way -- it does, root_id is a pure function of the root string).
+_MEMBER_IDENTITY_KEYS = ("root_id", "root", "archive_rel_path")
+
+
+@dataclass
+class MigrateStats:
+    documents: int = 0
+    programs: int = 0
+    root_infos: int = 0
+    dropped: int = 0
+    members_archives: int = 0
+    members_rows: int = 0
+    members_skipped: bool = False
+    verify_checked: int = 0
+    verify_mismatches: list[str] = field(default_factory=list)
+    errors: list[str] = field(default_factory=list)
+    elapsed: float = 0.0
+
+    @property
+    def ok(self) -> bool:
+        return not self.verify_mismatches and not self.errors
+
+
+def _backend_identity(b: Backend) -> tuple[str, str] | None:
+    """A value that is equal for two Backend objects addressing the same
+    underlying storage: the same jsonl/sqlite file path, or the same DSN
+    string for a server backend. None when nothing comparable is known."""
+    path = getattr(b, "path", None)
+    if path is not None:
+        try:
+            return ("path", os.path.normcase(os.path.abspath(str(path))))
+        except OSError:
+            return ("path", str(path))
+    dsn = getattr(b, "dsn", None)
+    if dsn:
+        return ("dsn", dsn)
+    return None
+
+
+def _same_target(src: Backend, dst: Backend) -> bool:
+    a, b = _backend_identity(src), _backend_identity(dst)
+    return a is not None and a == b
+
+
+def migrate(src: Backend, dst: Backend, *, roots: list[str] | None = None,
+            batch: int = 2000, programs: bool = True, members: bool = True,
+            verify: bool = False, progress: ProgressFn | None = None) -> MigrateStats:
+    """Copy src's catalog into dst. Raises ValueError when src and dst
+    address the same file/DSN."""
+    if _same_target(src, dst):
+        raise ValueError("source and target are the same backend file/DSN")
+
+    stats = MigrateStats()
+    start = time.monotonic()
+    last_progress = start
+
+    def maybe_progress(force: bool = False) -> None:
+        nonlocal last_progress
+        if progress is None:
+            return
+        now = time.monotonic()
+        if force or now - last_progress >= 3.0:
+            last_progress = now
+            stats.elapsed = now - start
+            progress(stats)
+
+    root_list = roots if roots else [None]
+
+    # --- documents ----------------------------------------------------
+    buf: list[Document] = []
+    for root in root_list:
+        for doc in src.list(root=root):
+            buf.append(doc)
+            stats.documents += 1
+            if len(buf) >= batch:
+                dst.put_many(buf)
+                buf.clear()
+                maybe_progress()
+    if buf:
+        dst.put_many(buf)
+        buf.clear()
+    dst.flush()
+    maybe_progress()
+
+    # --- programs -------------------------------------------------------
+    if programs:
+        for p in src.list_programs():
+            dst.put_program(p)
+            stats.programs += 1
+        dst.flush()
+        maybe_progress()
+
+    # --- root index (scan history) ---------------------------------------
+    try:
+        for info in src.list_root_info():
+            if not roots or info.get("root") in roots:
+                dst.put_root_info(info)
+                stats.root_infos += 1
+    except NotImplementedError:
+        pass
+
+    # --- dropped records (files that vanished, kept for --keep-dropped) ----
+    try:
+        for doc in src.list_dropped():
+            if not roots or doc.get("root") in roots:
+                dst.put_dropped(doc)
+                stats.dropped += 1
+    except NotImplementedError:
+        pass
+
+    # --- archive members --------------------------------------------------
+    if members:
+        root_set = set(roots) if roots else None
+        groups: dict[tuple[str, str], list[dict[str, Any]]] = defaultdict(list)
+        group_root: dict[tuple[str, str], str] = {}
+        try:
+            for m in src.iter_all_members():
+                if root_set is not None and m.get("root") not in root_set:
+                    continue
+                key = (m.get("root_id"), m.get("archive_rel_path"))
+                groups[key].append(m)
+                group_root.setdefault(key, m.get("root"))
+        except NotImplementedError:
+            stats.members_skipped = True
+        else:
+            for key, rows in groups.items():
+                rid, archive_rel_path = key
+                root_str = group_root[key]
+                rows.sort(key=lambda m: m.get("index", 0))
+                clean = [{k: v for k, v in m.items() if k not in _MEMBER_IDENTITY_KEYS}
+                         for m in rows]
+                try:
+                    dst.put_members(root_str, archive_rel_path, clean)
+                except NotImplementedError:
+                    stats.members_skipped = True
+                    break
+                stats.members_archives += 1
+                stats.members_rows += len(clean)
+                maybe_progress()
+        dst.flush()
+        maybe_progress()
+
+    # --- aggregates -------------------------------------------------------
+    try:
+        dst.rebuild_aggregates()
+    except NotImplementedError:
+        pass
+
+    # --- verify -------------------------------------------------------
+    if verify:
+        for root in root_list:
+            for doc in src.list(root=root):
+                stats.verify_checked += 1
+                got = dst.get(doc["root"], doc["rel_path"])
+                if got is None or got != doc:
+                    stats.verify_mismatches.append(f"{doc['root']}::{doc['rel_path']}")
+                maybe_progress()
+
+    stats.elapsed = time.monotonic() - start
+    maybe_progress(force=True)
+    return stats
+
+
+def run(args: Any) -> int:
+    src = open_backend(args.src_backend, getattr(args, "src_out", None),
+                        getattr(args, "src_dsn", None))
+    try:
+        dst = open_backend(args.dst_backend, getattr(args, "dst_out", None),
+                            getattr(args, "dst_dsn", None))
+    except Exception:
+        src.close()
+        raise
+
+    def progress(stats: MigrateStats) -> None:
+        extra = ""
+        if stats.members_archives or stats.members_rows:
+            extra = (f", {stats.members_rows} member rows "
+                     f"({stats.members_archives} archives)")
+        print(f"migrate: {stats.documents} documents, {stats.programs} programs{extra}, "
+              f"{stats.elapsed:.1f}s", file=sys.stderr)
+
+    try:
+        if _same_target(src, dst):
+            print("filecat migrate: source and target are the same backend file/DSN",
+                  file=sys.stderr)
+            return 1
+        try:
+            stats = migrate(
+                src, dst, roots=args.root, batch=args.batch,
+                programs=not args.no_programs, members=not args.no_members,
+                verify=args.verify, progress=progress,
+            )
+        except ValueError as exc:
+            print(f"filecat migrate: {exc}", file=sys.stderr)
+            return 1
+    finally:
+        src.close()
+        dst.close()
+
+    if stats.members_skipped:
+        print("filecat migrate: source backend does not store archive members; skipped",
+              file=sys.stderr)
+    if stats.verify_mismatches:
+        print(f"filecat migrate --verify: {len(stats.verify_mismatches)} mismatch(es) "
+              f"out of {stats.verify_checked} checked", file=sys.stderr)
+        for key in stats.verify_mismatches[:20]:
+            print(f"  mismatch: {key}", file=sys.stderr)
+        if len(stats.verify_mismatches) > 20:
+            print(f"  ... {len(stats.verify_mismatches) - 20} more", file=sys.stderr)
+        return 1
+    if stats.errors:
+        for err in stats.errors:
+            print(f"filecat migrate: {err}", file=sys.stderr)
+        return 1
+    return 0

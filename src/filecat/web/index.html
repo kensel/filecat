@@ -1,0 +1,1241 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>filecat</title>
+<style>
+:root {
+  --bg: #f7f7f5; --panel: #ffffff; --text: #1d1d1b; --muted: #6b6b66; --line: #e3e2dd;
+  --accent: #2f6fdb; --accent-soft: #e5eefc; --bar: #9bb8ec; --warn: #b4441c; --warn-soft: #fbeae3;
+  --hover: #f1f0ec; --code: #f3f2ee; --ok: #2e7d4f; --ok-soft: #e3f3e8;
+  color-scheme: light;
+}
+@media (prefers-color-scheme: dark) {
+  :root {
+    --bg: #161615; --panel: #1f1f1e; --text: #e9e8e4; --muted: #9b9a94; --line: #33332f;
+    --accent: #7aa7f5; --accent-soft: #24324a; --bar: #3d5c94; --warn: #f0906a; --warn-soft: #3e2419;
+    --hover: #2a2a28; --code: #262624; --ok: #7fd1a1; --ok-soft: #1d3326;
+    color-scheme: dark;
+  }
+}
+* { box-sizing: border-box; }
+body { margin: 0; background: var(--bg); color: var(--text);
+  font: 14px/1.45 system-ui, -apple-system, "Segoe UI", sans-serif; }
+a { color: var(--accent); text-decoration: none; }
+a:hover { text-decoration: underline; }
+header { position: sticky; top: 0; z-index: 5; background: var(--panel); border-bottom: 1px solid var(--line);
+  display: flex; flex-wrap: wrap; gap: 8px 16px; align-items: center; padding: 10px 16px; }
+header h1 { font-size: 16px; margin: 0; letter-spacing: .02em; }
+header .src { color: var(--muted); font-size: 12px; overflow-wrap: anywhere; }
+nav { display: flex; gap: 4px; }
+nav a { padding: 5px 10px; border-radius: 6px; color: var(--text); }
+nav a.on { background: var(--accent-soft); color: var(--accent); font-weight: 600; }
+nav a:hover { text-decoration: none; background: var(--hover); }
+select, input[type=search], button { font: inherit; color: inherit; background: var(--panel);
+  border: 1px solid var(--line); border-radius: 6px; padding: 5px 8px; }
+button { cursor: pointer; }
+button:hover:not(:disabled) { background: var(--hover); }
+button:disabled { opacity: .45; cursor: default; }
+.spacer { flex: 1; }
+header .switch-error { flex-basis: 100%; padding: 0; font-size: 12px; overflow-wrap: anywhere; }
+main { padding: 16px; max-width: 1400px; margin: 0 auto; }
+.kpis { display: flex; flex-wrap: wrap; gap: 12px; margin-bottom: 16px; }
+.kpi { background: var(--panel); border: 1px solid var(--line); border-radius: 8px; padding: 10px 14px; min-width: 150px; }
+.kpi b { display: block; font-size: 20px; font-variant-numeric: tabular-nums; }
+.kpi span { color: var(--muted); font-size: 12px; }
+.grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(100%, 460px), 1fr)); gap: 16px; align-items: start; }
+td.desc { max-width: 160px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.card { background: var(--panel); border: 1px solid var(--line); border-radius: 8px; overflow: hidden; min-width: 0; }
+.card h2 { font-size: 14px; margin: 0; padding: 10px 14px; border-bottom: 1px solid var(--line);
+  display: flex; justify-content: space-between; gap: 8px; align-items: baseline; }
+.card h2 small { color: var(--muted); font-weight: normal; }
+.scroll { overflow-x: auto; }
+table { border-collapse: collapse; width: 100%; }
+th, td { text-align: left; padding: 5px 10px; border-bottom: 1px solid var(--line); vertical-align: top; }
+th { font-size: 12px; color: var(--muted); font-weight: 600; white-space: nowrap; background: var(--panel); }
+th.sort { cursor: pointer; user-select: none; }
+th.sort:hover { color: var(--text); }
+td.num, th.num { text-align: right; font-variant-numeric: tabular-nums; white-space: nowrap; }
+tr.click { cursor: pointer; }
+tr.click:hover td { background: var(--hover); }
+td.path { overflow-wrap: anywhere; min-width: 200px; }
+td.muted, .muted { color: var(--muted); }
+.pct { position: relative; min-width: 90px; }
+.pct i { position: absolute; left: 0; top: 4px; bottom: 4px; background: var(--bar); border-radius: 2px; opacity: .55; }
+.pct span { position: relative; }
+.more { padding: 8px 14px; }
+.toolbar { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; margin-bottom: 12px; }
+.chip { display: inline-flex; gap: 6px; align-items: center; background: var(--accent-soft); color: var(--accent);
+  border-radius: 999px; padding: 2px 4px 2px 10px; font-size: 13px; }
+.chip button { border: 0; background: transparent; padding: 0 6px; color: inherit; border-radius: 999px; }
+.crumbs { font-size: 15px; margin-bottom: 12px; overflow-wrap: anywhere; }
+.crumbs a, .crumbs span { margin-right: 2px; }
+.crumbs .sep { color: var(--muted); margin: 0 4px; }
+.pager { display: flex; gap: 8px; align-items: center; padding: 8px 14px; flex-wrap: wrap; }
+.badge { display: inline-block; font-size: 11px; padding: 0 6px; border-radius: 4px; background: var(--code); color: var(--muted); margin-left: 4px; }
+.badge.warn { background: var(--warn-soft); color: var(--warn); }
+.badge.ok { background: var(--ok-soft); color: var(--ok); }
+.badge.live { background: var(--accent-soft); color: var(--accent); animation: pulse 1.6s ease-in-out infinite; }
+@keyframes pulse { 50% { opacity: .55; } }
+@media (prefers-reduced-motion: reduce) { .badge.live { animation: none; } }
+td .sub { display: block; color: var(--muted); font-size: 12px; overflow-wrap: anywhere; }
+td.wide { min-width: 220px; }
+.facts { display: grid; grid-template-columns: max-content 1fr; gap: 4px 16px; padding: 12px 14px; }
+.facts dt { color: var(--muted); }
+.facts dd { margin: 0; overflow-wrap: anywhere; font-variant-numeric: tabular-nums; }
+.mono { font-family: ui-monospace, Consolas, monospace; font-size: 12.5px; }
+.json { padding: 10px 14px; font-family: ui-monospace, Consolas, monospace; font-size: 12.5px; overflow-x: auto; }
+.json details { margin-left: 14px; }
+.json summary { cursor: pointer; margin-left: -14px; list-style-position: inside; }
+.json .k { color: var(--muted); }
+.json .s { color: #2e7d4f; } .json .n { color: #8a4bd6; } .json .b { color: #b4441c; }
+@media (prefers-color-scheme: dark) { .json .s { color: #7fd1a1; } .json .n { color: #c3a1f5; } .json .b { color: #f0906a; } }
+.json .row { white-space: pre-wrap; overflow-wrap: anywhere; }
+.errors { background: var(--warn-soft); color: var(--warn); padding: 8px 14px; }
+.empty, .loading, .error { padding: 24px 14px; color: var(--muted); }
+.error { color: var(--warn); }
+.stack { display: flex; flex-direction: column; gap: 16px; }
+.note { font-size: 12px; color: var(--muted); }
+.seg { display: inline-flex; border: 1px solid var(--line); border-radius: 6px; overflow: hidden; }
+.seg button { border: 0; border-radius: 0; padding: 5px 10px; }
+.seg button + button { border-left: 1px solid var(--line); }
+.seg button.on { background: var(--accent-soft); color: var(--accent); font-weight: 600; }
+.tm { position: relative; background: var(--panel); border: 1px solid var(--line); border-radius: 8px;
+  overflow: hidden; margin-bottom: 16px; }
+.tm canvas { display: block; width: 100%; cursor: pointer; }
+.tm .tip { position: absolute; pointer-events: none; z-index: 2; max-width: min(420px, 90%); background: var(--panel);
+  border: 1px solid var(--line); border-radius: 6px; padding: 6px 9px; font-size: 12.5px; box-shadow: 0 2px 10px rgba(0,0,0,.18); }
+.tm .tip b { font-variant-numeric: tabular-nums; }
+.tm .tip .mono { overflow-wrap: anywhere; display: block; }
+.status { min-height: 20px; }
+.swatch { display: inline-block; width: 12px; height: 12px; border-radius: 3px; vertical-align: -1px; margin-right: 6px; }
+tr.hl td { background: var(--hover); }
+@media (max-width: 640px) {
+  .grid { grid-template-columns: 1fr; }
+  header { padding: 8px 16px; }
+  .hide-sm, header .src { display: none; }
+}
+</style>
+</head>
+<body>
+<header>
+  <h1>filecat</h1>
+  <nav id="nav">
+    <a data-view="roots" href="#roots">Roots</a>
+    <a data-view="summary" href="#summary">Summary</a>
+    <a data-view="graph" href="#graph">Graph</a>
+    <a data-view="browse" href="#browse">Browse</a>
+    <a data-view="records" href="#records">Records</a>
+  </nav>
+  <label>Root <select id="root"></select></label>
+  <span class="spacer"></span>
+  <span class="src" id="src"></span>
+  <label>Backend <select id="backend"></select></label>
+  <div class="error switch-error" id="switch-error" hidden></div>
+</header>
+<main id="main"><div class="loading">Loading…</div></main>
+<script>
+"use strict";
+const $main = document.getElementById("main");
+const $root = document.getElementById("root");
+const $backend = document.getElementById("backend");
+const $switchError = document.getElementById("switch-error");
+let INFO = null;
+
+// --- helpers ---------------------------------------------------------
+function h(tag, attrs, ...kids) {
+  const el = document.createElement(tag);
+  for (const [k, v] of Object.entries(attrs || {})) {
+    if (v == null || v === false) continue;
+    if (k === "class") el.className = v;
+    else if (k.startsWith("on")) el.addEventListener(k.slice(2), v);
+    else el.setAttribute(k, v === true ? "" : v);
+  }
+  for (const kid of kids.flat()) if (kid != null && kid !== false) el.append(kid instanceof Node ? kid : String(kid));
+  return el;
+}
+function bytes(n) {
+  if (n == null) return "";
+  let v = n, u = 0; const units = ["B", "KB", "MB", "GB", "TB", "PB"];
+  while (v >= 1024 && u < units.length - 1) { v /= 1024; u++; }
+  return u === 0 ? `${n} B` : `${v.toFixed(v < 10 ? 2 : 1)} ${units[u]}`;
+}
+const num = n => n == null ? "" : Number(n).toLocaleString();
+function when(ns) {
+  if (ns == null) return "";
+  const d = new Date(Number(BigInt(ns) / 1000000n));
+  return isNaN(d) ? "" : d.toLocaleString(undefined, {year: "numeric", month: "short", day: "2-digit", hour: "2-digit", minute: "2-digit"});
+}
+function route(view, params) {
+  const sp = new URLSearchParams();
+  for (const [k, v] of Object.entries(params || {})) if (v != null && v !== false) sp.set(k, v === true ? "1" : v);
+  const s = sp.toString();
+  return "#" + view + (s ? "?" + s : "");
+}
+function go(view, params) { location.hash = route(view, params); }
+function parseHash() {
+  const raw = location.hash.slice(1);
+  const i = raw.indexOf("?");
+  const view = (i < 0 ? raw : raw.slice(0, i)) || "roots";
+  return {view, params: Object.fromEntries(new URLSearchParams(i < 0 ? "" : raw.slice(i + 1)))};
+}
+async function api(path, params) {
+  const res = await fetch(path + "?" + new URLSearchParams(params || {}));
+  const data = await res.json().catch(() => ({error: res.statusText}));
+  if (!res.ok) throw new Error(data.error || res.statusText);
+  return data;
+}
+function pctCell(p) {
+  return h("td", {class: "num pct"}, h("i", {style: `width:${Math.min(100, p || 0).toFixed(1)}%`}),
+           h("span", {}, `${(p || 0).toFixed(1)}%`));
+}
+function fill(el, ...kids) { el.replaceChildren(...kids.flat().filter(k => k != null && k !== false)); return el; }
+function show(...nodes) { fill($main, ...nodes); window.scrollTo(0, 0); }
+function failed(err) { return h("div", {class: "error"}, "Error: " + err.message); }
+function curRoot(params) { return params.root || $root.value; }
+function dirOf(rel) { const i = rel.lastIndexOf("/"); return i < 0 ? "" : rel.slice(0, i); }
+
+function crumbs(root, rel, lastIsLink) {
+  const parts = rel ? rel.split("/") : [];
+  const out = [h("a", {href: route("browse", {root, parent: ""})}, root)];
+  parts.forEach((p, i) => {
+    out.push(h("span", {class: "sep"}, "/"));
+    const sub = parts.slice(0, i + 1).join("/");
+    out.push(i < parts.length - 1 || lastIsLink ? h("a", {href: route("browse", {root, parent: sub})}, p) : h("b", {}, p));
+  });
+  return h("div", {class: "crumbs"}, out);
+}
+
+// --- roots (the root index) -----------------------------------------
+const STATES = {
+  in_progress: ["scanning", "live"], stalled: ["stalled", "warn"], never: ["not scanned", ""],
+  ok: ["ok", "ok"], errors: ["errors", "warn"], unreachable: ["unreachable", "warn"],
+  interrupted: ["interrupted", "warn"], failed: ["failed", "warn"],
+};
+function ago(iso, nowIso) {
+  if (!iso) return "";
+  const s = Math.max(0, (new Date(nowIso || Date.now()) - new Date(iso)) / 1000);
+  if (s < 90) return `${Math.round(s)}s ago`;
+  if (s < 5400) return `${Math.round(s / 60)} min ago`;
+  if (s < 129600) return `${Math.round(s / 3600)} h ago`;
+  return `${Math.round(s / 86400)} days ago`;
+}
+const stamp = iso => iso ? new Date(iso).toLocaleString(undefined, {year: "numeric", month: "short", day: "2-digit", hour: "2-digit", minute: "2-digit"}) : "";
+function duration(sec) {
+  if (sec == null) return "";
+  sec = Math.round(sec);
+  const h = Math.floor(sec / 3600), m = Math.floor(sec % 3600 / 60), s = sec % 60;
+  return h ? `${h}h ${m}m` : m ? `${m}m ${s}s` : `${s}s`;
+}
+let rootsTimer = null;
+async function viewRoots() {
+  clearTimeout(rootsTimer);
+  const card = h("section", {class: "card"});
+  if (!document.getElementById("roots-card")) show(h("div", {class: "loading"}, "Loading roots…"));
+  let data;
+  try { data = await api("/api/roots"); } catch (e) { return show(failed(e)); }
+  if (parseHash().view !== "roots") return;
+  const now = data.now;
+  const live = data.roots.some(r => r.state === "in_progress");
+  fill(card, h("h2", {}, "Roots", h("small", {}, `${num(data.roots.length)} in this catalog` + (live ? " · refreshing every 30s while a scan runs" : ""))),
+    h("div", {class: "scroll"}, h("table", {},
+      h("thead", {}, h("tr", {}, h("th", {}, "root"), h("th", {}, "scan"), h("th", {class: "num"}, "files"),
+        h("th", {class: "num"}, "size"), h("th", {}, "newest file"), h("th", {}, "last error"))),
+      h("tbody", {}, data.roots.map(r => rootRow(r, now))))));
+  card.id = "roots-card";
+  const y = window.scrollY;
+  fill($main, card);
+  window.scrollTo(0, y);
+  if (live) rootsTimer = setTimeout(() => { if (parseHash().view === "roots") viewRoots(); }, 30000);
+}
+function rootRow(r, now) {
+  const root = r.root, info = r.info || {}, a = info.last_attempt || {}, last = info.last_scan;
+  const [label, cls] = STATES[r.state] || [r.state, ""];
+  const scan = [];
+  if (r.state === "in_progress" || r.state === "stalled") {
+    const p = a.progress || {};
+    scan.push(h("span", {}, `started ${stamp(a.started_at)}`),
+      h("span", {class: "sub"}, `running ${duration((new Date(now) - new Date(a.started_at)) / 1000)} on ${a.host || "?"} · `
+        + `${num(p.files || 0)} files, ${bytes(p.bytes || 0)} so far · heartbeat ${ago(a.heartbeat_at, now)}`),
+      p.last_path ? h("span", {class: "sub mono"}, p.last_path) : null,
+      r.state === "stalled" ? h("span", {class: "sub"}, "No heartbeat recently: the scan was probably killed or is hung.") : null);
+  } else if (a.status === "interrupted" || a.status === "failed") {
+    scan.push(h("span", {}, `${a.status} ${stamp(a.finished_at)}`), a.error ? h("span", {class: "sub"}, a.error) : null);
+  }
+  if (last) {
+    scan.push(h("span", {class: scan.length ? "sub" : ""}, `last: ${stamp(last.started_at)} → ${stamp(last.finished_at)}`),
+      h("span", {class: "sub"}, `${duration(last.seconds)} on ${last.host || "?"} · ${ago(last.finished_at, now)} · `
+        + `${num(last.files)} files written, ${num(last.errors)} with errors`));
+  } else if (!scan.length) {
+    scan.push(h("span", {class: "muted"}, "none recorded"), h("span", {class: "sub"}, "imported, or scanned before the root index existed"));
+  }
+  const newest = h("td", {class: "wide"});
+  const showNewest = (f, note) => fill(newest, h("a", {href: route("record", {root, rel_path: f.rel_path})}, when(f.mtime_ns)),
+    h("span", {class: "sub mono"}, f.rel_path), note ? h("span", {class: "sub"}, note) : null);
+  if (info.newest_file) showNewest(info.newest_file);
+  else api("/api/records", {root, files_only: 1, sort: "mtime_ns", desc: 1, limit: 1})
+    .then(res => res.rows[0] && res.rows[0].mtime_ns != null ? showNewest(res.rows[0], "from the records") : null).catch(() => {});
+  const err = info.last_error;
+  const errCell = h("td", {class: "wide"}, err ? [
+    h("span", {}, `${stamp(err.at)} · ${err.stage || ""}`),
+    h("span", {class: "sub"}, err.message || ""),
+    err.rel_path != null ? h("a", {class: "sub mono", href: route("record", {root, rel_path: err.rel_path})}, err.rel_path || "(the root itself)") : null,
+    h("a", {class: "sub", href: route("records", {root, errors: 1})}, "all records with errors"),
+  ] : h("span", {class: "muted"}, "none recorded"));
+  const s = r.summary;
+  return h("tr", {},
+    h("td", {class: "path"}, h("a", {href: route("summary", {root})}, root), " ", h("span", {class: "badge " + cls}, label),
+      h("span", {class: "sub"}, h("a", {href: route("browse", {root, parent: ""})}, "browse"), " · ",
+        h("a", {href: route("records", {root})}, "records"))),
+    h("td", {class: "wide"}, scan),
+    h("td", {class: "num"}, s ? num(s.total_files) : ""),
+    h("td", {class: "num", title: s ? num(s.total_bytes) + " bytes" : ""}, s ? bytes(s.total_bytes) : ""),
+    newest, errCell);
+}
+
+// --- summary ---------------------------------------------------------
+const TABLES = [
+  {key: "suffix", title: "Extensions", label: "extension"},
+  {key: "mime", title: "Types", label: "type"},
+  {key: "dir", title: "Directories", label: "directory"},
+];
+async function viewSummary(params, rebuild) {
+  const root = curRoot(params), depth = params.depth || "2";
+  show(h("div", {class: "loading"}, rebuild ? "Rebuilding the summary…"
+    : "Loading summary… (a root with no saved summary is computed from its records and saved, which can take a while)"));
+  let s;
+  try { s = await api("/api/summary", {root, depth, rebuild: rebuild ? 1 : ""}); }
+  catch (e) { return show(failed(e)); }
+  const depthSel = h("select", {onchange: e => go("summary", {root, depth: e.target.value})},
+    [1, 2, 3, 4, 5, 6].map(d => h("option", {value: d, selected: String(d) === String(depth)}, d)));
+  const kpis = h("div", {class: "kpis"},
+    h("div", {class: "kpi"}, h("b", {}, num(s.total_files)), h("span", {}, "files")),
+    h("div", {class: "kpi"}, h("b", {}, bytes(s.total_bytes)), h("span", {}, num(s.total_bytes) + " bytes")),
+    h("a", {class: "kpi", href: route("records", {root, unreadable: 1}), style: "color:inherit"},
+      h("b", {}, num(s.unreadable)), h("span", {}, "unreadable")),
+  );
+  const builtAt = s.built_at ? new Date(s.built_at).toLocaleString() : "";
+  const note = h("span", {class: "note"}, {
+    stored: `Saved summary from ${builtAt}.`,
+    saved: `Computed from the records and saved just now (${builtAt}).`,
+    computed: s.stored_depth != null
+      ? `Computed from the records; the saved summary is at depth ${s.stored_depth}.`
+      : "Computed from the records (not saved: --no-save).",
+  }[s.source] || "");
+  const button = s.can_save
+    ? h("button", {title: "recompute from the records and save it in the catalog", onclick: () => viewSummary(params, true)},
+        s.source === "computed" ? `Save at depth ${depth}` : "Rebuild & save")
+    : h("button", {onclick: () => viewSummary(params, true)}, "Recompute");
+  const tools = h("div", {class: "toolbar"}, h("label", {}, "Directory depth ", depthSel), button, note);
+  const cards = TABLES.map(t => summaryCard(t, s[t.key] || [], root, depth));
+  show(h("div", {}, tools, kpis, h("div", {class: "grid"}, cards)));
+  if (s.source === "stored") {
+    // A saved summary goes stale as scans add or change records: compare with the records now.
+    api("/api/records", {root, files_only: 1, limit: 1}).then(now => {
+      const files = s.total_files - s.unreadable;
+      if (now.total === files && now.bytes === s.total_bytes) return note.append(" Up to date with the records.");
+      note.append(" ", h("span", {class: "badge warn"}, "stale"),
+        ` The records now hold ${num(now.total)} readable files (${bytes(now.bytes)}); the summary has ${num(files)} (${bytes(s.total_bytes)}).`);
+    }).catch(() => {});
+  }
+}
+function summaryCard(t, rows, root, depth) {
+  const LIMIT = 25;
+  const body = h("tbody");
+  const card = h("section", {class: "card"},
+    h("h2", {}, t.title, h("small", {}, `${num(rows.length)} groups`)));
+  if (!rows.length) { card.append(h("div", {class: "empty"}, "No entries")); return card; }
+  const head = h("tr", {}, h("th", {}, t.label), t.key === "suffix" ? h("th", {class: "hide-sm"}, "description") : null,
+    h("th", {class: "num"}, "files"), h("th", {class: "num"}, "size"), h("th", {class: "num"}, "%"));
+  function showRows(n) {
+    body.replaceChildren(...rows.slice(0, n).map(r => {
+      const key = r[t.key];
+      const params = {root, [t.key]: key, files_only: 1};
+      if (t.key === "dir") params.depth = depth;
+      const label = t.key === "dir"
+        ? h("span", {}, key, " ", h("a", {href: route("browse", {root, parent: key === "." ? "" : key}),
+            title: "browse this folder", onclick: e => e.stopPropagation()}, "↗"))
+        : key;
+      return h("tr", {class: "click", title: "list these files", onclick: () => go("records", params)},
+        h("td", {class: "path"}, label),
+        t.key === "suffix" ? h("td", {class: "muted desc hide-sm", title: r.description || ""}, r.description || "") : null,
+        h("td", {class: "num"}, num(r.files)), h("td", {class: "num", title: num(r.bytes) + " bytes"}, bytes(r.bytes)),
+        pctCell(r.percent));
+    }));
+  }
+  showRows(LIMIT);
+  card.append(h("div", {class: "scroll"}, h("table", {}, h("thead", {}, head), body)));
+  if (rows.length > LIMIT) {
+    const btn = h("button", {onclick: () => { showRows(rows.length); btn.remove(); }}, `Show all ${num(rows.length)}`);
+    card.append(h("div", {class: "more"}, btn));
+  }
+  return card;
+}
+
+// --- graph (treemap) -------------------------------------------------
+// The overview draws every root, grouped by server (\\server\share) or drive
+// (C:), sized from the root index totals until each root's treemap arrives
+// from /api/treemap (asked for one root at a time, biggest first, so other
+// requests are not stuck behind them on the backend's single thread). Zooming
+// into a folder asks for that folder's own treemap at the same depth.
+// The server saves each treemap as a snapshot and reuses it until it is
+// --graph-max-age old. Pinned snapshots are kept: ?at= views a pin instead of
+// the latest, ?vs= compares the latest (or the viewed pin) with one, folder by folder.
+const COLOR_MODES = [{key: "suffix", label: "Extension"}, {key: "mime", label: "Type"}, {key: "folder", label: "Folder"},
+                     {key: "change", label: "Change", needsBaseline: true}];
+const TOP_COLORS = 20;
+// The reference categorical hues, then lighter and darker steps of them for slots 9-20.
+const HUES = {light: ["#2a78d6", "#eb6834", "#1baf7a", "#eda100", "#e87ba4", "#008300", "#6250d6", "#e34948"],
+              dark: ["#3987e5", "#d95926", "#199e70", "#c98500", "#d55181", "#008300", "#9085e9", "#e66767"]};
+const NOT_PINNED = "(not in the pin)";
+const TREEMAPS = new Map();   // "root|prefix|depth" -> {at, data}: latest treemaps, briefly, so colour switches are instant
+const SNAPSHOTS = new Map();  // snapshot id -> data (a stored snapshot never changes)
+const CLIENT_CACHE_MS = 60000;
+let graphGen = 0;
+
+function groupOf(root) {
+  const unc = /^[\\/]{2}([^\\/]+)/.exec(root);
+  if (unc) return "\\\\" + unc[1];
+  const drive = /^([A-Za-z]):/.exec(root);
+  if (drive) return drive[1].toUpperCase() + ":";
+  return root.split(/[\\/]/).filter(Boolean)[0] || root;
+}
+function rgb(hex) { const n = parseInt(hex.slice(1), 16); return [n >> 16, n >> 8 & 255, n & 255]; }
+function mix(hex, to, t) {
+  const a = rgb(hex), b = rgb(to);
+  return "#" + a.map((v, i) => Math.round(v + (b[i] - v) * t).toString(16).padStart(2, "0")).join("");
+}
+function darkMode() { return matchMedia("(prefers-color-scheme: dark)").matches; }
+function palette() {
+  const base = HUES[darkMode() ? "dark" : "light"];
+  return [...base, ...base.map(c => mix(c, "#ffffff", .45)), ...base.slice(0, 4).map(c => mix(c, "#000000", .35))];
+}
+function grayTile() { return darkMode() ? "#5c5b56" : "#bdbcb6"; }
+// Change buckets: the reference diverging pair, blue (shrank) <-> red (grew), around a gray
+// midpoint; the bigger the change, the further from the surface.
+function changeBuckets() {
+  const dark = darkMode();
+  const red = dark ? "#e66767" : "#e34948";
+  const shrink = dark ? ["#1c5cab", "#3987e5", "#9ec5f4"] : ["#86b6ef", "#3987e5", "#184f95"];
+  const grow = dark ? [mix(red, "#000000", .35), red, mix(red, "#ffffff", .45)] : [mix(red, "#ffffff", .45), red, mix(red, "#000000", .35)];
+  return [
+    {key: "grew 50%+ or new", color: grow[2], min: .5},
+    {key: "grew 10–50%", color: grow[1], min: .1},
+    {key: "grew 1–10%", color: grow[0], min: .01},
+    {key: "about the same (±1%)", color: dark ? "#4a4a46" : "#dddcd6", min: -.01},
+    {key: "shrank 1–10%", color: shrink[0], min: -.1},
+    {key: "shrank 10–50%", color: shrink[1], min: -.5},
+    {key: "shrank 50%+", color: shrink[2], min: -Infinity},
+    {key: NOT_PINNED, color: grayTile(), min: null},
+  ];
+}
+function cssVar(name) { return getComputedStyle(document.documentElement).getPropertyValue(name).trim(); }
+function signed(n) { return (n > 0 ? "+" : n < 0 ? "−" : "±") + bytes(Math.abs(n)); }
+function ageText(seconds) {
+  return seconds >= 5400 ? `${+(seconds / 3600).toFixed(1)} h` : `${Math.round(seconds / 60)} min`;
+}
+
+async function getTreemap(root, prefix, depth, refresh) {
+  const key = `${root}|${prefix}|${depth}`;
+  const hit = TREEMAPS.get(key);
+  if (!refresh && hit && Date.now() - hit.at < CLIENT_CACHE_MS) return hit.data;
+  const t = await api("/api/treemap", {root, prefix, depth, refresh: refresh ? 1 : ""});
+  TREEMAPS.set(key, {at: Date.now(), data: t});
+  return t;
+}
+async function getSnapshot(id) {
+  if (!SNAPSHOTS.has(id)) SNAPSHOTS.set(id, await api("/api/treemap", {id}));
+  return SNAPSHOTS.get(id);
+}
+async function postJson(path, body) {
+  const res = await fetch(path, {method: "POST", headers: {"Content-Type": "application/json"}, body: JSON.stringify(body)});
+  const data = await res.json().catch(() => ({error: res.statusText}));
+  if (!res.ok) throw new Error(data.error || res.statusText);
+  return data;
+}
+
+// A tree of nodes: {name, kind, root, path, bytes, files, kids, segs, colorKey}.
+// kind: group | root | folder | files (the files directly in a folder that has
+// subfolders) | more (folders merged by the server) | pending (not summarised yet).
+function folderTree(tm, root, name, kind) {
+  const prefix = tm.prefix;
+  const join = p => prefix && p ? prefix + "/" + p : prefix || p;
+  const top = {name, kind, root, path: prefix, kids: [], own: null, byName: new Map()};
+  const keyNames = {suffix: tm.keys.suffix.map(k => k.key), mime: tm.keys.mime.map(k => k.key)};
+  for (const f of tm.folders) {
+    let node = top;
+    const parts = f.path ? f.path.split("/") : [];
+    parts.forEach((part, i) => {
+      let next = node.byName.get(part);
+      if (!next) {
+        const path = join(parts.slice(0, i + 1).join("/"));
+        next = {name: part, kind: part === "…" ? "more" : "folder", root, path, kids: [], own: null, byName: new Map()};
+        node.byName.set(part, next);
+        node.kids.push(next);
+      }
+      node = next;
+    });
+    node.own = f;
+  }
+  const segs = f => ({suffix: f.suffix.map(([i, b]) => [keyNames.suffix[i] ?? "(other)", b]),
+                      mime: f.mime.map(([i, b]) => [keyNames.mime[i] ?? "(other)", b])});
+  (function finish(node, topName) {
+    const colorKey = topName ?? "(files here)";
+    for (const k of node.kids) finish(k, topName ?? k.name);
+    if (node.own && node.kids.length) {
+      node.kids.push({name: "(files here)", kind: "files", root, path: node.path, kids: [], colorKey,
+                      bytes: node.own.bytes, files: node.own.files, segs: segs(node.own)});
+    } else if (node.own) {
+      node.segs = segs(node.own);
+      if (node.own.merged) { node.name = `${num(node.own.merged)} smaller folders`; node.merged = node.own.merged; }
+    }
+    node.colorKey = colorKey;
+    node.bytes = node.kids.length ? node.kids.reduce((a, k) => a + k.bytes, 0) : (node.own ? node.own.bytes : 0);
+    node.files = node.kids.length ? node.kids.reduce((a, k) => a + k.files, 0) : (node.own ? node.own.files : 0);
+    node.kids.sort((a, b) => b.bytes - a.bytes);
+    delete node.byName; delete node.own;
+  })(top, null);
+  if (!top.kids.length && !top.segs) top.segs = {suffix: [], mime: []};
+  return top;
+}
+
+function* leaves(node) {
+  if (!node.kids.length) yield node;
+  else for (const k of node.kids) yield* leaves(k);
+}
+// A leaf's files are the server's folder entry with the same path (the files
+// directly in it, or everything below it at the cut depth): that is what two
+// snapshots are compared by.
+function leafKey(root, path) { return root + "|" + path; }
+function baselineOf(tm, root) {
+  const join = p => tm.prefix && p ? tm.prefix + "/" + p : tm.prefix || p;
+  const out = new Map();
+  for (const f of tm.folders) out.set(leafKey(root, join(f.path)), {bytes: f.bytes, files: f.files, path: join(f.path)});
+  return out;
+}
+
+function squarify(items, x, y, w, h, out) {
+  items = items.filter(i => i.v > 0);
+  const total = items.reduce((a, i) => a + i.v, 0);
+  if (total <= 0 || w <= 0 || h <= 0) return out;
+  const scale = w * h / total;
+  let i = 0;
+  while (i < items.length) {
+    const short = Math.min(w, h);
+    const row = [];
+    let sum = 0, worst = Infinity;
+    while (i < items.length) {
+      const a = items[i].v * scale, s = sum + a;
+      const big = row.length ? row[0].v * scale : a;
+      const r = Math.max(short * short * big / (s * s), (s * s) / (short * short * a));
+      if (row.length && r > worst) break;
+      row.push(items[i]); sum = s; worst = r; i++;
+    }
+    const thick = sum / short;
+    let pos = w >= h ? y : x;
+    for (const it of row) {
+      const len = it.v * scale / thick;
+      out.push(w >= h ? {item: it, x, y: pos, w: thick, h: len} : {item: it, x: pos, y, w: len, h: thick});
+      pos += len;
+    }
+    if (w >= h) { x += thick; w -= thick; } else { y += thick; h -= thick; }
+  }
+  return out;
+}
+
+// paint(leaf) -> [[key, bytes, colour], ...]: the blocks a leaf is split into.
+function drawTreemap(canvas, tree, paint, hl) {
+  const dpr = window.devicePixelRatio || 1;
+  const W = canvas.clientWidth, H = canvas.clientHeight;
+  canvas.width = Math.round(W * dpr); canvas.height = Math.round(H * dpr);
+  const ctx = canvas.getContext("2d");
+  ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+  const surface = cssVar("--panel"), line = cssVar("--line"), text = cssVar("--text"), muted = cssVar("--muted");
+  ctx.fillStyle = surface; ctx.fillRect(0, 0, W, H);
+  ctx.font = "12px system-ui, 'Segoe UI', sans-serif"; ctx.textBaseline = "middle";
+  const hits = [];
+  const fit = (s, w) => {
+    if (ctx.measureText(s).width <= w) return s;
+    while (s.length > 1 && ctx.measureText(s + "…").width > w) s = s.slice(0, -1);
+    return s.length > 1 ? s + "…" : "";
+  };
+  const label = (s, x, y, w, color) => { const t = fit(s, w); if (t) { ctx.fillStyle = color; ctx.fillText(t, x, y); } };
+  const tile = (x, y, w, h, color, dim) => {
+    if (w < .5 || h < .5) return;
+    const g = ctx.createLinearGradient(x, y, x + w, y + h);
+    g.addColorStop(0, mix(color, "#ffffff", .28)); g.addColorStop(1, mix(color, "#000000", .22));
+    ctx.globalAlpha = dim ? .22 : 1;
+    ctx.fillStyle = g; ctx.fillRect(x, y, w, h);
+    ctx.globalAlpha = 1;
+    if (w > 2 && h > 2) { ctx.strokeStyle = surface; ctx.lineWidth = 1; ctx.strokeRect(x + .5, y + .5, w - 1, h - 1); }
+  };
+  (function draw(node, x, y, w, h, level) {
+    if (w < 1 || h < 1) return;
+    if (node.kids.length) {
+      if (level > 0) {
+        ctx.strokeStyle = line; ctx.lineWidth = 1; ctx.strokeRect(x + .5, y + .5, w - 1, h - 1);
+        if (level <= 2 && w > 48 && h > 34) {
+          ctx.fillStyle = line; ctx.fillRect(x, y, w, 17);
+          ctx.font = (level === 1 ? "600 " : "") + "12px system-ui, 'Segoe UI', sans-serif";
+          label(`${node.name}  ${bytes(node.bytes)}`, x + 5, y + 9, w - 10, text);
+          ctx.font = "12px system-ui, 'Segoe UI', sans-serif";
+          hits.push({x, y, w, h: 17, node, header: true});
+          y += 17; h -= 17;
+        }
+        x += 1; y += 1; w -= 2; h -= 2;
+      }
+      for (const r of squarify(node.kids.map(k => ({v: k.bytes, k})), x, y, w, h, []))
+        draw(r.item.k, r.x, r.y, r.w, r.h, level + 1);
+      return;
+    }
+    if (node.kind === "pending") {
+      ctx.fillStyle = grayTile(); ctx.globalAlpha = .35; ctx.fillRect(x, y, w, h); ctx.globalAlpha = 1;
+      ctx.strokeStyle = line; ctx.strokeRect(x + .5, y + .5, w - 1, h - 1);
+      if (w > 60 && h > 30) label(node.error ? "could not summarise" : "summarising…", x + 6, y + h / 2, w - 12, muted);
+      hits.push({x, y, w, h, node});
+      return;
+    }
+    for (const r of squarify(paint(node).map(s => ({v: s[1], s})), x, y, w, h, [])) {
+      const [key, , color] = r.item.s;
+      tile(r.x, r.y, r.w, r.h, color, hl != null && hl !== key);
+      hits.push({x: r.x, y: r.y, w: r.w, h: r.h, node, seg: r.item.s});
+    }
+    if (w > 70 && h > 30 && node.kind !== "files") {
+      const t = fit(node.name, w - 14);
+      if (t) {
+        const tw = ctx.measureText(t).width;
+        ctx.globalAlpha = .82; ctx.fillStyle = surface; ctx.fillRect(x + 3, y + 3, tw + 8, 16); ctx.globalAlpha = 1;
+        label(t, x + 7, y + 11, w - 14, text);
+      }
+    }
+  })(tree, 0, 0, W, H, 0);
+  return hits;
+}
+
+// The view a click or a crumb goes to. A pin holds snapshots of whole roots, so
+// ?at= / ?vs= are kept for a server/drive or a root, and dropped deeper down.
+function graphTarget(p, target) {
+  const out = {...target, color: p.color, depth: p.depth};
+  if (!target.prefix) { out.at = p.at; out.vs = p.vs; }
+  if (!out.vs && out.color === "change") out.color = "suffix";
+  return out;
+}
+function graphCrumbs(p) {
+  const out = [h("a", {href: route("graph", graphTarget(p, {}))}, "All roots")];
+  const sep = () => out.push(h("span", {class: "sep"}, "›"));
+  const group = p.group || (p.root ? groupOf(p.root) : null);
+  if (group) { sep(); out.push(h("a", {href: route("graph", graphTarget(p, {group}))}, group)); }
+  if (p.root) {
+    sep(); out.push(h("a", {href: route("graph", graphTarget(p, {root: p.root}))}, p.root));
+    const parts = (p.prefix || "").split("/").filter(Boolean);
+    parts.forEach((part, i) => {
+      out.push(h("span", {class: "sep"}, "/"));
+      out.push(h("a", {href: route("graph", graphTarget(p, {root: p.root, prefix: parts.slice(0, i + 1).join("/")}))}, part));
+    });
+  }
+  return h("div", {class: "crumbs"}, out);
+}
+function pinName(pin) { return `📌 ${pin.label || "pin"} · ${stamp(pin.at)}`; }
+
+async function viewGraph(params, force) {
+  const gen = ++graphGen;
+  const depth = params.depth || "2";
+  const root = params.root || null, prefix = (params.prefix || "").replace(/^\/+|\/+$/g, "");
+  const wanted = COLOR_MODES.find(m => m.key === params.color);
+  const mode = wanted && (!wanted.needsBaseline || params.vs) ? wanted.key : "suffix";
+  const p = {...params, color: mode, depth};
+  const status = h("div", {class: "note status"});
+  const kpis = h("div", {class: "kpis"});
+  const canvas = h("canvas", {role: "img", "aria-label": "treemap of folder sizes"});
+  const tip = h("div", {class: "tip", hidden: true});
+  const box = h("div", {class: "tm"}, canvas, tip);
+  const legendCard = h("section", {class: "card"});
+  const tableCard = h("section", {class: "card"});
+  const modeButtons = h("span", {class: "seg"}, COLOR_MODES.map(m =>
+    h("button", {class: m.key === mode ? "on" : null, disabled: m.needsBaseline && !p.vs,
+                 title: m.needsBaseline && !p.vs ? "pick a pin to compare with first" : null,
+                 onclick: () => go("graph", {...p, color: m.key})}, m.label)));
+  const depthSel = h("select", {onchange: e => go("graph", {...p, depth: e.target.value, at: null, vs: null,
+                                                            color: mode === "change" ? "suffix" : mode})},
+    [1, 2, 3, 4].map(d => h("option", {value: d, selected: String(d) === String(depth)}, d)));
+  const refresh = h("button", {title: "summarise again from the records now, instead of the saved snapshot"}, "Refresh");
+  const snapSel = h("select", {disabled: true, onchange: e => go("graph", {...p, at: e.target.value || null})},
+    h("option", {value: ""}, "Latest"));
+  const vsSel = h("select", {disabled: true, onchange: e => go("graph", {...p, vs: e.target.value || null,
+                                                                        color: e.target.value ? "change" : (mode === "change" ? "suffix" : mode)})},
+    h("option", {value: ""}, "nothing"));
+  const pinBtn = h("button", {disabled: true, title: "keep the snapshots shown now, to come back to or compare with later"}, "📌 Pin");
+  const unpinBtn = h("button", {hidden: true}, "Unpin");
+  const links = root ? h("span", {class: "note"}, h("a", {href: route("browse", {root, parent: prefix})}, "browse this folder"),
+    " · ", h("a", {href: route("summary", {root})}, "summary")) : null;
+  show(h("div", {}, graphCrumbs(p),
+    h("div", {class: "toolbar"}, h("label", {}, "Colour by "), modeButtons, h("label", {}, "Folder depth ", depthSel), refresh, links),
+    h("div", {class: "toolbar"}, h("label", {}, "Snapshot ", snapSel), unpinBtn, h("label", {}, "Compare with ", vsSel), pinBtn),
+    status, kpis, box, h("div", {class: "grid"}, legendCard, tableCard)));
+  canvas.style.height = Math.max(360, Math.min(760, Math.round(innerHeight * .62))) + "px";
+
+  let tree = null, hits = [], hl = null, colors = new Map(), legend = [];
+  const baseline = new Map();   // leafKey -> {bytes, files, path}, from the compared pin
+  const baselineRoots = new Set();
+  const buckets = changeBuckets();
+  function changeOf(n) {
+    if (!baselineRoots.has(n.root)) return {bucket: NOT_PINNED};
+    const before = baseline.get(leafKey(n.root, n.path));
+    const then = before ? before.bytes : 0, delta = n.bytes - then;
+    if (!then) return {bucket: n.bytes ? buckets[0].key : buckets[3].key, then, delta, isNew: !!n.bytes};
+    const ratio = delta / then;
+    return {bucket: buckets.find(b => b.min != null && ratio >= b.min).key, then, delta, ratio};
+  }
+  function paint(n) {
+    if (mode === "change") {
+      const c = changeOf(n);
+      return [[c.bucket, n.bytes, buckets.find(b => b.key === c.bucket).color]];
+    }
+    if (mode === "folder") return [[n.colorKey, n.bytes, colors.get(n.colorKey) || grayTile()]];
+    return n.segs[mode].map(([k, b]) => [k, b, colors.get(k) || grayTile()]);
+  }
+  function legendRows() {
+    const sums = new Map();
+    const add = (k, b, f, d) => {
+      const s = sums.get(k) || {key: k, bytes: 0, files: 0, delta: 0};
+      s.bytes += b; s.files += f; s.delta += d || 0; sums.set(k, s);
+    };
+    for (const leaf of leaves(tree)) {
+      if (leaf.kind === "pending") add("(not summarised yet)", leaf.bytes, leaf.files);
+      else if (mode === "change") { const c = changeOf(leaf); add(c.bucket, leaf.bytes, leaf.files, c.delta); }
+      else if (mode === "folder") add(leaf.colorKey, leaf.bytes, leaf.files);
+      else for (const [k, b] of leaf.segs[mode]) add(k, b, 0);
+    }
+    const rows = [...sums.values()];
+    if (mode === "change") {
+      const order = new Map(buckets.map((b, i) => [b.key, i]));
+      return rows.sort((a, b) => (order.get(a.key) ?? 99) - (order.get(b.key) ?? 99));
+    }
+    return rows.sort((a, b) => b.bytes - a.bytes);
+  }
+  function redraw() {
+    if (gen !== graphGen || !tree) return;
+    legend = legendRows();
+    if (mode === "change") colors = new Map(buckets.map(b => [b.key, b.color]));
+    else {
+      const pal = palette();
+      colors = new Map(legend.filter(r => !r.key.startsWith("(")).slice(0, TOP_COLORS).map((r, i) => [r.key, pal[i]]));
+    }
+    hits = drawTreemap(canvas, tree, paint, hl);
+    renderLegend();
+  }
+  function renderLegend() {
+    const total = legend.reduce((a, r) => a + r.bytes, 0);
+    const label = {suffix: "extension", mime: "type", folder: root ? "folder" : "root", change: "change"}[mode];
+    const shown = mode === "change" ? legend : legend.slice(0, TOP_COLORS + 3);
+    const rest = legend.slice(shown.length);
+    const rows = shown.map(r => h("tr", {class: hl === r.key ? "hl" : null,
+        onmouseenter: () => { hl = r.key; redraw(); }, onmouseleave: () => { hl = null; redraw(); }},
+      h("td", {class: "path"}, h("span", {class: "swatch", style: `background:${colors.get(r.key) || grayTile()}`}), r.key),
+      h("td", {class: "num", title: num(r.bytes) + " bytes"}, bytes(r.bytes)),
+      mode === "change" ? h("td", {class: "num"}, r.key === NOT_PINNED ? "" : signed(r.delta)) : pctCell(total ? r.bytes / total * 100 : 0)));
+    if (rest.length) rows.push(h("tr", {}, h("td", {class: "muted"}, `${num(rest.length)} more, grey`),
+      h("td", {class: "num"}, bytes(rest.reduce((a, r) => a + r.bytes, 0))), h("td", {})));
+    const note = mode === "change" ? "each folder's size now against the pin; hover one to pick out its tiles"
+      : `top ${TOP_COLORS} ${label}s by size; hover one to pick out its tiles`;
+    fill(legendCard, h("h2", {}, "Colours", h("small", {}, note)),
+      h("div", {class: "scroll"}, h("table", {}, h("thead", {}, h("tr", {}, h("th", {}, label), h("th", {class: "num"}, mode === "change" ? "size now" : "size"),
+        h("th", {class: "num"}, mode === "change" ? "change" : "%"))), h("tbody", {}, rows))));
+  }
+  function nodeTarget(n) {
+    if (n.kind === "group") return {group: n.name};
+    if (n.kind === "root" || n.kind === "pending") return {root: n.root};
+    if (n.kind === "more") return {root: n.root, prefix: n.path.split("/").slice(0, -1).join("/")};
+    return {root: n.root, prefix: n.path};
+  }
+  const goTo = n => go("graph", graphTarget(p, nodeTarget(n)));
+  function hitAt(e) {
+    const r = canvas.getBoundingClientRect(), x = e.clientX - r.left, y = e.clientY - r.top;
+    for (let i = hits.length - 1; i >= 0; i--) {
+      const t = hits[i];
+      if (x >= t.x && x < t.x + t.w && y >= t.y && y < t.y + t.h) return {t, x, y};
+    }
+    return null;
+  }
+  canvas.addEventListener("mousemove", e => {
+    const hit = hitAt(e);
+    if (!hit) { tip.hidden = true; return; }
+    const {t, x, y} = hit, n = t.node;
+    const where = n.kind === "group" ? n.name : n.kind === "root" || n.kind === "pending" ? n.root
+      : `${n.root}\\${n.path.replaceAll("/", "\\")}`;
+    const lines = [h("span", {class: "mono"}, where + (n.kind === "files" ? "  (files directly here)" : ""))];
+    if (n.merged) lines.push(h("div", {}, `${num(n.merged)} smaller folders, merged`));
+    lines.push(h("div", {}, h("b", {}, bytes(n.bytes)), ` in ${num(n.files)} files`));
+    if (n.kind === "pending") lines.push(h("div", {class: "muted"}, n.error ? "Error: " + n.error : "size from the root index; summarising…"));
+    if (t.seg && (mode === "suffix" || mode === "mime")) lines.push(h("div", {}, h("span", {class: "swatch", style: `background:${t.seg[2]}`}),
+      `${t.seg[0]}: `, h("b", {}, bytes(t.seg[1])), n.bytes ? ` (${(t.seg[1] / n.bytes * 100).toFixed(1)}%)` : ""));
+    if (t.seg && p.vs) {
+      const c = changeOf(n);
+      lines.push(h("div", {}, c.bucket === NOT_PINNED ? "This root is not in the pin."
+        : c.isNew ? `New since the pin (${signed(c.delta)}).`
+        : [`At the pin ${bytes(c.then)}, now ${bytes(n.bytes)}: `, h("b", {}, signed(c.delta)),
+           c.ratio != null ? ` (${c.ratio > 0 ? "+" : ""}${(c.ratio * 100).toFixed(1)}%)` : ""]));
+    }
+    lines.push(h("div", {class: "muted"}, n.kind === "group" ? "click: just this server/drive" : "click: zoom in (asks the server)"));
+    fill(tip, lines);
+    tip.hidden = false;
+    const bw = box.clientWidth, tw = tip.offsetWidth, th = tip.offsetHeight;
+    tip.style.left = Math.min(x + 14, bw - tw - 4) + "px";
+    tip.style.top = (y + 14 + th > box.clientHeight ? Math.max(4, y - th - 10) : y + 14) + "px";
+  });
+  canvas.addEventListener("mouseleave", () => { tip.hidden = true; });
+  canvas.addEventListener("click", e => { const hit = hitAt(e); if (hit) goTo(hit.t.node); });
+  let resizeTimer = null;
+  const ro = new ResizeObserver(() => { clearTimeout(resizeTimer); resizeTimer = setTimeout(redraw, 120); });
+  ro.observe(box);
+  const stopWatch = () => { if (gen !== graphGen) { ro.disconnect(); return true; } return false; };
+
+  function kpi(value, label, title) { return h("div", {class: "kpi", title: title || ""}, h("b", {}, value), h("span", {}, label)); }
+  function waiting(text) {
+    const t0 = Date.now();
+    const tick = () => { if (gen === graphGen && status.dataset.wait === text) status.textContent = `${text} ${Math.round((Date.now() - t0) / 1000)}s`; };
+    status.dataset.wait = text; tick();
+    const timer = setInterval(() => { if (gen !== graphGen || status.dataset.wait !== text) clearInterval(timer); else tick(); }, 500);
+  }
+
+  // The pins of this view, for the two selectors.
+  let pins = [];
+  try { pins = (await api("/api/pins", root ? {root, prefix, depth} : {depth})).pins; } catch (e) { /* none to offer */ }
+  if (stopWatch()) return;
+  const viewPin = p.at ? pins.find(x => x.at === p.at) : null;
+  const vsPin = p.vs ? pins.find(x => x.at === p.vs) : null;
+  const pinOptions = sel => pins.map(x => h("option", {value: x.at, selected: x.at === sel},
+    pinName(x) + (root ? "" : ` · ${num(x.snapshots.length)} root${x.snapshots.length === 1 ? "" : "s"}`)));
+  fill(snapSel, h("option", {value: ""}, "Latest"), pinOptions(p.at));
+  fill(vsSel, h("option", {value: ""}, "nothing"), pinOptions(p.vs));
+  snapSel.disabled = vsSel.disabled = !pins.length;
+  if (!pins.length) snapSel.title = vsSel.title = "nothing pinned for this view yet";
+  if ((p.at && !viewPin) || (p.vs && !vsPin)) {
+    return fill(status, failed(new Error("That pin no longer exists, or holds no snapshot of this view.")));
+  }
+  if (viewPin) {
+    unpinBtn.hidden = false;
+    unpinBtn.title = root ? "unpin this root's snapshot from the pin" : "unpin every snapshot of this pin";
+    unpinBtn.onclick = async () => {
+      if (!confirm(`Unpin ${root ? "this root's snapshot of" : "every root of"} ${pinName(viewPin)}?`)) return;
+      const body = root ? {ids: viewPin.snapshots.filter(s => s.root === root).map(s => s.id)} : {at: viewPin.at};
+      try { await postJson("/api/unpin", body); } catch (e) { return fill(status, failed(e)); }
+      go("graph", {...p, at: null, vs: p.vs === viewPin.at ? null : p.vs, color: p.vs === viewPin.at && mode === "change" ? "suffix" : mode});
+    };
+  }
+  async function loadBaseline(r) {
+    const snap = vsPin && vsPin.snapshots.find(s => s.root === r);
+    if (!snap) return;
+    for (const [k, v] of baselineOf(await getSnapshot(snap.id), r)) baseline.set(k, v);
+    baselineRoots.add(r);
+  }
+  const shown = [];  // the snapshots on screen (latest or pinned), for Pin
+  function enablePin() {
+    const ids = shown.filter(t => t.id).map(t => t.id);
+    pinBtn.disabled = !!viewPin || !ids.length || shown.some(t => !t.can_pin);
+    pinBtn.title = viewPin ? "this is already a pin" : shown.some(t => !t.can_pin)
+      ? "snapshots are not saved (--no-save, or this backend cannot store them)" : pinBtn.title;
+    pinBtn.onclick = async () => {
+      const label = prompt(`Pin ${root ? "this view" : `these ${ids.length} roots`} as they are now. Label (optional):`, "");
+      if (label === null) return;
+      let res;
+      try { res = await postJson("/api/pin", {ids, label}); } catch (e) { return fill(status, failed(e)); }
+      go("graph", {...p, vs: res.pin.at, color: "change"});
+    };
+  }
+  function changeTable(rootsShown) {
+    const rows = [];
+    const seen = new Set();
+    for (const leaf of leaves(tree)) {
+      if (leaf.kind === "pending" || !baselineRoots.has(leaf.root)) continue;
+      const key = leafKey(leaf.root, leaf.path);
+      seen.add(key);
+      const c = changeOf(leaf);
+      if (c.delta) rows.push({leaf, then: c.then, now: leaf.bytes, delta: c.delta});
+    }
+    for (const [key, b] of baseline) {
+      const r = key.slice(0, key.indexOf("|"));
+      if (!seen.has(key) && b.bytes && rootsShown.has(r)) rows.push({gone: {root: r, path: b.path}, then: b.bytes, now: 0, delta: -b.bytes});
+    }
+    rows.sort((a, b) => Math.abs(b.delta) - Math.abs(a.delta));
+    const name = r => { const n = r.leaf || r.gone; return (root ? "" : n.root + "\\") + (n.path || "(files directly here)").replaceAll("/", "\\") + (r.gone ? " (gone)" : ""); };
+    const grew = rows.filter(r => r.delta > 0).reduce((a, r) => a + r.delta, 0);
+    const shrank = rows.filter(r => r.delta < 0).reduce((a, r) => a + r.delta, 0);
+    fill(tableCard, h("h2", {}, "Biggest changes", h("small", {}, `since ${pinName(vsPin)}`)),
+      rows.length ? h("div", {class: "scroll"}, h("table", {}, h("thead", {}, h("tr", {}, h("th", {}, "folder"),
+        h("th", {class: "num"}, "at the pin"), h("th", {class: "num"}, "now"), h("th", {class: "num"}, "change"))),
+        h("tbody", {}, rows.slice(0, 40).map(r => h("tr", {class: r.leaf ? "click" : null, onclick: r.leaf ? () => goTo(r.leaf) : null},
+          h("td", {class: "path"}, name(r)), h("td", {class: "num"}, bytes(r.then)), h("td", {class: "num"}, bytes(r.now)),
+          h("td", {class: "num"}, signed(r.delta)))))))
+        : h("div", {class: "empty"}, "No folder changed size."));
+    return {grew, shrank, net: grew + shrank, count: rows.length};
+  }
+  const describe = t => t.source === "pinned" || viewPin ? `pinned snapshot built ${stamp(t.built_at)}`
+    : t.source === "stored" ? `saved snapshot built ${stamp(t.built_at)} (${ago(t.built_at)}), reused until ${ageText(t.max_age)} old`
+    : t.source === "saved" ? "summarised just now and saved"
+    : t.source === "memory" ? `summarised ${ago(t.built_at)}, kept in memory (not saved)` : "summarised just now (not saved)";
+
+  if (root) {  // one folder of one root
+    refresh.onclick = () => viewGraph(params, true);
+    refresh.disabled = !!viewPin;
+    let tm;
+    try {
+      if (viewPin) tm = await getSnapshot(viewPin.snapshots.find(s => s.root === root).id);
+      else {
+        waiting(`Summarising ${prefix ? root + "\\" + prefix.replaceAll("/", "\\") : root} on the server, unless a saved snapshot is recent enough: it reads every file record beneath it, so a big share takes a while…`);
+        tm = await getTreemap(root, prefix, depth, force);
+      }
+      await loadBaseline(root);
+    } catch (e) { if (gen === graphGen) fill(status, failed(e)); return; }
+    if (stopWatch()) return;
+    delete status.dataset.wait;
+    shown.push(tm);
+    enablePin();
+    status.textContent = (viewPin ? `Viewing ${pinName(viewPin)}: ` : "Latest: ") + describe(tm) + "."
+      + (vsPin ? ` Compared with ${pinName(vsPin)}.` : "") + (viewPin ? "" : " Refresh re-reads the records now.");
+    tree = folderTree(tm, root, prefix ? prefix.split("/").pop() : root, "folder");
+    const sub = tree.kids.filter(k => k.kind !== "files");
+    const cards = [kpi(num(tm.files), "files"), kpi(bytes(tm.bytes), num(tm.bytes) + " bytes"), kpi(num(sub.length), "folders directly here")];
+    if (vsPin) {
+      const ch = changeTable(new Set([root]));
+      cards.push(kpi(signed(ch.net), "net change since the pin"), kpi(`${signed(ch.grew)} / ${signed(ch.shrank)}`, "grew / shrank"));
+    } else {
+      fill(tableCard, h("h2", {}, "Folders", h("small", {}, `${num(sub.length)} directly here`)),
+        sub.length ? h("div", {class: "scroll"}, h("table", {}, h("thead", {}, h("tr", {}, h("th", {}, "folder"), h("th", {class: "num"}, "files"),
+          h("th", {class: "num"}, "size"), h("th", {class: "num"}, "%"))),
+          h("tbody", {}, sub.slice(0, 50).map(k => h("tr", {class: "click", onclick: () => goTo(k)},
+            h("td", {class: "path"}, k.name), h("td", {class: "num"}, num(k.files)), h("td", {class: "num"}, bytes(k.bytes)),
+            pctCell(tm.bytes ? k.bytes / tm.bytes * 100 : 0))))))
+          : h("div", {class: "empty"}, "No subfolders"));
+    }
+    fill(kpis, cards);
+    redraw();
+    return;
+  }
+
+  // every root (or one server/drive's), grouped
+  refresh.onclick = () => viewGraph(params, true);
+  refresh.disabled = !!viewPin;
+  let index;
+  try { index = (await api("/api/roots")).roots; } catch (e) { return fill(status, failed(e)); }
+  if (stopWatch()) return;
+  if (params.group) index = index.filter(r => groupOf(r.root) === params.group);
+  let missing = 0;
+  if (viewPin) {  // only the roots the pin holds, sized from the pin until loaded
+    const inPin = new Map(viewPin.snapshots.map(s => [s.root, s]));
+    missing = index.filter(r => !inPin.has(r.root)).length;
+    index = index.filter(r => inPin.has(r.root))
+      .map(r => ({...r, summary: {total_bytes: inPin.get(r.root).bytes, total_files: inPin.get(r.root).files}}));
+  }
+  const groups = new Map();
+  const rootNodes = new Map();
+  for (const r of index) {
+    const g = groupOf(r.root);
+    if (!groups.has(g)) groups.set(g, {name: g, kind: "group", kids: [], bytes: 0, files: 0});
+    const total = r.summary ? r.summary.total_bytes || 0 : 0;
+    const share = r.root.slice(g.length).replace(/^[\\/]+/, "");  // the group header already names the server
+    const node = {name: share || r.root, kind: "pending", root: r.root, path: "", kids: [], bytes: total,
+                  files: r.summary ? r.summary.total_files || 0 : 0, colorKey: r.root};
+    rootNodes.set(r.root, node);
+    groups.get(g).kids.push(node);
+  }
+  const groupList = [...groups.values()];
+  tree = groupList.length === 1 && params.group ? groupList[0] : {name: "all", kind: "top", kids: groupList};
+  if (tree.kind === "group") tree.kind = "top";  // a single server/drive: its roots are the top level
+  function totals() {
+    for (const g of groupList) {
+      g.kids.sort((a, b) => b.bytes - a.bytes);
+      g.bytes = g.kids.reduce((a, k) => a + k.bytes, 0);
+      g.files = g.kids.reduce((a, k) => a + k.files, 0);
+    }
+    groupList.sort((a, b) => b.bytes - a.bytes);
+  }
+  function renderOverview(done, final) {
+    totals();
+    const all = groupList.reduce((a, g) => a + g.bytes, 0);
+    const cards = [kpi(num(groupList.length), params.group ? "server/drive" : "servers & drives"), kpi(num(index.length), "roots"),
+      kpi(num(groupList.reduce((a, g) => a + g.files, 0)), "files"), kpi(bytes(all), num(all) + " bytes")];
+    if (!final) cards.push(kpi(`${num(done)} / ${num(index.length)}`, "roots loaded"));
+    if (vsPin && final) {
+      const ch = changeTable(new Set(index.map(r => r.root)));
+      cards.push(kpi(signed(ch.net), "net change since the pin"), kpi(`${signed(ch.grew)} / ${signed(ch.shrank)}`, "grew / shrank"));
+    } else if (!vsPin || !final) {
+      const rows = params.group ? groupList[0]?.kids || [] : groupList;
+      fill(tableCard, h("h2", {}, params.group ? "Roots" : "Servers & drives", h("small", {}, "click one to zoom in")),
+        h("div", {class: "scroll"}, h("table", {}, h("thead", {}, h("tr", {}, h("th", {}, params.group ? "root" : "server / drive"),
+          h("th", {class: "num"}, params.group ? "files" : "roots"), h("th", {class: "num"}, "size"), h("th", {class: "num"}, "%"))),
+          h("tbody", {}, rows.map(n => h("tr", {class: "click", onclick: () => goTo(n)},
+            h("td", {class: "path"}, n.name, n.kind === "pending" ? h("span", {class: n.error ? "badge warn" : "badge live"}, n.error ? "error" : "loading") : null),
+            h("td", {class: "num"}, params.group ? num(n.files) : num(n.kids.length)), h("td", {class: "num", title: num(n.bytes) + " bytes"}, bytes(n.bytes)),
+            pctCell(all ? n.bytes / all * 100 : 0)))))));
+    }
+    fill(kpis, cards);
+    redraw();
+  }
+  if (!index.length) return fill(status, viewPin ? "This pin holds none of these roots." : "No roots in this catalog.");
+  renderOverview(0, false);
+  const order = [...rootNodes.values()].sort((a, b) => b.bytes - a.bytes);
+  let done = 0, slow = 0;
+  for (const node of order) {
+    if (stopWatch()) return;
+    const t0 = Date.now();
+    if (!viewPin) waiting(`Loading ${node.root} (${done + 1} of ${order.length}): a saved snapshot if it is recent enough, or the server reads its records…`);
+    try {
+      const tm = viewPin ? await getSnapshot(viewPin.snapshots.find(s => s.root === node.root).id)
+                         : await getTreemap(node.root, "", depth, force);
+      await loadBaseline(node.root);
+      if (stopWatch()) return;
+      shown.push(tm);
+      const sub = folderTree(tm, node.root, node.name, "root");
+      for (const l of leaves(sub)) l.colorKey = node.root;  // the overview colours folders by root
+      Object.assign(node, sub, {snapshot: tm});
+    } catch (e) {
+      if (stopWatch()) return;
+      node.error = e.message;
+    }
+    if (Date.now() - t0 > 1000) slow += Date.now() - t0;
+    done++;
+    renderOverview(done, done === order.length);
+  }
+  delete status.dataset.wait;
+  enablePin();
+  const loaded = order.filter(n => n.snapshot).map(n => n.snapshot);
+  const failedRoots = order.filter(n => n.error);
+  const count = s => loaded.filter(t => t.source === s).length;
+  const oldest = loaded.map(t => t.built_at).sort()[0];
+  let text;
+  if (viewPin) text = `Viewing ${pinName(viewPin)}: ${num(loaded.length)} roots, snapshots built from ${stamp(oldest)}.`
+    + (missing ? ` ${num(missing)} roots are not in this pin.` : "");
+  else {
+    const parts = [];
+    if (count("stored")) parts.push(`${num(count("stored"))} from saved snapshots (oldest ${ago(loaded.filter(t => t.source === "stored").map(t => t.built_at).sort()[0])})`);
+    if (count("saved")) parts.push(`${num(count("saved"))} summarised now and saved`);
+    if (count("memory") + count("computed")) parts.push(`${num(count("memory") + count("computed"))} kept in memory only (not saved)`);
+    text = `Latest: ${num(loaded.length)} roots, ${parts.join(", ")}` + (slow > 1000 ? `; ${Math.round(slow / 1000)}s reading records` : "")
+      + (loaded[0] ? `. Saved snapshots are reused until ${ageText(loaded[0].max_age)} old; Refresh re-reads every root now.` : ".");
+  }
+  if (vsPin) text += ` Compared with ${pinName(vsPin)}` + (baselineRoots.size < loaded.length ? ` (${num(loaded.length - baselineRoots.size)} roots not in it).` : ".");
+  if (failedRoots.length) text += ` ${failedRoots.length} failed: ${failedRoots.map(n => n.root).join(", ")}.`;
+  status.textContent = text;
+}
+
+// --- records ---------------------------------------------------------
+const FILTER_LABELS = {suffix: "extension", mime: "type", dir: "directory", parent: "in folder", kind: "kind",
+                       q: "path contains", files_only: "files only", unreadable: "unreadable", errors: "has errors"};
+const COLS = [
+  {key: "rel_path", label: "path"}, {key: "kind", label: "kind"}, {key: "mime", label: "type", sortable: false, cls: "hide-sm"},
+  {key: "size", label: "size", num: true}, {key: "mtime_ns", label: "modified", num: true},
+];
+async function viewRecords(params) {
+  const root = curRoot(params);
+  const p = {...params, root};
+  const filters = Object.keys(FILTER_LABELS).filter(k => k in p);
+  const chips = filters.map(k => {
+    const rest = {...p, offset: ""}; delete rest[k];
+    const val = k === "files_only" || k === "unreadable" || k === "errors" ? "" : (k === "dir" ? `${p[k]} (depth ${p.depth || 2})` : (p[k] || "(root)"));
+    return h("span", {class: "chip"}, FILTER_LABELS[k] + (val ? ": " + val : ""),
+      h("button", {title: "remove filter", onclick: () => go("records", rest)}, "×"));
+  });
+  const search = h("input", {type: "search", placeholder: "Path contains…", value: p.q || "", size: 28});
+  const form = h("form", {onsubmit: e => { e.preventDefault(); go("records", {...p, q: search.value, offset: ""}); }}, search);
+  const holder = h("section", {class: "card"}, h("div", {class: "loading"}, "Querying…"));
+  show(h("div", {}, h("div", {class: "toolbar"}, form, chips), holder));
+  let r;
+  try { r = await api("/api/records", p); } catch (e) { return fill(holder, failed(e)); }
+  const q = r.query;
+  const head = h("tr", {}, COLS.map(c => {
+    const on = q.sort === c.key;
+    const sortable = c.sortable !== false;
+    return h("th", {class: (c.num ? "num " : "") + (sortable ? "sort " : "") + (c.cls || ""),
+      onclick: sortable ? () => go("records", {...p, sort: c.key, desc: on ? (q.desc ? "0" : "1") : (c.num ? "1" : "0"), offset: ""}) : null},
+      c.label, on ? (q.desc ? " ▼" : " ▲") : "");
+  }));
+  const rows = r.rows.map(d => h("tr", {class: "click", onclick: () => go("record", {root, rel_path: d.rel_path})},
+    h("td", {class: "path"}, d.rel_path || "(root)", d.unreadable ? h("span", {class: "badge warn"}, "unreadable")
+      : d.errors ? h("span", {class: "badge warn"}, `${d.errors} error${d.errors > 1 ? "s" : ""}`) : null),
+    h("td", {}, d.kind || ""), h("td", {class: "muted hide-sm"}, d.mime || ""),
+    h("td", {class: "num", title: d.size == null ? "" : num(d.size) + " bytes"}, d.kind === "dir" ? "" : bytes(d.size)),
+    h("td", {class: "num muted"}, when(d.mtime_ns))));
+  const end = Math.min(q.offset + q.limit, r.total);
+  const pager = h("div", {class: "pager"},
+    h("button", {disabled: q.offset <= 0, onclick: () => go("records", {...p, offset: Math.max(0, q.offset - q.limit)})}, "‹ Prev"),
+    h("button", {disabled: end >= r.total, onclick: () => go("records", {...p, offset: q.offset + q.limit})}, "Next ›"),
+    h("span", {class: "muted"}, r.total ? `${num(q.offset + 1)}–${num(end)} of ${num(r.total)} · ${bytes(r.bytes)}` : "No matching records"));
+  fill(holder, h("div", {class: "scroll"}, h("table", {}, h("thead", {}, head), h("tbody", {}, rows))), pager);
+}
+
+// --- browse ----------------------------------------------------------
+async function viewBrowse(params) {
+  const root = curRoot(params), parent = params.parent || "";
+  const offset = Number(params.offset || 0);
+  const foldersCard = h("section", {class: "card"}, h("h2", {}, "Folders"), h("div", {class: "loading"}, "Loading…"));
+  const filesCard = h("section", {class: "card"}, h("h2", {}, "Files"), h("div", {class: "loading"}, "Loading…"));
+  show(h("div", {}, crumbs(root, parent, false), h("div", {class: "stack"}, foldersCard, filesCard)));
+
+  const [sub, dirs] = await Promise.all([
+    api("/api/subtree", {root, parent}).catch(e => e),
+    api("/api/records", {root, parent, kind: "dir", sort: "name", desc: "0", limit: 1000}).catch(e => e),
+  ]);
+  if (sub instanceof Error) fill(foldersCard, h("h2", {}, "Folders"), failed(sub));
+  else {
+    const byName = new Map(sub.folders.map(f => [f.name, {...f}]));
+    if (!(dirs instanceof Error)) for (const d of dirs.rows) {
+      if (!byName.has(d.name)) byName.set(d.name, {name: d.name, files: 0, bytes: 0, record: d});
+      else byName.get(d.name).record = d;
+    }
+    const folders = [...byName.values()].sort((a, b) => b.bytes - a.bytes || a.name.localeCompare(b.name));
+    const total = folders.reduce((a, f) => a + f.bytes, 0);
+    const rows = folders.map(f => {
+      const path = parent ? parent + "/" + f.name : f.name;
+      return h("tr", {class: "click", onclick: () => go("browse", {root, parent: path})},
+        h("td", {class: "path"}, "📁 ", f.name, f.record ? null : h("span", {class: "badge", title: "no dir record yet (scan in progress, or imported without dirs)"}, "no record")),
+        h("td", {class: "num"}, num(f.files)), h("td", {class: "num", title: num(f.bytes) + " bytes"}, bytes(f.bytes)),
+        pctCell(total ? f.bytes / total * 100 : 0),
+        h("td", {class: "num"}, f.record ? h("a", {href: route("record", {root, rel_path: path}), onclick: e => e.stopPropagation()}, "record") : ""));
+    });
+    fill(foldersCard, h("h2", {}, "Folders", h("small", {}, `${num(folders.length)} · ${bytes(total)} beneath`)),
+      folders.length ? h("div", {class: "scroll"}, h("table", {},
+        h("thead", {}, h("tr", {}, h("th", {}, "name"), h("th", {class: "num"}, "files beneath"), h("th", {class: "num"}, "size"), h("th", {class: "num"}, "% here"), h("th", {}))),
+        h("tbody", {}, rows))) : h("div", {class: "empty"}, "No subfolders"));
+  }
+
+  let fr;
+  try { fr = await api("/api/records", {root, parent, files_only: 1, sort: params.sort || "size", desc: params.desc || "", offset, limit: 200}); }
+  catch (e) { return fill(filesCard, h("h2", {}, "Files"), failed(e)); }
+  const q = fr.query;
+  const rows = fr.rows.map(d => h("tr", {class: "click", onclick: () => go("record", {root, rel_path: d.rel_path})},
+    h("td", {class: "path"}, d.name, d.errors ? h("span", {class: "badge warn"}, "errors") : null),
+    h("td", {}, d.kind || ""), h("td", {class: "muted hide-sm"}, d.mime || ""),
+    h("td", {class: "num", title: num(d.size) + " bytes"}, bytes(d.size)), h("td", {class: "num muted hide-sm"}, when(d.mtime_ns))));
+  const sortTh = (key, label, isNum) => h("th", {class: (isNum ? "num " : "") + "sort",
+    onclick: () => go("browse", {root, parent, sort: key, desc: q.sort === key ? (q.desc ? "0" : "1") : (isNum ? "1" : "0")})},
+    label, q.sort === key ? (q.desc ? " ▼" : " ▲") : "");
+  const end = Math.min(q.offset + q.limit, fr.total);
+  fill(filesCard, h("h2", {}, "Files", h("small", {}, `${num(fr.total)} here · ${bytes(fr.bytes)}`)),
+    fr.total ? h("div", {class: "scroll"}, h("table", {},
+      h("thead", {}, h("tr", {}, sortTh("name", "name"), sortTh("kind", "kind"), h("th", {class: "hide-sm"}, "type"), sortTh("size", "size", true), h("th", {class: "num hide-sm"}, "modified"))),
+      h("tbody", {}, rows))) : h("div", {class: "empty"}, "No files directly in this folder"),
+    fr.total > q.limit ? h("div", {class: "pager"},
+      h("button", {disabled: offset <= 0, onclick: () => go("browse", {...params, root, offset: Math.max(0, offset - q.limit)})}, "‹ Prev"),
+      h("button", {disabled: end >= fr.total, onclick: () => go("browse", {...params, root, offset: offset + q.limit})}, "Next ›"),
+      h("span", {class: "muted"}, `${num(offset + 1)}–${num(end)} of ${num(fr.total)}`)) : null);
+}
+
+// --- one record ------------------------------------------------------
+function jsonTree(v, key, depth) {
+  const k = key != null ? h("span", {class: "k"}, JSON.stringify(key) + ": ") : null;
+  if (v !== null && typeof v === "object") {
+    const entries = Array.isArray(v) ? v.map((x, i) => [i, x]) : Object.entries(v);
+    const open = Array.isArray(v) ? "[" : "{", close = Array.isArray(v) ? "]" : "}";
+    if (!entries.length) return h("div", {class: "row"}, k, open + close);
+    const det = h("details", {open: depth < 2 && entries.length < 60},
+      h("summary", {}, k, `${open} ${entries.length} ${Array.isArray(v) ? "items" : "keys"} ${close}`),
+      entries.map(([ck, cv]) => jsonTree(cv, Array.isArray(v) ? null : ck, depth + 1)));
+    return det;
+  }
+  const cls = typeof v === "string" ? "s" : typeof v === "number" ? "n" : "b";
+  return h("div", {class: "row"}, k, h("span", {class: cls}, JSON.stringify(v)));
+}
+async function viewRecord(params) {
+  const root = curRoot(params), rel = params.rel_path || "";
+  show(h("div", {class: "loading"}, "Loading record…"));
+  let d;
+  try { d = await api("/api/record", {root, rel_path: rel}); } catch (e) { return show(crumbs(root, rel, false), failed(e)); }
+  const fact = (label, value) => value == null || value === "" ? [] : [h("dt", {}, label), h("dd", {}, value)];
+  const probe = d.probe || {};
+  const facts = h("dl", {class: "facts"},
+    fact("root", d.root), fact("path", h("span", {class: "mono"}, d.rel_path || "(root)")),
+    fact("kind", d.kind ? h("a", {href: route("records", {root, kind: d.kind})}, d.kind) : null),
+    fact("size", d.size == null ? null : `${bytes(d.size)} (${num(d.size)} bytes)`),
+    fact("type", d.mime ? h("a", {href: route("records", {root, mime: d.mime, files_only: 1})}, d.mime) : null),
+    fact("description", probe.mime_glob_desc),
+    fact("extension", d.kind !== "dir" ? h("a", {href: route("records", {root, suffix: d.suffix || "(none)", files_only: 1})}, d.suffix || "(none)") : null),
+    fact("modified", when(d.mtime_ns)), fact("created", when(d.ctime_ns)),
+    fact("sha256", d.sha256 ? h("span", {class: "mono"}, d.sha256) : null),
+    fact("folder", d.rel_path ? h("a", {href: route("browse", {root, parent: d.kind === "dir" ? d.rel_path : dirOf(d.rel_path)})},
+      d.kind === "dir" ? "browse this folder" : (dirOf(d.rel_path) || "(root)")) : null));
+  const errs = (d.errors || []).length ? h("div", {class: "errors"},
+    d.errors.map(e => h("div", {}, h("b", {}, e.stage + ": "), e.message))) : null;
+  const membersCard = h("section", {class: "card", hidden: true});
+  show(h("div", {}, crumbs(root, d.rel_path, d.kind === "dir"), h("div", {class: "stack"},
+    h("section", {class: "card"}, h("h2", {}, d.name || d.rel_path || root, h("small", {}, d.kind || "")), errs, facts),
+    membersCard,
+    h("section", {class: "card"}, h("h2", {}, "Stored document"), h("div", {class: "json"}, jsonTree(d, null, 0))))));
+  if (d.kind !== "dir") loadMembers(membersCard, root, d.rel_path, 0, null);
+}
+async function loadMembers(card, root, rel, offset, tbody) {
+  let m;
+  try { m = await api("/api/members", {root, rel_path: rel, offset, limit: 200}); } catch (e) { return; }
+  if (!m.rows.length && offset === 0) return;
+  const cols = ["index", "path", "size", "csize", "kind", "role"];
+  if (!tbody) {
+    tbody = h("tbody");
+    card.hidden = false;
+    fill(card, h("h2", {}, "Archive members"), h("div", {class: "scroll"}, h("table", {},
+      h("thead", {}, h("tr", {}, cols.map(c => h("th", {class: ["index", "size", "csize"].includes(c) ? "num" : ""}, c)))), tbody)));
+  }
+  for (const r of m.rows) tbody.append(h("tr", {title: r.error || ""},
+    h("td", {class: "num muted"}, r.index), h("td", {class: "path mono"}, r.path || "", r.error ? h("span", {class: "badge warn"}, "error") : null),
+    h("td", {class: "num", title: r.size == null ? "" : num(r.size) + " bytes"}, bytes(r.size)),
+    h("td", {class: "num muted"}, bytes(r.csize)), h("td", {}, r.kind || r.format || ""), h("td", {class: "muted"}, r.role || "")));
+  card.querySelector(".more")?.remove();
+  if (m.more) card.append(h("div", {class: "more"},
+    h("button", {onclick: () => loadMembers(card, root, rel, offset + m.limit, tbody)}, "Load more members")));
+}
+
+// --- shell -----------------------------------------------------------
+const VIEWS = {roots: viewRoots, summary: viewSummary, graph: viewGraph, records: viewRecords, browse: viewBrowse,
+               record: viewRecord};
+async function render() {
+  const {view, params} = parseHash();
+  if (params.root && params.root !== $root.value && INFO.roots.includes(params.root)) $root.value = params.root;
+  for (const a of document.querySelectorAll("#nav a")) {
+    a.classList.toggle("on", a.dataset.view === (view === "record" ? "browse" : view));
+    a.href = route(a.dataset.view, a.dataset.view === "graph" ? {} : {root: $root.value});  // Graph opens on every root
+  }
+  if (!INFO.roots.length) return show(h("div", {class: "empty"}, "This catalog has no records yet."));
+  (VIEWS[view] || viewRoots)(params);
+}
+$root.addEventListener("change", () => {
+  const {view} = parseHash();
+  go(view === "record" ? "browse" : view, {root: $root.value});
+});
+window.addEventListener("hashchange", render);
+async function loadInfo() {
+  INFO = await api("/api/info");
+  document.getElementById("src").textContent = `${INFO.backend} · ${INFO.location}`;
+  fill($root, ...INFO.roots.map(r => h("option", {value: r}, r)));
+}
+async function loadBackends() {
+  const {backends} = await api("/api/backends");
+  fill($backend, ...backends.map(b => h("option", {value: b.key, disabled: !b.available, title: b.error || b.title},
+    `${b.backend} · ${b.location}${b.available ? "" : " (unavailable)"}`)));
+  $backend.value = (backends.find(b => b.active) || backends[0] || {}).key;
+}
+$backend.addEventListener("change", async () => {
+  $switchError.hidden = true;
+  $backend.disabled = true;
+  try {
+    const res = await fetch("/api/backend", {method: "POST", headers: {"Content-Type": "application/json"},
+                                             body: JSON.stringify({key: $backend.value})});
+    const data = await res.json().catch(() => ({error: res.statusText}));
+    if (!res.ok) throw new Error(data.error || res.statusText);
+    await loadInfo();
+    if (location.hash) location.hash = "";  // the roots of the old catalog mean nothing in the new one
+    else render();
+  } catch (e) {
+    $switchError.textContent = "Cannot switch backend: " + e.message;
+    $switchError.hidden = false;
+  }
+  try { await loadBackends(); } catch (e) { /* keep the list as it is */ }
+  $backend.disabled = false;
+});
+(async () => {
+  try { await loadInfo(); } catch (e) { return show(failed(e)); }
+  loadBackends().catch(() => {});
+  render();
+})();
+</script>
+</body>
+</html>

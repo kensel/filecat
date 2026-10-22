@@ -1,0 +1,36 @@
+[project]
+name = "filecat"
+version = "0.2.0"
+description = "Walk local drives and NAS shares, record every file and directory, and measure what the bytes support."
+readme = "README.md"
+requires-python = ">=3.11"
+dependencies = [
+    "pefile>=2023.2.7",
+    "python-magic-bin>=0.4.14; sys_platform == 'win32'",
+    "python-magic>=0.4.27; sys_platform != 'win32'",
+]
+
+[project.optional-dependencies]
+postgres = ["psycopg[binary]>=3.1"]
+mysql = ["pymysql>=1.1"]
+mssql = ["pyodbc>=5.0"]
+mongo = ["pymongo>=4.6"]
+magika = ["magika>=0.5"]
+dev = ["pytest>=8"]
+
+[project.scripts]
+filecat = "filecat.cli:main"
+
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.setuptools.package-data]
+filecat = ["data/*", "web/*"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["src", "."]
