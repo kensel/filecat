@@ -392,7 +392,7 @@ class Catalog:
 
         def page(b: Any) -> dict[str, Any]:
             try:
-                it = b.list_members(p["root"], p["rel_path"])
+                it = b.members_of(p["root"], p["rel_path"])
                 rows = list(itertools.islice(it, offset, offset + limit + 1))
             except NotImplementedError:
                 return {"supported": False, "rows": [], "more": False}

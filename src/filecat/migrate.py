@@ -13,6 +13,11 @@ have a samples store, the sample documents are copied first; when only the
 target has one, inline samples are split off on the way in; when only the
 source has one, each record gets its sample back inline.
 
+Member sets (filecat/member_sets.py) follow the target the same way: copied
+set by set after the records when both backends store them, written out
+under each archive's path when only the source does, and filed by hash when
+only the target does.
+
 Public API:
     migrate(src, dst, *, roots=None, batch=2000, programs=True, members=True,
             verify=False, progress=None) -> MigrateStats
@@ -27,7 +32,7 @@ from collections import defaultdict
 from dataclasses import dataclass, field
 from typing import Any, Callable
 
-from . import samples
+from . import member_sets, samples
 from .backends import open_backend
 from .backends.base import Backend, Document
 
@@ -49,6 +54,7 @@ class MigrateStats:
     members_archives: int = 0
     members_rows: int = 0
     members_skipped: bool = False
+    member_sets: int = 0
     samples: int = 0
     verify_checked: int = 0
     verify_mismatches: list[str] = field(default_factory=list)
@@ -85,6 +91,7 @@ def _readable(backend: Backend, doc: Document) -> Document:
     """A record as a reader sees it, wherever its sample is kept."""
     out = samples.attach(backend, [doc])[0]
     out.pop("sample_id", None)
+    out.pop("members_id", None)
     return out
 
 
@@ -126,7 +133,19 @@ def migrate(src: Backend, dst: Backend, *, roots: list[str] | None = None,
             stats.samples += len(chunk)
         maybe_progress()
 
+    # (root, rel_path, members_id, hash_type) of the records that name a set;
+    # the sets are read once the listing is closed, as some servers allow no
+    # second statement while it is open.
+    named_sets: list[tuple[str, str, str, str]] = []
+
     def write(docs: list[Document]) -> None:
+        for d in docs:
+            if d.get("members_id") and src.stores_member_sets:
+                key = samples.key_of(d)
+                named_sets.append((d["root"], d["rel_path"], d["members_id"],
+                                   key[1] if key else "sha256"))
+                if not (dst.stores_member_sets and members):
+                    del d["members_id"]
         if src.stores_samples and not dst.stores_samples:
             docs = samples.attach(src, docs)
             for d in docs:
@@ -154,6 +173,23 @@ def migrate(src: Backend, dst: Backend, *, roots: list[str] | None = None,
         buf = []
     dst.flush()
     maybe_progress()
+
+    # --- member sets --------------------------------------------------------
+    if members and named_sets:
+        copied: set[str] = set()
+        for root_str, rel_path, mid, hash_type in named_sets:
+            if dst.stores_member_sets and mid in copied:
+                continue
+            rows = member_sets.clean_rows(src.list_member_set(mid))
+            if dst.stores_member_sets:
+                dst.put_member_set(member_sets.header_for((mid, hash_type), rows), rows)
+                copied.add(mid)
+                stats.member_sets += 1
+            else:
+                dst.put_members(root_str, rel_path, rows)
+                stats.members_archives += 1
+            stats.members_rows += len(rows)
+            maybe_progress()
 
     # --- programs -------------------------------------------------------
     if programs:
@@ -203,7 +239,13 @@ def migrate(src: Backend, dst: Backend, *, roots: list[str] | None = None,
                 clean = [{k: v for k, v in m.items() if k not in _MEMBER_IDENTITY_KEYS}
                          for m in rows]
                 try:
-                    dst.put_members(root_str, archive_rel_path, clean)
+                    doc = dst.get(root_str, archive_rel_path) if dst.stores_member_sets else None
+                    if doc is not None and not doc.get("members_id") \
+                            and member_sets.store_rows(dst, doc, clean):
+                        dst.put(doc)
+                        stats.member_sets += 1
+                    else:
+                        dst.put_members(root_str, archive_rel_path, clean)
                 except NotImplementedError:
                     stats.members_skipped = True
                     break

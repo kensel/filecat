@@ -44,7 +44,9 @@ def test_jsonl_and_sqlite_documents_compare_equal(fixture_dir: Path):
     with sqlite3.connect(db) as conn:
         from_sqlite = {r: json.loads(d) for r, d in conn.execute("SELECT rel_path, document FROM files")}
         stored = {i: json.loads(d) for i, d in conn.execute("SELECT sample_id, document FROM samples")}
-    # sqlite files text samples under the content hash; put them back to compare
+    # sqlite files text samples and archive members under the content hash;
+    # put the samples back to compare
+    assert from_sqlite["two.zip"].pop("members_id") == from_sqlite["two.zip"]["sha256"]
     for doc in from_sqlite.values():
         sid = doc.pop("sample_id", None)
         if sid is not None:

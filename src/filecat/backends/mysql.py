@@ -141,6 +141,28 @@ _SCHEMA = [
         document JSON NOT NULL
     ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
     """,
+    """
+    CREATE TABLE IF NOT EXISTS member_sets (
+        members_id VARCHAR(64) PRIMARY KEY,
+        document JSON NOT NULL
+    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
+    """,
+    """
+    CREATE TABLE IF NOT EXISTS set_members (
+        members_id VARCHAR(64) NOT NULL,
+        idx INT NOT NULL,
+        path TEXT,
+        path_hash CHAR(64),
+        size BIGINT,
+        csize BIGINT,
+        role VARCHAR(32),
+        kind VARCHAR(32),
+        document JSON NOT NULL,
+        PRIMARY KEY (members_id, idx),
+        KEY idx_set_members_role (role),
+        KEY idx_set_members_path_hash (path_hash)
+    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
+    """,
 ]
 
 _UPSERT_SQL = """
@@ -230,6 +252,7 @@ class MysqlBackend(Backend):
     name = "mysql"
     stores_samples = True
     batches_samples = True
+    stores_member_sets = True
 
     def __init__(self, dsn: str) -> None:
         import pymysql  # lazy: only needed when this backend is used
@@ -638,6 +661,67 @@ class MysqlBackend(Backend):
             rows = cur.fetchall()
         self.conn.commit()
         return [json.loads(d) for _, d in rows], (rows[-1][0] if rows else after)
+
+    def prune_samples(self) -> int:
+        self.flush()
+        with self.conn.cursor() as cur:
+            n = cur.execute("DELETE FROM samples WHERE NOT EXISTS "
+                            "(SELECT 1 FROM files f WHERE f.document->>'$.sample_id' = samples.sample_id)")
+        self.conn.commit()
+        return n
+
+    # --- member sets -------------------------------------------------
+    def put_member_set(self, header: Document, rows: list[Document]) -> bool:
+        mid = header["members_id"]
+        with self.conn.cursor() as cur:
+            cur.execute("SELECT document->>'$.digest' FROM member_sets WHERE members_id=%s", (mid,))
+            old = cur.fetchone()
+            if old and old[0] == header["digest"]:
+                self.conn.commit()
+                return False
+            cur.execute("DELETE FROM member_sets WHERE members_id=%s", (mid,))
+            cur.execute("DELETE FROM set_members WHERE members_id=%s", (mid,))
+            if rows:
+                cur.executemany(
+                    "INSERT INTO set_members (members_id, idx, path, path_hash, size, csize, role, kind, "
+                    "document) VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s)",
+                    [(mid, r["index"], r.get("path"), _rel_hash(r["path"]) if r.get("path") else None,
+                      r.get("size"), r.get("csize"), r.get("role"), r.get("kind"),
+                      json.dumps(_json_safe({**r, "members_id": mid}), ensure_ascii=False)) for r in rows])
+            cur.execute("INSERT INTO member_sets (members_id, document) VALUES (%s, %s)",
+                        (mid, json.dumps(header, ensure_ascii=False)))
+        self.conn.commit()
+        return True
+
+    def list_member_set(self, members_id: str) -> Iterator[Document]:
+        self.flush()
+        cur = self.conn.cursor(self._pymysql.cursors.SSCursor)
+        try:
+            cur.execute("SELECT document FROM set_members WHERE members_id=%s ORDER BY idx", (members_id,))
+            for (doc_json,) in cur:
+                yield json.loads(doc_json)
+        finally:
+            cur.close()
+
+    def iter_member_sets(self) -> Iterator[Document]:
+        self.flush()
+        cur = self.conn.cursor(self._pymysql.cursors.SSCursor)
+        try:
+            cur.execute("SELECT document FROM member_sets")
+            for (doc_json,) in cur:
+                yield json.loads(doc_json)
+        finally:
+            cur.close()
+
+    def prune_member_sets(self) -> int:
+        self.flush()
+        with self.conn.cursor() as cur:
+            n = cur.execute("DELETE FROM member_sets WHERE NOT EXISTS (SELECT 1 FROM files f "
+                            "WHERE f.document->>'$.members_id' = member_sets.members_id)")
+            cur.execute("DELETE FROM set_members WHERE NOT EXISTS "
+                        "(SELECT 1 FROM member_sets m WHERE m.members_id = set_members.members_id)")
+        self.conn.commit()
+        return n
 
     # --- lifecycle -------------------------------------------------
     def close(self) -> None:

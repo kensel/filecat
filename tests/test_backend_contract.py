@@ -499,3 +499,57 @@ def test_page_records_visits_every_record_once(backend, backend_name):
         backend.flush()
     assert sorted(seen) == sorted(d["rel_path"] for d in docs)
     assert all(backend.get(ROOT, d["rel_path"])["size"] == d["size"] + 1 for d in docs)
+
+
+# --- member sets (filecat/member_sets.py) ----------------------------------
+
+def test_member_sets_contract(backend, backend_name):
+    from filecat import member_sets
+    if not backend.stores_member_sets:
+        pytest.skip(f"{backend_name} keeps members under each archive's path")
+    mid = _sample_id()
+    rows = member_sets.clean_rows(_make_members(3) + [{"path": "big", "mtime_ns": 10 ** 37, "role": "data"}])
+    header = member_sets.header_for((mid, "sha256"), rows)
+    assert backend.put_member_set(header, rows) is True
+    assert backend.put_member_set(header, rows) is False          # same digest: left alone
+    got = list(backend.list_member_set(mid))
+    assert [r["path"] for r in got] == [r["path"] for r in rows] and all(r["members_id"] == mid for r in got)
+    assert member_sets.clean_rows(got)[:3] == rows[:3] and int(got[3]["mtime_ns"]) == 10 ** 37
+    fewer = rows[:2]
+    assert backend.put_member_set(member_sets.header_for((mid, "sha256"), fewer), fewer) is True
+    assert len(list(backend.list_member_set(mid))) == 2
+    assert {"members_id": mid, "hash_type": "sha256", "count": 2,
+            "digest": member_sets.digest(fewer)} in list(backend.iter_member_sets())
+
+
+def test_store_files_members_under_the_hash_and_prune(backend, backend_name):
+    from filecat.record import MEMBERS_KEY
+    mid, sid = _sample_id(), _sample_id()
+    docs = _make_docs(ROOT)
+    copies = [{**docs[0], "sha256": mid, MEMBERS_KEY: _make_members(4)},
+              {**docs[1], "sha256": mid, MEMBERS_KEY: _make_members(4)}]
+    plain = {**docs[2], MEMBERS_KEY: _make_members(2)}           # no hash: rows under the path
+    for d in copies + [plain]:
+        backend.store(copy.deepcopy(d))
+    backend.flush()
+    for d in copies:
+        rows = list(backend.members_of(ROOT, d["rel_path"]))
+        assert [r["index"] for r in rows] == [0, 1, 2, 3]
+    assert len(list(backend.members_of(ROOT, plain["rel_path"]))) == 2
+    if not backend.stores_member_sets:
+        assert "members_id" not in backend.get(ROOT, copies[0]["rel_path"])
+        return
+    assert {backend.get(ROOT, d["rel_path"])["members_id"] for d in copies} == {mid}
+    assert list(backend.list_members(ROOT, copies[0]["rel_path"])) == []
+    assert "members_id" not in backend.get(ROOT, plain["rel_path"])
+
+    backend.add_samples([{"sample_id": sid, "hash_type": "sha256", "sample": "orphan"}])
+    backend.delete(ROOT, copies[0]["rel_path"])
+    backend.prune_member_sets()
+    assert len(list(backend.list_member_set(mid))) == 4          # the other copy still names it
+    backend.delete(ROOT, copies[1]["rel_path"])
+    assert backend.prune_member_sets() >= 1
+    assert list(backend.list_member_set(mid)) == []
+    assert mid not in {h["members_id"] for h in backend.iter_member_sets()}
+    assert backend.prune_samples() >= 1
+    assert backend.get_samples([sid]) == {}

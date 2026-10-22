@@ -595,6 +595,14 @@ the record keeps a `sample_id`. Records from before v0.1.2 move over with
 `filecat samples migrate`, which is batched, resumable and safe to stop at
 any point. See [docs/samples.md](docs/samples.md).
 
+Archive members are kept the same way: one member set per archive content
+hash, however many copies of the archive the catalog holds, named on each
+record by `members_id`. Records from before v0.1.3 move over with
+`filecat member-sets migrate`, which also trims compound documents listed
+before v0.1.1 to their anomalies. `filecat samples prune` and
+`filecat member-sets prune` remove what no record names any more. See
+[docs/members.md](docs/members.md).
+
 ## Tests
 
 ```

@@ -56,6 +56,10 @@ The role check comes before `expected` on purpose: an `.exe` under
 - `metadata_parts`: which of the format's `metadata` parts exist. Nothing
   reads them yet; see below.
 
+Compound documents scanned before v0.1.1 still hold every entry until a
+scan lists them again, or `filecat member-sets migrate` trims them
+([members.md](members.md#moving-existing-rows-filecat-member-sets-migrate)).
+
 Gzip-wrapped formats (`x3_save`, `nbt`, `blend_gz`) get `format` and `mime`.
 They never had member rows unless a tar was inside; being listed now also
 stops a tar sniff from expanding them.

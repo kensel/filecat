@@ -81,7 +81,8 @@ connection or a reboot.
 A scan may run while the migration does; whichever writes a record last
 leaves it in the new form.
 
-## Not yet
+## Pruning
 
 Samples no record names any more, after files are deleted or changed, stay
-in the store. Pruning them is planned for v0.1.3 ([roadmap](roadmap.md)).
+in the store until `filecat samples prune` removes them. It refuses while a
+scan is running; see [members.md](members.md#pruning).

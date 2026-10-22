@@ -149,11 +149,51 @@ class Backend(ABC):
     def delete_members(self, root: str, rel_path: str) -> None:
         """Remove an archive's members; no error when none. delete() calls this too."""
 
+    # --- member sets (filecat/member_sets.py) ----------------------------
+    # A backend with stores_member_sets keeps the members of an archive that
+    # has a content hash once per hash, however many copies of the archive
+    # the catalog holds: a header {"members_id", "hash_type", "count",
+    # "digest"} and rows carrying "members_id" instead of root and path. The
+    # record names its set with "members_id". Archives without a hash keep
+    # rows under (root, rel_path) as above.
+    stores_member_sets: bool = False
+
+    def put_member_set(self, header: Document, rows: list[Document]) -> bool:
+        """Store `rows` as set header["members_id"], replacing a stored set
+        unless that one has the same digest. Committed when this returns,
+        header last, so a set with a header is complete. True when written."""
+        raise NotImplementedError(f"{self.name} backend does not store member sets")
+
+    def list_member_set(self, members_id: str) -> Iterator[Document]:
+        """Rows of one set, in index order."""
+        raise NotImplementedError(f"{self.name} backend does not store member sets")
+
+    def iter_member_sets(self) -> Iterator[Document]:
+        """Every set header."""
+        raise NotImplementedError(f"{self.name} backend does not store member sets")
+
+    def prune_member_sets(self) -> int:
+        """Remove the sets no record names, with their rows; how many sets."""
+        raise NotImplementedError(f"{self.name} backend does not store member sets")
+
+    def prune_samples(self) -> int:
+        """Remove the samples no record names; how many."""
+        raise NotImplementedError(f"{self.name} backend does not store samples")
+
+    def members_of(self, root: str, rel_path: str, doc: Document | None = None) -> Iterator[Document]:
+        """Members of one archive record, wherever they are kept."""
+        if doc is None:
+            doc = self.get(root, rel_path)
+        if doc is not None and doc.get("members_id") and self.stores_member_sets:
+            return self.list_member_set(doc["members_id"])
+        return self.list_members(root, rel_path)
+
     def store(self, document: Document) -> None:
         """put() a freshly measured document and its archive members.
 
         Measurement leaves members under document[MEMBERS_KEY]; they never
-        go into the document itself.
+        go into the document itself. An archive with a hash files them as a
+        member set before the record that names it is written.
         """
         from ..record import MEMBERS_KEY
         members = document.pop(MEMBERS_KEY, None)
@@ -162,10 +202,18 @@ class Backend(ABC):
             sample = samples.split(document)
             if sample is not None:
                 self.queue_sample(sample)   # reaches the store before the record does
+        by_hash = False
+        if members and self.stores_member_sets:
+            from .. import member_sets
+            by_hash = member_sets.store_rows(self, document, members)
         self.put(document)
         if members is not None:
             try:
-                self.put_members(document["root"], document["rel_path"], members)
+                if by_hash:
+                    # rows an earlier scan kept under the path
+                    self.delete_members(document["root"], document["rel_path"])
+                else:
+                    self.put_members(document["root"], document["rel_path"], members)
             except NotImplementedError:
                 pass  # backend predates member storage; the summary on probe remains
 

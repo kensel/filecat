@@ -41,7 +41,8 @@ from .backends import open_backend
 from .backends.base import Backend
 from .options import ScanOptions
 from .aliases import source_path
-from .record import add_error, join_root
+from .record import MEMBERS_KEY, add_error, join_root
+from .samples import key_of
 
 STAGES = ("names", "hash", "probe", "identify")
 NO_CONTENT_KINDS = ("dir", "link", "empty")
@@ -123,6 +124,12 @@ def merge_measured(old: dict[str, Any], new: dict[str, Any]) -> dict[str, Any]:
         probe = new.setdefault("probe", {})
         for k, v in carried.items():
             probe.setdefault(k, v)
+    # A member set stays named until a new listing of the archive replaces
+    # it, unless the content changed.
+    if old.get("members_id") and MEMBERS_KEY not in new:
+        key = key_of(new)
+        if key is None or key[0] == old["members_id"]:
+            new["members_id"] = old["members_id"]
     return new
 
 

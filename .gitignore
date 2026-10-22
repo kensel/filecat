@@ -224,6 +224,8 @@ catalog.*
 *.resume.json
 *.samples-migrate.json
 *.samples-migrate.json.tmp
+*.members-migrate.json
+*.members-migrate.json.tmp
 /signatures/*
 !/signatures/README.md
 tests/_fixtures/

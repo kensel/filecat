@@ -70,6 +70,15 @@ def state(info: Document | None, at: datetime | None = None) -> str:
     return "in_progress" if age <= STALE_AFTER else "stalled"
 
 
+def in_progress(backend: Backend) -> list[str]:
+    """Roots a scan is walking right now (a stalled one is not counted)."""
+    try:
+        infos = list(backend.list_root_info())
+    except NotImplementedError:
+        return []
+    return sorted(i["root"] for i in infos if state(i) == "in_progress")
+
+
 class ScanTracker:
     """Wraps the backend handed to walk_root and watches what it writes."""
 

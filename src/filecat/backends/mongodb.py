@@ -70,6 +70,7 @@ class MongoBackend(Backend):
     name = "mongodb"
     stores_samples = True
     batches_samples = True
+    stores_member_sets = True
 
     def __init__(self, dsn: str) -> None:
         import pymongo  # lazy: only needed when this backend is used
@@ -87,8 +88,25 @@ class MongoBackend(Backend):
         self.agg_dir = self.db["agg_dir"]
         self.agg_meta = self.db["agg_meta"]
 
+        # Collections created here start out with zstd block compression
+        # (research note 05, section 2.C); existing ones keep what they were
+        # created with until `filecat migrate` copies them into a new database.
+        existing = set(self.db.list_collection_names())
+        for name in ("files", "members", "samples", "member_sets", "set_members"):
+            if name not in existing:
+                try:
+                    self.db.create_collection(
+                        name, storageEngine={"wiredTiger": {"configString": "block_compressor=zstd"}})
+                except pymongo.errors.CollectionInvalid:
+                    pass    # created meanwhile by another process
+        self.samples = self.db["samples"]
+        self.member_sets = self.db["member_sets"]
+        self.set_members = self.db["set_members"]
+
         self.files.create_index([("root_id", 1), ("rel_path", 1)], unique=True)
-        self.files.create_index("sha256")
+        if "sha256_1" not in self.files.index_information():
+            # Only records that have one: listed-only data has no hash.
+            self.files.create_index("sha256", partialFilterExpression={"sha256": {"$type": "string"}})
         self.files.create_index("size")     # list_sized: `filecat dupes` size bands
         self.files.create_index("kind")
         self.files.create_index("suffix")
@@ -97,6 +115,9 @@ class MongoBackend(Backend):
             [("root_id", 1), ("archive_rel_path", 1), ("index", 1)], unique=True)
         self.members.create_index("role")
         self.members.create_index("path")
+        self.set_members.create_index([("members_id", 1), ("index", 1)], unique=True)
+        self.set_members.create_index("role")
+        self.set_members.create_index("path")
         self.root_docs = self.db["roots"]
         self.root_docs.create_index("root_id", unique=True)
         self.dropped = self.db["dropped"]
@@ -107,15 +128,6 @@ class MongoBackend(Backend):
         self.agg_suffix.create_index([("root_id", 1), ("suffix", 1)], unique=True)
         self.agg_mime.create_index([("root_id", 1), ("mime", 1)], unique=True)
         self.agg_dir.create_index([("root_id", 1), ("dir", 1)], unique=True)
-        # One document per content hash (_id); new, so it can start out with
-        # zstd block compression (research note 05, section 2.C).
-        if "samples" not in self.db.list_collection_names():
-            try:
-                self.db.create_collection(
-                    "samples", storageEngine={"wiredTiger": {"configString": "block_compressor=zstd"}})
-            except pymongo.errors.CollectionInvalid:
-                pass    # created meanwhile by another process
-        self.samples = self.db["samples"]
 
         self._buffer: list[Document] = []
         self._last_flush = time.monotonic()
@@ -438,6 +450,65 @@ class MongoBackend(Backend):
         for d in docs:
             d.pop("_id", None)
         return docs, last
+
+    def _unnamed(self, field: str, coll: Any) -> Iterator[list[Any]]:
+        """_ids of `coll`, in batches, that no record names in `field`. The
+        names are gathered on the server into a scratch collection first."""
+        scratch = f"prune_{field}"
+        self.files.aggregate([{"$match": {field: {"$type": "string"}}},
+                              {"$group": {"_id": "$" + field}}, {"$out": scratch}], allowDiskUse=True)
+        try:
+            cur = coll.aggregate([{"$lookup": {"from": scratch, "localField": "_id",
+                                               "foreignField": "_id", "as": "named"}},
+                                  {"$match": {"named": {"$size": 0}}}, {"$project": {"_id": 1}}],
+                                 allowDiskUse=True)
+            batch: list[Any] = []
+            for d in cur:
+                batch.append(d["_id"])
+                if len(batch) >= 1000:
+                    yield batch
+                    batch = []
+            if batch:
+                yield batch
+        finally:
+            self.db.drop_collection(scratch)
+
+    def prune_samples(self) -> int:
+        self.flush()
+        n = 0
+        for ids in self._unnamed("sample_id", self.samples):
+            n += self.samples.delete_many({"_id": {"$in": ids}}).deleted_count
+        return n
+
+    # --- member sets -------------------------------------------------
+    # No transactions: the header is removed first and written last, so a
+    # set with a header always has all its rows.
+    def put_member_set(self, header: Document, rows: list[Document]) -> bool:
+        mid = header["members_id"]
+        old = self.member_sets.find_one({"_id": mid}, {"digest": 1})
+        if old and old.get("digest") == header["digest"]:
+            return False
+        self.member_sets.delete_one({"_id": mid})
+        self.set_members.delete_many({"members_id": mid})
+        if rows:
+            self.set_members.insert_many(_bson_safe([{**r, "members_id": mid} for r in rows]), ordered=False)
+        self.member_sets.replace_one({"_id": mid}, {**header, "_id": mid}, upsert=True)
+        return True
+
+    def list_member_set(self, members_id: str) -> Iterator[Document]:
+        self.flush()
+        yield from self.set_members.find({"members_id": members_id}, {"_id": 0}).sort("index", 1)
+
+    def iter_member_sets(self) -> Iterator[Document]:
+        yield from self.member_sets.find({}, {"_id": 0})
+
+    def prune_member_sets(self) -> int:
+        self.flush()
+        n = 0
+        for ids in self._unnamed("members_id", self.member_sets):
+            n += self.member_sets.delete_many({"_id": {"$in": ids}}).deleted_count
+            self.set_members.delete_many({"members_id": {"$in": ids}})
+        return n
 
     # --- lifecycle -------------------------------------------------
     def close(self) -> None:

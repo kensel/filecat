@@ -116,6 +116,23 @@ CREATE TABLE IF NOT EXISTS samples (
     sample_id TEXT PRIMARY KEY,
     document JSONB NOT NULL
 );
+CREATE TABLE IF NOT EXISTS member_sets (
+    members_id TEXT PRIMARY KEY,
+    document JSONB NOT NULL
+);
+CREATE TABLE IF NOT EXISTS set_members (
+    members_id TEXT NOT NULL,
+    idx INTEGER NOT NULL,
+    path TEXT,
+    size BIGINT,
+    csize BIGINT,
+    role TEXT,
+    kind TEXT,
+    document JSONB NOT NULL,
+    PRIMARY KEY (members_id, idx)
+);
+CREATE INDEX IF NOT EXISTS idx_set_members_role ON set_members(role);
+CREATE INDEX IF NOT EXISTS idx_set_members_path ON set_members(path);
 """
 
 _UPSERT_SQL = """
@@ -157,6 +174,7 @@ class PostgresBackend(Backend):
     name = "postgres"
     stores_samples = True
     batches_samples = True
+    stores_member_sets = True
 
     def __init__(self, dsn: str) -> None:
         import psycopg  # lazy: only needed when this backend is used
@@ -539,6 +557,65 @@ class PostgresBackend(Backend):
             rows = cur.fetchall()
         self.conn.commit()
         return [d for _, d in rows], (rows[-1][0] if rows else after)
+
+    def prune_samples(self) -> int:
+        self.flush()
+        with self.conn.cursor() as cur:
+            cur.execute("DELETE FROM samples s WHERE NOT EXISTS "
+                        "(SELECT 1 FROM files f WHERE f.document->>'sample_id' = s.sample_id)")
+            n = cur.rowcount
+        self.conn.commit()
+        return n
+
+    # --- member sets -------------------------------------------------
+    def put_member_set(self, header: Document, rows: list[Document]) -> bool:
+        mid = header["members_id"]
+        with self.conn.cursor() as cur:
+            cur.execute("SELECT document->>'digest' FROM member_sets WHERE members_id=%s", (mid,))
+            old = cur.fetchone()
+            if old and old[0] == header["digest"]:
+                self.conn.commit()
+                return False
+            cur.execute("DELETE FROM member_sets WHERE members_id=%s", (mid,))
+            cur.execute("DELETE FROM set_members WHERE members_id=%s", (mid,))
+            cur.executemany(
+                "INSERT INTO set_members (members_id, idx, path, size, csize, role, kind, document) "
+                "VALUES (%s,%s,%s,%s,%s,%s,%s,%s::jsonb)",
+                [(mid, r["index"], r.get("path"), r.get("size"), r.get("csize"), r.get("role"),
+                  r.get("kind"), json.dumps({**r, "members_id": mid}, ensure_ascii=False)) for r in rows])
+            cur.execute("INSERT INTO member_sets (members_id, document) VALUES (%s, %s::jsonb)",
+                        (mid, json.dumps(header, ensure_ascii=False)))
+        self.conn.commit()
+        return True
+
+    def list_member_set(self, members_id: str) -> Iterator[Document]:
+        self.flush()
+        with self.conn.cursor(name="filecat_member_set") as cur:
+            cur.itersize = 1000
+            cur.execute("SELECT document FROM set_members WHERE members_id=%s ORDER BY idx", (members_id,))
+            for (doc,) in cur:
+                yield doc
+        self.conn.commit()
+
+    def iter_member_sets(self) -> Iterator[Document]:
+        self.flush()
+        with self.conn.cursor(name="filecat_member_sets") as cur:
+            cur.itersize = 1000
+            cur.execute("SELECT document FROM member_sets")
+            for (doc,) in cur:
+                yield doc
+        self.conn.commit()
+
+    def prune_member_sets(self) -> int:
+        self.flush()
+        with self.conn.cursor() as cur:
+            cur.execute("DELETE FROM member_sets m WHERE NOT EXISTS "
+                        "(SELECT 1 FROM files f WHERE f.document->>'members_id' = m.members_id)")
+            n = cur.rowcount
+            cur.execute("DELETE FROM set_members r WHERE NOT EXISTS "
+                        "(SELECT 1 FROM member_sets m WHERE m.members_id = r.members_id)")
+        self.conn.commit()
+        return n
 
     # --- lifecycle -------------------------------------------------
     def close(self) -> None:

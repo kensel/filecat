@@ -104,11 +104,11 @@ class MigrateStats:
     done: bool = False
 
 
-def checkpoint_path_for(backend_name: str, catalog_path: str | None) -> str:
+def checkpoint_path_for(backend_name: str, catalog_path: str | None, what: str = "samples") -> str:
     """Beside the catalog file, or in the current directory for a server."""
     if catalog_path:
-        return f"{catalog_path}.samples-migrate.json"
-    return f".filecat-{backend_name}.samples-migrate.json"
+        return f"{catalog_path}.{what}-migrate.json"
+    return f".filecat-{backend_name}.{what}-migrate.json"
 
 
 def catalog_tag(backend_name: str, location: str | None) -> str:
@@ -229,9 +229,12 @@ def run(args: Any) -> int:
         if args.action == "stats":
             return _stats(backend)
         if not backend.stores_samples:
-            print(f"filecat samples: the {backend.name} backend keeps samples inline; nothing to migrate",
+            print(f"filecat samples: the {backend.name} backend keeps samples inline; nothing to do",
                   file=sys.stderr)
             return 2
+        if args.action == "prune":
+            from .member_sets import prune
+            return prune(backend, "samples", backend.prune_samples, args.force)
         path = args.checkpoint or checkpoint_path_for(backend.name, catalog)
         tag = catalog_tag(backend.name, args.out or args.dsn)
         last = [time.monotonic()]

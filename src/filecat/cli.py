@@ -19,6 +19,7 @@ COMMANDS = {
     "migrate": "filecat.migrate",
     "members": "filecat.members_cmd",
     "samples": "filecat.samples",
+    "member-sets": "filecat.member_sets",
     "config": "filecat.config",
     "serve": "filecat.serve",
     "roots": "filecat.roots_cmd",
@@ -206,16 +207,24 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--role", action="append", help="only members with these roles")
     p.add_argument("--json", action="store_true", help="one JSON row per line")
 
-    p = sub.add_parser("samples", help="content-keyed text samples: move inline samples into the "
-                                       "samples store, or count what is there")
-    p.add_argument("action", choices=("migrate", "stats"))
-    _storage(p)
-    p.add_argument("--batch", type=int, default=1000, help="records per batch (default 1000)")
-    p.add_argument("--limit", type=int, help="stop after N records (a trial run; rerun to continue)")
-    p.add_argument("--checkpoint", metavar="PATH",
-                   help="progress file (default <catalog>.samples-migrate.json, or "
-                        ".filecat-<backend>.samples-migrate.json here for a server)")
-    p.add_argument("--progress-interval", dest="progress_interval", type=float, default=5.0)
+    for name, what, help_ in (
+            ("samples", "samples", "content-keyed text samples: move inline samples into the samples "
+                                   "store, remove those no record names, or count what is there"),
+            ("member-sets", "members", "archive members filed by content hash: move the rows of existing "
+                                       "archives into member sets, remove sets no record names, or count")):
+        p = sub.add_parser(name, help=help_)
+        p.add_argument("action", choices=("migrate", "prune", "stats"))
+        _storage(p)
+        p.add_argument("--batch", type=int, default=1000, help="records per batch (default 1000)")
+        p.add_argument("--limit", type=int, help="stop after N records (a trial run; rerun to continue)")
+        p.add_argument("--checkpoint", metavar="PATH",
+                       help=f"progress file (default <catalog>.{what}-migrate.json, or "
+                            f".filecat-<backend>.{what}-migrate.json here for a server)")
+        p.add_argument("--progress-interval", dest="progress_interval", type=float, default=5.0)
+        p.add_argument("--force", action="store_true", help="prune even while a scan is running")
+        if name == "member-sets":
+            p.add_argument("--expand-compound", dest="expand_compound", action="store_true",
+                           help="keep every entry of compound documents listed before v0.1.1")
 
     p = sub.add_parser("roots", help="root index: last scan, scan in progress, newest file, last error")
     _storage(p)

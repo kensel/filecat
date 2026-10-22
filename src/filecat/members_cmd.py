@@ -75,7 +75,7 @@ def run(args: Any) -> int:
             return 1
 
         try:
-            rows = list(backend.list_members(args.root, rel_path))
+            rows = list(backend.members_of(args.root, rel_path, doc))
         except NotImplementedError:
             print(f"filecat members: the {getattr(backend, 'name', 'this')} backend does not "
                   "store archive members", file=sys.stderr)

@@ -10,7 +10,7 @@ ZIP/gzip-based application formats; a `.docx`, `.jar` or `.epub` stores
 only its anomalies (macros, embedded objects, executables, unexpected
 paths) as members. See [compound-formats.md](compound-formats.md).
 
-## v0.1.2: content-addressed text samples
+## v0.1.2: content-addressed text samples (done)
 
 Note 05 §2.A. See [samples.md](samples.md).
 
@@ -35,21 +35,28 @@ Note 05 §2.A. See [samples.md](samples.md).
   unless `--measure-backups`, closing what was a known gap in
   [scanning.md](scanning.md) (note 01 §5).
 
-## v0.1.3: members keyed by archive hash
+## v0.1.3: members keyed by archive hash (done)
 
-Note 05 §2.B and §2.C.
+Note 05 §2.B and §2.C. See [members.md](members.md).
 
-- The parent key of `members` changes from (root, archive path) to the
-  archive's content hash, so an archive present in four places stores its
-  members once, and moving or renaming it orphans nothing.
-- Crash-safe migration of the existing member rows, as in v0.1.2.
-- The same pass drops member rows that v0.1.1 no longer writes: the
-  standard structure of compound documents measured before v0.1.1.
-- Pruning: samples and member sets no file record refers to any more
-  (`filecat samples prune`, and the same for members).
-- MongoDB: partial indexes on `sha256` / `sha256_partial` (only records
-  that have one), and zstd block compression for `files` and `members`
-  when they are rebuilt.
+- [x] Member sets: the members of an archive with a content hash are stored
+  once per hash (`member_sets` headers, `set_members` rows) and the record
+  names its set with `members_id`, so an archive present in four places
+  stores its members once, and moving or renaming it orphans nothing.
+  Archives without a hash, and the JSONL backends, keep rows under the path.
+- [x] Crash-safe migration of the existing member rows,
+  `filecat member-sets migrate`: batched, resumable, every archive shows its
+  members at every point.
+- [x] The same pass trims compound documents measured before v0.1.1 to
+  their anomalies and gives them the `probe.compound` summary.
+- [x] Pruning: `filecat samples prune` and `filecat member-sets prune`
+  remove what no record names, one server-side pass each, and refuse while
+  a scan is running.
+- [x] MongoDB: collections created by the backend use zstd block
+  compression, and a new catalog's `sha256` index is partial (only records
+  that have one). `sha256_partial` gets no index: nothing looks it up.
+  Existing collections are rebuilt this way by `filecat migrate` into a new
+  database.
 
 ## v0.2.0: Rust agents and embedded metadata
 

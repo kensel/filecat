@@ -11,6 +11,7 @@ from .base import Backend, Document
 class MemoryBackend(Backend):
     name = "memory"
     stores_samples = True
+    stores_member_sets = True
 
     def __init__(self) -> None:
         self.docs: dict[tuple[str, str], Document] = {}
@@ -21,6 +22,8 @@ class MemoryBackend(Backend):
         self.dropped: list[Document] = []
         self.treemaps: dict[str, tuple[Document, Document]] = {}
         self.samples: dict[str, Document] = {}
+        self.member_sets: dict[str, Document] = {}
+        self.set_rows: dict[str, list[Document]] = {}
 
     def put(self, document: Document) -> None:
         self.docs[(document["root_id"], document["rel_path"])] = copy.deepcopy(document)
@@ -133,3 +136,34 @@ class MemoryBackend(Backend):
     def page_records(self, after: Any, limit: int) -> tuple[list[Document], Any]:
         keys = sorted(k for k in self.docs if after is None or k > tuple(after))[:limit]
         return [copy.deepcopy(self.docs[k]) for k in keys], (list(keys[-1]) if keys else after)
+
+    def prune_samples(self) -> int:
+        named = {d.get("sample_id") for d in self.docs.values()}
+        gone = [sid for sid in self.samples if sid not in named]
+        for sid in gone:
+            del self.samples[sid]
+        return len(gone)
+
+    def put_member_set(self, header: Document, rows: list[Document]) -> bool:
+        mid = header["members_id"]
+        if self.member_sets.get(mid, {}).get("digest") == header["digest"]:
+            return False
+        self.member_sets.pop(mid, None)
+        self.set_rows[mid] = [{**copy.deepcopy(r), "members_id": mid} for r in rows]
+        self.member_sets[mid] = copy.deepcopy(header)
+        return True
+
+    def list_member_set(self, members_id: str) -> Iterator[Document]:
+        rows = self.set_rows.get(members_id, [])
+        yield from (copy.deepcopy(r) for r in sorted(rows, key=lambda r: r["index"]))
+
+    def iter_member_sets(self) -> Iterator[Document]:
+        yield from (copy.deepcopy(h) for h in list(self.member_sets.values()))
+
+    def prune_member_sets(self) -> int:
+        named = {d.get("members_id") for d in self.docs.values()}
+        gone = [mid for mid in self.member_sets if mid not in named]
+        for mid in gone:
+            del self.member_sets[mid]
+            self.set_rows.pop(mid, None)
+        return len(gone)

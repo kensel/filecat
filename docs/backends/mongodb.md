@@ -12,10 +12,10 @@ itself; the fields used here are:
 | `kind` | `dir` for folders, otherwise a file kind |
 | `root`, `rel_path` | scan root and path beneath it |
 
-Indexes created by the backend: `(root_id, rel_path)` unique, `sha256`, `kind`,
-`suffix`, `mime`. There is no index on `size` or `sha256_partial`, so the first
-`$match` below scans the collection; `db.files.createIndex({ size: 1 })` speeds
-repeat runs.
+Indexes created by the backend: `(root_id, rel_path)` unique, `sha256` (in a
+catalog created by v0.1.3 or later, only over records that have one), `size`,
+`kind`, `suffix`, `mime`. There is no index on `sha256_partial`, so the
+queries below that group on it read the whole size band.
 
 Run in `mongosh`, or as `db.files.aggregate(pipeline, { allowDiskUse: true })`
 from any driver.

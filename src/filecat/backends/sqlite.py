@@ -137,6 +137,24 @@ CREATE TABLE IF NOT EXISTS samples (
     document TEXT NOT NULL
 );
 CREATE INDEX IF NOT EXISTS idx_members_path ON members(path);
+
+CREATE TABLE IF NOT EXISTS member_sets (
+    members_id TEXT PRIMARY KEY,
+    document TEXT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS set_members (
+    members_id TEXT NOT NULL,
+    idx INTEGER NOT NULL,
+    path TEXT,
+    size INTEGER,
+    csize INTEGER,
+    role TEXT,
+    kind TEXT,
+    document TEXT NOT NULL,
+    PRIMARY KEY (members_id, idx)
+);
+CREATE INDEX IF NOT EXISTS idx_set_members_role ON set_members(role);
+CREATE INDEX IF NOT EXISTS idx_set_members_path ON set_members(path);
 """
 
 _UPSERT_SQL = """
@@ -160,6 +178,7 @@ class SqliteBackend(Backend):
     name = "sqlite"
     stores_samples = True
     batches_samples = True
+    stores_member_sets = True
 
     def __init__(self, path: str) -> None:
         self.path = path
@@ -621,6 +640,61 @@ class SqliteBackend(Backend):
         rows = self.conn.execute("SELECT id, document FROM files WHERE id > ? ORDER BY id LIMIT ?",
                                  (after or 0, limit)).fetchall()
         return [json.loads(d) for _, d in rows], (rows[-1][0] if rows else after)
+
+    def prune_samples(self) -> int:
+        self._flush_buffer()
+        n = self.conn.execute(
+            "DELETE FROM samples WHERE sample_id NOT IN (SELECT json_extract(document, '$.sample_id') "
+            "FROM files WHERE json_extract(document, '$.sample_id') IS NOT NULL)").rowcount
+        self.conn.commit()
+        return n
+
+    # --- member sets -------------------------------------------------
+    def put_member_set(self, header: Document, rows: list[Document]) -> bool:
+        mid = header["members_id"]
+        old = self.conn.execute("SELECT document FROM member_sets WHERE members_id=?", (mid,)).fetchone()
+        if old and json.loads(old[0]).get("digest") == header["digest"]:
+            return False
+        cur = self.conn.cursor()
+        cur.execute("DELETE FROM member_sets WHERE members_id=?", (mid,))
+        cur.execute("DELETE FROM set_members WHERE members_id=?", (mid,))
+        cur.executemany(
+            "INSERT INTO set_members (members_id, idx, path, size, csize, role, kind, document) "
+            "VALUES (?,?,?,?,?,?,?,?)",
+            [(mid, r["index"], r.get("path"), r.get("size"), r.get("csize"), r.get("role"), r.get("kind"),
+              json.dumps({**r, "members_id": mid}, ensure_ascii=False)) for r in rows])
+        cur.execute("INSERT INTO member_sets (members_id, document) VALUES (?,?)",
+                    (mid, json.dumps(header, ensure_ascii=False)))
+        self.conn.commit()
+        return True
+
+    def list_member_set(self, members_id: str) -> Iterator[Document]:
+        cur = self.conn.execute("SELECT document FROM set_members WHERE members_id=? ORDER BY idx",
+                                (members_id,))
+        while True:
+            rows = cur.fetchmany(1000)
+            if not rows:
+                break
+            for (doc_json,) in rows:
+                yield json.loads(doc_json)
+
+    def iter_member_sets(self) -> Iterator[Document]:
+        cur = self.conn.execute("SELECT document FROM member_sets")
+        while True:
+            rows = cur.fetchmany(1000)
+            if not rows:
+                break
+            for (doc_json,) in rows:
+                yield json.loads(doc_json)
+
+    def prune_member_sets(self) -> int:
+        self._flush_buffer()
+        n = self.conn.execute(
+            "DELETE FROM member_sets WHERE members_id NOT IN (SELECT json_extract(document, '$.members_id') "
+            "FROM files WHERE json_extract(document, '$.members_id') IS NOT NULL)").rowcount
+        self.conn.execute("DELETE FROM set_members WHERE members_id NOT IN (SELECT members_id FROM member_sets)")
+        self.conn.commit()
+        return n
 
     # --- lifecycle -------------------------------------------------
     def flush(self) -> None:

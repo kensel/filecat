@@ -129,6 +129,26 @@ _TABLES = {
             document NVARCHAR(MAX) NOT NULL
         )
     """,
+    "member_sets": """
+        CREATE TABLE member_sets (
+            members_id VARCHAR(64) PRIMARY KEY,
+            document NVARCHAR(MAX) NOT NULL
+        )
+    """,
+    "set_members": """
+        CREATE TABLE set_members (
+            members_id VARCHAR(64) NOT NULL,
+            idx INT NOT NULL,
+            path NVARCHAR(MAX),
+            path_hash CHAR(64),
+            size BIGINT,
+            csize BIGINT,
+            role VARCHAR(32),
+            kind VARCHAR(32),
+            document NVARCHAR(MAX) NOT NULL,
+            PRIMARY KEY (members_id, idx)
+        )
+    """,
 }
 
 _INDEXES = [
@@ -142,6 +162,8 @@ _INDEXES = [
     ("idx_treemaps_root", "treemaps", "(root_id)", False),
     ("idx_dropped_root", "dropped", "(root_id, rel_hash)", False),
     ("idx_members_path_hash", "members", "(path_hash)", False),
+    ("idx_set_members_role", "set_members", "(role)", False),
+    ("idx_set_members_path_hash", "set_members", "(path_hash)", False),
 ]
 
 _MERGE_SQL = """
@@ -194,6 +216,7 @@ class MssqlBackend(Backend):
     name = "mssql"
     stores_samples = True
     batches_samples = True
+    stores_member_sets = True
 
     def __init__(self, dsn: str) -> None:
         import pyodbc  # lazy: only needed when this backend is used
@@ -625,6 +648,71 @@ class MssqlBackend(Backend):
                            (limit, after or 0)).fetchall()
         self.conn.commit()
         return [json.loads(d) for _, d in rows], (rows[-1][0] if rows else after)
+
+    def prune_samples(self) -> int:
+        self.flush()
+        cur = self.conn.cursor()
+        cur.execute("DELETE FROM samples WHERE NOT EXISTS (SELECT 1 FROM files f "
+                    "WHERE JSON_VALUE(f.document, '$.sample_id') = samples.sample_id)")
+        n = cur.rowcount
+        self.conn.commit()
+        return n
+
+    # --- member sets -------------------------------------------------
+    def put_member_set(self, header: Document, rows: list[Document]) -> bool:
+        mid = header["members_id"]
+        cur = self.conn.cursor()
+        old = cur.execute("SELECT JSON_VALUE(document, '$.digest') FROM member_sets WHERE members_id=?",
+                          (mid,)).fetchone()
+        if old and old[0] == header["digest"]:
+            self.conn.commit()
+            return False
+        cur.execute("DELETE FROM member_sets WHERE members_id=?", (mid,))
+        cur.execute("DELETE FROM set_members WHERE members_id=?", (mid,))
+        if rows:
+            try:
+                cur.fast_executemany = True
+            except AttributeError:
+                pass
+            cur.executemany(
+                "INSERT INTO set_members (members_id, idx, path, path_hash, size, csize, role, kind, "
+                "document) VALUES (?,?,?,?,?,?,?,?,?)",
+                [(mid, r["index"], r.get("path"), _rel_hash(r["path"]) if r.get("path") else None,
+                  r.get("size"), r.get("csize"), r.get("role"), r.get("kind"),
+                  json.dumps({**r, "members_id": mid}, ensure_ascii=False)) for r in rows])
+        cur.execute("INSERT INTO member_sets (members_id, document) VALUES (?, ?)",
+                    (mid, json.dumps(header, ensure_ascii=False)))
+        self.conn.commit()
+        return True
+
+    def list_member_set(self, members_id: str) -> Iterator[Document]:
+        self.flush()
+        cur = self.conn.cursor()
+        cur.execute("SELECT document FROM set_members WHERE members_id=? ORDER BY idx", (members_id,))
+        while True:
+            rows = cur.fetchmany(1000)
+            if not rows:
+                break
+            for (doc_json,) in rows:
+                yield json.loads(doc_json)
+
+    def iter_member_sets(self) -> Iterator[Document]:
+        self.flush()
+        rows = self.conn.cursor().execute("SELECT document FROM member_sets").fetchall()
+        self.conn.commit()
+        for (doc_json,) in rows:
+            yield json.loads(doc_json)
+
+    def prune_member_sets(self) -> int:
+        self.flush()
+        cur = self.conn.cursor()
+        cur.execute("DELETE FROM member_sets WHERE NOT EXISTS (SELECT 1 FROM files f "
+                    "WHERE JSON_VALUE(f.document, '$.members_id') = member_sets.members_id)")
+        n = cur.rowcount
+        cur.execute("DELETE FROM set_members WHERE NOT EXISTS "
+                    "(SELECT 1 FROM member_sets m WHERE m.members_id = set_members.members_id)")
+        self.conn.commit()
+        return n
 
     # --- lifecycle -------------------------------------------------
     def close(self) -> None:
