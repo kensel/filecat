@@ -81,9 +81,16 @@ def is_reparse_point(st: os.stat_result) -> bool:
 
 def read_link_target(path: str) -> str | None:
     try:
-        return os.readlink(path)
+        target = os.readlink(path)
     except OSError:
         return None
+    # Windows may hand back the target in its \\?\ form; record the path a
+    # person would type.
+    if target.startswith("\\\\?\\UNC\\"):
+        return "\\\\" + target[8:]
+    if target.startswith("\\\\?\\") and target[5:6] == ":":
+        return target[4:]
+    return target
 
 
 def stat_times(st: os.stat_result) -> tuple[int, int]:

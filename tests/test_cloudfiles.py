@@ -76,14 +76,25 @@ def onedrive(fixture_dir, monkeypatch):
             return getattr(self._st, item)
 
     class _Scandir:
+        # os.scandir is patched for everything while the test runs, the
+        # fixture's own cleanup (shutil.rmtree) included: a full iterator.
         def __init__(self, path):
             self._it = real_scandir(path)
 
+        def __iter__(self):
+            return self
+
+        def __next__(self):
+            return _Entry(next(self._it))
+
         def __enter__(self):
-            return (_Entry(e) for e in self._it.__enter__())
+            return self
 
         def __exit__(self, *a):
             return self._it.__exit__(*a)
+
+        def close(self):
+            self._it.close()
 
     import filecat.walker
     monkeypatch.setattr(filecat.walker.os, "scandir", _Scandir)

@@ -28,7 +28,9 @@ jobs:
 
   backends:
     name: server backends
-    runs-on: ubuntu-latest
+    # MongoDB 8.0 refuses to start on Linux 6.19 and newer (SERVER-121912),
+    # which ubuntu-latest moves to with Ubuntu 26.
+    runs-on: ubuntu-24.04
     services:
       postgres:
         image: postgres:17

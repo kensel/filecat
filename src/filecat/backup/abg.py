@@ -473,6 +473,7 @@ class _GoogleWorkspace:
             for got in pool.map(check, jobs):
                 bad += got
         if bad:
+            bad.sort()      # the order the threads finished in is no order at all
             problems.append(f"{len(bad)} files fail their metadata's size or MD5: {_eg(bad)}")
         return {"files": len(jobs), "bad": len(bad)}
 
