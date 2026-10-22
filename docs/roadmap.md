@@ -83,9 +83,13 @@ the agent becomes a second writer.
   finished share again.
 - [x] Ctrl+C ends a command with a one-line message (and, for a scan, how
   to resume) instead of a traceback; exit code 130.
-- Rescans of unchanged trees are slow (about 50 files/s over SMB to a
-  MongoDB catalog): the walker looks up stored records one at a time. Read
-  each directory's stored records in one query.
+- [x] Rescans of unchanged trees were slow (about 50 files/s over SMB to a
+  MongoDB catalog): the walker looked up stored records one at a time, and
+  each lookup flushed the write buffer first, so every folder record went
+  out as its own write. Now each directory's stored records come from one
+  `get_stats()` query that does not flush (writes go out 500 at a time),
+  and subdirectory listings are read ahead in background threads, three
+  levels down.
 - Prune on large tables: the anti-join over `sample_id` / `members_id` has
   no index behind it; add expression indexes (or MongoDB partial indexes)
   if the timing calls for it.

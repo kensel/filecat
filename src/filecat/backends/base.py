@@ -9,6 +9,20 @@ from abc import ABC, abstractmethod
 from datetime import datetime, timezone
 from typing import Any, Iterable, Iterator
 
+# Paths per get_stats() query: well inside every server's parameter limit
+# (SQL Server allows 2100).
+STATS_CHUNK = 500
+
+
+def root_id_of(root: str) -> str:
+    from ..record import root_id
+    return root_id(root)
+
+
+def chunks(items: list[Any], size: int = STATS_CHUNK) -> Iterator[list[Any]]:
+    for i in range(0, len(items), size):
+        yield items[i:i + size]
+
 Document = dict[str, Any]
 
 
@@ -36,6 +50,28 @@ class Backend(ABC):
     @abstractmethod
     def list(self, kind: str | None = None, root: str | None = None) -> Iterator[Document]:
         """Documents, optionally filtered by kind and/or root path string."""
+
+    def get_stats(self, root: str, rel_paths: list[str]) -> dict[str, Document]:
+        """The stored records of `rel_paths` under `root`, keyed by rel_path;
+        paths with no record are left out. What a rescan compares: each has at
+        least kind, size, mtime_ns and probe.child_count / probe.cloud, and a
+        backend may leave out the rest. One query where the backend can, and
+        unlike get() a server backend does not flush its write buffer first:
+        buffered records are laid over what the query returns."""
+        out = {}
+        for p in rel_paths:
+            doc = self.get(root, p)
+            if doc is not None:
+                out[p] = doc
+        return out
+
+    def _overlay_buffer(self, root: str, rel_paths: list[str], out: dict[str, Document]) -> None:
+        """get_stats() helper for a backend whose write buffer is a list of
+        documents: the newest buffered record of each path wins."""
+        rid, wanted = root_id_of(root), set(rel_paths)
+        for doc in getattr(self, "_buffer", ()):
+            if doc.get("root_id") == rid and doc.get("rel_path") in wanted:
+                out[doc["rel_path"]] = doc
 
     def list_sized(self, above: int, up_to: int | None = None,
                    root: str | None = None) -> Iterator[Document]:

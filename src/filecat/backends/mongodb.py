@@ -24,7 +24,7 @@ import time
 from typing import Any, Iterable, Iterator
 
 from ..record import root_id
-from .base import Backend, Document
+from .base import Backend, Document, chunks
 
 BATCH_SIZE = 500
 BATCH_SECONDS = 2.0
@@ -161,6 +161,18 @@ class MongoBackend(Backend):
         self.flush()
         doc = self.files.find_one({"root_id": root_id(root), "rel_path": rel_path}, {"_id": 0})
         return doc
+
+    # What a rescan compares (Backend.get_stats); the rest of a record can be large.
+    STAT_FIELDS = {"_id": 0, "root_id": 1, "rel_path": 1, "kind": 1, "size": 1, "mtime_ns": 1,
+                   "probe.child_count": 1, "probe.cloud": 1}
+
+    def get_stats(self, root: str, rel_paths: list[str]) -> dict[str, Document]:
+        rid, out = root_id(root), {}
+        for part in chunks(rel_paths):
+            for doc in self.files.find({"root_id": rid, "rel_path": {"$in": part}}, self.STAT_FIELDS):
+                out[doc["rel_path"]] = doc
+        self._overlay_buffer(root, rel_paths, out)
+        return out
 
     def list(self, kind: str | None = None, root: str | None = None) -> Iterator[Document]:
         self.flush()

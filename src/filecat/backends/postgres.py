@@ -18,7 +18,7 @@ import time
 from typing import Any, Iterable, Iterator
 
 from ..record import root_id
-from .base import Backend, Document
+from .base import Backend, Document, chunks
 
 BATCH_SIZE = 500
 BATCH_SECONDS = 2.0
@@ -222,6 +222,16 @@ class PostgresBackend(Backend):
                         (root_id(root), rel_path))
             row = cur.fetchone()
         return row[0] if row else None
+
+    def get_stats(self, root: str, rel_paths: list[str]) -> dict[str, Document]:
+        rid, out = root_id(root), {}
+        with self.conn.cursor() as cur:
+            for part in chunks(rel_paths):
+                cur.execute("SELECT rel_path, document FROM files WHERE root_id=%s AND rel_path = ANY(%s)",
+                            (rid, part))
+                out.update((rel, doc) for rel, doc in cur.fetchall())
+        self._overlay_buffer(root, rel_paths, out)
+        return out
 
     def list(self, kind: str | None = None, root: str | None = None) -> Iterator[Document]:
         self.flush()

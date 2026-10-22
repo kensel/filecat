@@ -553,3 +553,29 @@ def test_store_files_members_under_the_hash_and_prune(backend, backend_name):
     assert mid not in {h["members_id"] for h in backend.iter_member_sets()}
     assert backend.prune_samples() >= 1
     assert backend.get_samples([sid]) == {}
+
+
+def test_get_stats_contract(backend, backend_name):
+    docs = _make_docs(ROOT)
+    for d in docs:
+        backend.put(d)
+    backend.flush()
+    dir_doc = {"root_id": root_id(ROOT), "root": ROOT, "rel_path": "a/b", "name": "b",
+               "kind": "dir", "mtime_ns": 5, "probe": {"child_count": 1}}
+    backend.put(dir_doc)            # still buffered on a server backend
+    wanted = ["a/b/café.txt", "data/file2.bin", "a/b", "no/such/file"]
+    got = backend.get_stats(ROOT, wanted)
+    assert set(got) == {"a/b/café.txt", "data/file2.bin", "a/b"}
+    assert {k: got["a/b/café.txt"][k] for k in ("kind", "size", "mtime_ns")} == {
+        "kind": "text", "size": 123, "mtime_ns": 1_700_000_000_000_000_000}
+    assert got["data/file2.bin"]["size"] == 0 and "mtime_ns" not in got["data/file2.bin"]
+    assert got["a/b"]["kind"] == "dir" and got["a/b"]["probe"]["child_count"] == 1
+    assert backend.get_stats(ROOT, []) == {}
+    assert backend.get_stats(r"C:\other-root", wanted) == {}
+    # more paths than one query takes
+    many = [f"bulk/{i:04d}" for i in range(1203)]
+    for p in many:
+        backend.put({"root_id": root_id(ROOT), "root": ROOT, "rel_path": p, "name": p[5:],
+                     "kind": "empty", "size": 0})
+    backend.flush()
+    assert set(backend.get_stats(ROOT, many + ["a/b"])) == set(many) | {"a/b"}

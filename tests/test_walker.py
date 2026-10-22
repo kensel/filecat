@@ -330,3 +330,57 @@ def test_exclude_skips_folders_and_files_as_read_or_as_recorded(fixture_dir):
               measure_file=_measure_stub, path=read)
     assert sorted(d["rel_path"] for d in backend.list(root=recorded)) == [
         "", "keep", "keep/f.txt", "tool2", "tool2/f.txt"]
+
+
+def test_unchanged_rescan_reads_stored_records_once_per_directory(fixture_dir):
+    for d in ("a", "a/x", "b"):
+        (fixture_dir / d).mkdir(parents=True)
+        for i in range(3):
+            (fixture_dir / d / f"f{i}.txt").write_text(d * (i + 1))
+    backend = MemoryBackend()
+    walk_root(str(fixture_dir), ScanOptions(), backend, identifier=None,
+              resume=_resume(), measure_file=_measure_stub)
+
+    calls = {"get": 0, "get_stats": 0}
+
+    class Counting(MemoryBackend):
+        def get(self, root, rel_path):
+            calls["get"] += 1
+            return super().get(root, rel_path)
+
+        def get_stats(self, root, rel_paths):
+            calls["get_stats"] += 1
+            return super().get_stats(root, rel_paths)
+
+    again = Counting()
+    again.docs = backend.docs
+    seen = []
+    walk_root(str(fixture_dir), ScanOptions(), again, identifier=None, resume=_resume(),
+              measure_file=lambda *a: pytest.fail("an unchanged file was measured"),
+              progress=lambda p, size, how: seen.append(how))
+    assert seen.count("unchanged") == 9
+    # the root's own record, then one call per directory (root, a, a/x, b);
+    # MemoryBackend.get_stats is the default, which loops over get()
+    assert calls["get_stats"] == 5
+    assert calls["get"] == 1 + 2 + 4 + 3 + 3       # = the paths those calls asked for
+
+
+def test_listing_read_ahead_failure_is_recorded_like_before(fixture_dir, monkeypatch):
+    (fixture_dir / "ok").mkdir()
+    (fixture_dir / "ok" / "f.txt").write_text("x")
+    (fixture_dir / "locked").mkdir()
+    real = walker_mod._list_dir
+
+    def list_dir(path):
+        if path.endswith("locked"):
+            raise PermissionError(f"access denied: {path}")
+        return real(path)
+
+    monkeypatch.setattr(walker_mod, "_list_dir", list_dir)
+    backend = MemoryBackend()
+    had_errors = walk_root(str(fixture_dir), ScanOptions(), backend, identifier=None,
+                           resume=_resume(), measure_file=_measure_stub)
+    docs = {d["rel_path"]: d for d in backend.list(root=str(fixture_dir))}
+    assert had_errors
+    assert docs["locked"]["errors"][0]["stage"] == "listdir"
+    assert "ok/f.txt" in docs

@@ -43,11 +43,19 @@ Design notes:
   directory entry with probe.cloud; --force does not change that. Files in
   a sync root that are on the device are measured and get probe.cloud too.
   A rescan measures a file recorded while cloud-only once it is local.
+* Rescans of unchanged trees. A directory's stored records are read in one
+  Backend.get_stats() call when it is entered (its subdirectories' own
+  records included), not one get() per entry; and the listings of the next
+  LIST_AHEAD subdirectories are read in background threads (_Lister), since
+  over SMB a listing is mostly waiting on the network. The walk itself still
+  takes one entry at a time, in name order.
 """
 from __future__ import annotations
 
 import ctypes
 import os
+import threading
+from contextlib import closing
 from concurrent.futures import ThreadPoolExecutor, TimeoutError as FutureTimeoutError
 from dataclasses import dataclass, field
 from typing import Any, Callable, Iterable
@@ -61,6 +69,15 @@ FILE_ATTRIBUTE_REPARSE_POINT = 0x400
 
 DEFAULT_SKIP_ROOT_FILES = {"pagefile.sys", "hiberfil.sys", "swapfile.sys"}
 DEFAULT_SKIP_DIRS = {"$Recycle.Bin", "System Volume Information"}
+
+# Subdirectory listings read ahead of the walk, per directory, and the
+# threads that read them.
+LIST_AHEAD = 16
+LIST_THREADS = 8
+# How many levels below a directory the read-ahead follows, and how many
+# listings it holds at most.
+LIST_DEPTH = 3
+LIST_HELD = 1024
 
 MeasureFunc = Callable[[str, str, str, os.stat_result, ScanOptions, Any], dict[str, Any]]
 # progress(path, size, how): how is "measured" (new or changed file, read
@@ -173,17 +190,109 @@ class _Frame:
     # Backup stores this folder is in (outermost first), and the one rooted here.
     stores: tuple = ()
     store: backup.Store | None = None
+    # Stored records of the entries, from one Backend.get_stats() call.
+    stored: dict = field(default_factory=dict)
+    # _Lister: the next entry to consider, and the listings read ahead.
+    ahead_idx: int = 0
+    ahead: set = field(default_factory=set)
+
+
+def _list_dir(path: str) -> list[os.DirEntry]:
+    """A directory's entries in name order, each stat()ed while the listing
+    is fresh (free on Windows, where the listing carries the stat)."""
+    with os.scandir(path) as it:
+        entries = sorted(it, key=lambda e: e.name)
+    for e in entries:
+        try:
+            e.stat(follow_symlinks=False)
+        except OSError:
+            pass        # the walk stats it again and records the error
+    return entries
+
+
+class _Lister:
+    """Reads the listings of the subdirectories the walk will enter next, in
+    LIST_THREADS background threads: LIST_AHEAD per directory, and from each
+    listing read ahead its own subdirectories too, LIST_DEPTH levels down
+    (a deep, narrow tree such as Plex's <hash>.bundle/Contents/Thumbnails
+    would otherwise wait on every level). At most LIST_HELD listings are
+    held. A listing that fails is raised again by take(), where the walk
+    handles it as before; one read ahead and never taken costs only the time."""
+
+    def __init__(self, wanted: Callable[[os.DirEntry, str], str | None],
+                 threads: int = LIST_THREADS) -> None:
+        self._wanted = wanted
+        self._pool = ThreadPoolExecutor(max_workers=threads) if threads > 0 else None
+        self._pending: dict[str, Any] = {}
+        self._lock = threading.Lock()
+
+    def _submit(self, child_abs: str, child_rel: str, depth: int) -> bool:
+        with self._lock:
+            if child_abs in self._pending or len(self._pending) >= LIST_HELD:
+                return False
+            try:
+                self._pending[child_abs] = self._pool.submit(self._read, child_abs, child_rel, depth)
+            except RuntimeError:        # closed while a worker was still reading
+                return False
+        return True
+
+    def _read(self, abs_path: str, rel_path: str, depth: int) -> list[os.DirEntry]:
+        entries = _list_dir(abs_path)
+        if depth > 0:
+            queued = 0
+            for e in entries:
+                if queued >= LIST_AHEAD:
+                    break
+                child_abs = self._wanted(e, rel_path)
+                if child_abs is not None:
+                    child_rel = f"{rel_path}/{e.name}" if rel_path else e.name
+                    queued += self._submit(child_abs, child_rel, depth - 1)
+        return entries
+
+    def fill(self, frame: _Frame) -> None:
+        if self._pool is None:
+            return
+        while frame.ahead_idx < len(frame.entries) and len(frame.ahead) < LIST_AHEAD:
+            entry = frame.entries[frame.ahead_idx]
+            frame.ahead_idx += 1
+            child_abs = self._wanted(entry, frame.rel_path)
+            if child_abs is not None:
+                child_rel = f"{frame.rel_path}/{entry.name}" if frame.rel_path else entry.name
+                frame.ahead.add(child_abs)
+                self._submit(child_abs, child_rel, LIST_DEPTH)
+
+    def take(self, frame: _Frame, child_abs: str) -> list[os.DirEntry]:
+        frame.ahead.discard(child_abs)
+        with self._lock:
+            fut = self._pending.pop(child_abs, None)
+        return fut.result() if fut is not None else _list_dir(child_abs)
+
+    def close(self) -> None:
+        if self._pool is not None:
+            self._pool.shutdown(wait=False, cancel_futures=True)
+            with self._lock:
+                self._pending.clear()
 
 
 def _make_frame(root: str, rel_path: str, abs_path: str, mtime_ns: int, ctime_ns: int,
                 entries: list[os.DirEntry], options: ScanOptions, backend: Backend,
-                parent_stores: tuple = ()) -> _Frame:
+                parent_stores: tuple = (), stored: dict[str, Any] | None = None) -> _Frame:
+    """`stored` is this directory's own record, read with its parent's
+    entries; the root's is read here."""
     dir_name = rel_path.rsplit("/", 1)[-1] if rel_path else os.path.basename(abs_path.rstrip("\\/"))
     names = {e.name for e in entries}
     store = backup.detect(rel_path, dir_name, names) or dbfiles.detect(rel_path, dir_name, names)
     if store is not None and store.virtual and not options.measure_backups:
         entries = []    # recorded with its summary, not walked (see backup/__init__.py)
-    stored = None if options.force else backend.get(root, rel_path)
+    children: dict[str, Any] = {}
+    if not options.force:
+        if not rel_path:
+            stored = backend.get_stats(root, [rel_path]).get(rel_path)
+        if entries:
+            prefix = f"{rel_path}/" if rel_path else ""
+            children = backend.get_stats(root, [prefix + e.name for e in entries])
+    else:
+        stored = None
     if stored is not None and stored.get("kind") != "dir":
         stored = None
     unchanged = (stored is not None
@@ -192,7 +301,8 @@ def _make_frame(root: str, rel_path: str, abs_path: str, mtime_ns: int, ctime_ns
     return _Frame(rel_path=rel_path, abs_path=abs_path, mtime_ns=mtime_ns, ctime_ns=ctime_ns,
                   entries=entries, unchanged=unchanged, had_previous=stored is not None,
                   is_drive_root=is_drive_root(abs_path),
-                  stores=parent_stores + ((store,) if store else ()), store=store)
+                  stores=parent_stores + ((store,) if store else ()), store=store,
+                  stored=children)
 
 
 def _listed_only(root: str, rel_path: str, name: str, st: os.stat_result,
@@ -330,6 +440,28 @@ def walk_root(root: str, options: ScanOptions, backend: Backend, identifier: Any
     exclude = {_norm_path(p) for p in options.exclude}
     max_in_flight = max(1, options.workers) * 4
 
+    def _will_enter(entry: os.DirEntry, parent_rel: str) -> str | None:
+        """The path of a subdirectory the walk is going to list, else None:
+        the same tests as the walk below, minus the listing."""
+        try:
+            if entry.is_symlink() or not entry.is_dir(follow_symlinks=False):
+                return None
+            st = entry.stat(follow_symlinks=False)
+        except OSError:
+            return None
+        if is_reparse_point(st) or should_skip_dir(entry.name, options.default_skips):
+            return None
+        child_rel = f"{parent_rel}/{entry.name}" if parent_rel else entry.name
+        child_abs = record.join_root(path, child_rel)
+        if exclude and excluded(exclude, child_abs, record.join_root(root, child_rel)):
+            return None
+        done = None if options.force else resume.get_dir(root, child_rel)
+        if done is not None and done.get("mtime_ns") == stat_times(st)[0]:
+            return None
+        return child_abs
+
+    lister = _Lister(_will_enter)
+
     def _drain(pending: list, count: int) -> bool:
         """Write the first `count` pending files in submission order."""
         errors = False
@@ -373,9 +505,10 @@ def walk_root(root: str, options: ScanOptions, backend: Backend, identifier: Any
         except Exception as e:  # a bad manifest must not stop the walk
             record.add_error(doc, frame.store.probe_key, e)
 
-    with ThreadPoolExecutor(max_workers=max(1, options.workers)) as executor:
+    with ThreadPoolExecutor(max_workers=max(1, options.workers)) as executor, closing(lister):
         while stack:
             frame = stack[-1]
+            lister.fill(frame)
 
             if frame.idx >= len(frame.entries):
                 # Every file of this directory is written before the
@@ -452,8 +585,7 @@ def walk_root(root: str, options: ScanOptions, backend: Backend, identifier: Any
                     frame.idx += 1
                     continue
                 try:
-                    with os.scandir(child_abs) as it:
-                        child_entries = sorted(it, key=lambda e: e.name)
+                    child_entries = lister.take(frame, child_abs)
                 except OSError as e:
                     mtime_ns, ctime_ns = stat_times(st)
                     doc = record.new_document(root, child_rel, kind="dir",
@@ -467,7 +599,8 @@ def walk_root(root: str, options: ScanOptions, backend: Backend, identifier: Any
                     continue
                 mtime_ns, ctime_ns = stat_times(st)
                 child_frame = _make_frame(root, child_rel, child_abs, mtime_ns, ctime_ns,
-                                          child_entries, options, backend, frame.stores)
+                                          child_entries, options, backend, frame.stores,
+                                          stored=frame.stored.get(child_rel))
                 stack.append(child_frame)
                 continue  # parent.idx advances only once child_frame is popped
 
@@ -487,7 +620,7 @@ def walk_root(root: str, options: ScanOptions, backend: Backend, identifier: Any
                 # and its vanished children deleted. The exception is a file
                 # recorded while cloud-only that is on the device now.
                 if not options.force:
-                    stored = backend.get(root, child_rel)
+                    stored = frame.stored.get(child_rel)
                     if (stored is not None and stored.get("size") == size
                             and stored.get("mtime_ns") == st.st_mtime_ns
                             and (cloud_only or not _was_cloud_only(stored))):
