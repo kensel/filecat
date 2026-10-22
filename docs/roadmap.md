@@ -58,6 +58,32 @@ Note 05 §2.B and §2.C. See [members.md](members.md).
   Existing collections are rebuilt this way by `filecat migrate` into a new
   database.
 
+## v0.1.4: hardening before the agents
+
+The storage changes of v0.1.2 and v0.1.3 settle on the real catalog before
+the agent becomes a second writer.
+
+- CI green on GitHub: the fixes from the first run (MongoDB 8.0 on
+  Linux 6.19+, Windows `\\?\` link targets, test ordering), and
+  `actions/checkout@v5` / `astral-sh/setup-uv@v7` (Node 24).
+- [x] A scan no longer stops at a Windows reparse point that is neither a
+  symlink nor a junction (`os.readlink` raises `ValueError` there); it is
+  recorded as a link without a target.
+- `filecat samples migrate` and `filecat member-sets migrate` timed on the
+  20-million-record catalog with `--limit`; batch sizes and progress
+  estimates from what that shows.
+- Prune on large tables: the anti-join over `sample_id` / `members_id` has
+  no index behind it; add expression indexes (or MongoDB partial indexes)
+  if the timing calls for it.
+- Rebuild an existing MongoDB catalog in place (zstd collections, partial
+  `sha256` index) one collection at a time, instead of only through
+  `filecat migrate` into a second database.
+- `filecat migrate` copies member sets before the records that name them.
+- Maybe, if the trial or a review says it matters: archives above 64 MiB
+  whose copies differ in mtime get separate member sets (`sha256_partial`
+  includes the mtime); path mapping between NAS POSIX paths and SMB UNC
+  roots, and allocated size (`st_blocks`), ahead of the agent.
+
 ## v0.2.0: Rust agents and embedded metadata
 
 The Rust agents go in. Note 05 §3 sets the division of labour: the agent

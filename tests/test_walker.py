@@ -269,6 +269,17 @@ def test_directory_junction_recorded_as_link_not_recursed_into(fixture_dir):
     assert docs["jtarget"]["kind"] == "dir"  # the real directory is walked normally
 
 
+def test_reparse_point_that_is_not_a_link_has_no_target(monkeypatch):
+    """os.readlink raises ValueError, not OSError, on Windows for a reparse
+    point that is neither a symlink nor a junction (an app execution alias
+    under WindowsApps, a dedup or cloud placeholder)."""
+    def not_a_link(path):
+        raise ValueError("not a symbolic link")
+
+    monkeypatch.setattr(walker_mod.os, "readlink", not_a_link)
+    assert walker_mod.read_link_target("C:/x/alias.exe") is None
+
+
 def test_offline_root_records_single_error(fixture_dir, monkeypatch):
     missing = str(fixture_dir / "does-not-exist")
     backend = MemoryBackend()

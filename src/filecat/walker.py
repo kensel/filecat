@@ -82,7 +82,9 @@ def is_reparse_point(st: os.stat_result) -> bool:
 def read_link_target(path: str) -> str | None:
     try:
         target = os.readlink(path)
-    except OSError:
+    except (OSError, ValueError):
+        # ValueError: a Windows reparse point that is neither a symlink nor
+        # a junction (an app execution alias, a dedup or cloud placeholder).
         return None
     # Windows may hand back the target in its \\?\ form; record the path a
     # person would type.
