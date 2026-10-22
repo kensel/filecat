@@ -21,7 +21,7 @@ from __future__ import annotations
 
 import json
 import time
-from typing import Any, Iterator
+from typing import Any, Iterable, Iterator
 
 from ..record import root_id
 from .base import Backend, Document
@@ -68,6 +68,8 @@ def _bson_safe(value: Any) -> Any:
 
 class MongoBackend(Backend):
     name = "mongodb"
+    stores_samples = True
+    batches_samples = True
 
     def __init__(self, dsn: str) -> None:
         import pymongo  # lazy: only needed when this backend is used
@@ -105,6 +107,15 @@ class MongoBackend(Backend):
         self.agg_suffix.create_index([("root_id", 1), ("suffix", 1)], unique=True)
         self.agg_mime.create_index([("root_id", 1), ("mime", 1)], unique=True)
         self.agg_dir.create_index([("root_id", 1), ("dir", 1)], unique=True)
+        # One document per content hash (_id); new, so it can start out with
+        # zstd block compression (research note 05, section 2.C).
+        if "samples" not in self.db.list_collection_names():
+            try:
+                self.db.create_collection(
+                    "samples", storageEngine={"wiredTiger": {"configString": "block_compressor=zstd"}})
+            except pymongo.errors.CollectionInvalid:
+                pass    # created meanwhile by another process
+        self.samples = self.db["samples"]
 
         self._buffer: list[Document] = []
         self._last_flush = time.monotonic()
@@ -120,6 +131,7 @@ class MongoBackend(Backend):
             self.flush()
 
     def flush(self) -> None:
+        self.flush_samples()    # a record never lands before the sample it names
         if not self._buffer:
             return
         ops = [
@@ -393,6 +405,39 @@ class MongoBackend(Backend):
 
     def clear_programs(self) -> None:
         self.programs.delete_many({})
+
+    # --- samples ---------------------------------------------------
+    def add_samples(self, samples: list[Document]) -> None:
+        from pymongo import UpdateOne
+        if samples:
+            self.samples.bulk_write(
+                [UpdateOne({"_id": x["sample_id"]}, {"$setOnInsert": _bson_safe(x)}, upsert=True)
+                 for x in samples], ordered=False)
+
+    def get_samples(self, ids: Iterable[str]) -> dict[str, Document]:
+        ids = list(ids)
+        if not ids:
+            return {}
+        return {d["sample_id"]: d for d in self.samples.find({"_id": {"$in": ids}}, {"_id": 0})}
+
+    def set_sample_llm(self, sample_id: str, llm: Document) -> None:
+        self.samples.update_one({"_id": sample_id}, {"$set": {"llm": _bson_safe(llm)}})
+
+    def iter_samples(self) -> Iterator[Document]:
+        self.flush_samples()
+        yield from self.samples.find({}, {"_id": 0})
+
+    def page_records(self, after: Any, limit: int) -> tuple[list[Document], Any]:
+        from bson import ObjectId
+        self.flush()
+        query = {} if after is None else {"_id": {"$gt": ObjectId(after)}}
+        docs = list(self.files.find(query).sort("_id", 1).limit(limit))
+        if not docs:
+            return [], after
+        last = str(docs[-1]["_id"])
+        for d in docs:
+            d.pop("_id", None)
+        return docs, last
 
     # --- lifecycle -------------------------------------------------
     def close(self) -> None:

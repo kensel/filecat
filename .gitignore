@@ -222,6 +222,8 @@ __marimo__/
 # filecat
 catalog.*
 *.resume.json
+*.samples-migrate.json
+*.samples-migrate.json.tmp
 /signatures/*
 !/signatures/README.md
 tests/_fixtures/

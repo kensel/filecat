@@ -18,7 +18,7 @@ from __future__ import annotations
 import hashlib
 import json
 import time
-from typing import Any, Iterator
+from typing import Any, Iterable, Iterator
 
 from ..record import root_id
 from .base import Backend, Document
@@ -123,6 +123,12 @@ _TABLES = {
             PRIMARY KEY (root_id, archive_hash, idx)
         )
     """,
+    "samples": """
+        CREATE TABLE samples (
+            sample_id VARCHAR(64) PRIMARY KEY,
+            document NVARCHAR(MAX) NOT NULL
+        )
+    """,
 }
 
 _INDEXES = [
@@ -186,6 +192,8 @@ def ping(dsn: str, timeout: float = 5.0) -> dict[str, Any]:
 
 class MssqlBackend(Backend):
     name = "mssql"
+    stores_samples = True
+    batches_samples = True
 
     def __init__(self, dsn: str) -> None:
         import pyodbc  # lazy: only needed when this backend is used
@@ -235,6 +243,7 @@ class MssqlBackend(Backend):
             self.flush()
 
     def flush(self) -> None:
+        self.flush_samples()    # a record never lands before the sample it names
         if not self._buffer:
             return
         rows = [self._row(d) for d in self._buffer]
@@ -564,7 +573,62 @@ class MssqlBackend(Backend):
         cur.execute("DELETE FROM programs")
         self.conn.commit()
 
+    # --- samples ---------------------------------------------------
+    def add_samples(self, samples: list[Document]) -> None:
+        cur = self.conn.cursor()
+        cur.executemany(
+            "INSERT INTO samples (sample_id, document) SELECT ?, ? "
+            "WHERE NOT EXISTS (SELECT 1 FROM samples WHERE sample_id = ?)",
+            [(x["sample_id"], json.dumps(x, ensure_ascii=False), x["sample_id"]) for x in samples])
+        self.conn.commit()
+
+    def _reader(self) -> Any:
+        """A second, autocommit connection for sample lookups: SQL Server
+        runs one statement at a time per connection, and samples are looked
+        up while a list() of the records is still being read."""
+        if getattr(self, "_side_conn", None) is None:
+            self._side_conn = self._pyodbc.connect(self.dsn, autocommit=True)
+        return self._side_conn
+
+    def get_samples(self, ids: Iterable[str]) -> dict[str, Document]:
+        ids = list(ids)
+        out: dict[str, Document] = {}
+        if not ids:
+            return out
+        cur = self._reader().cursor()
+        for i in range(0, len(ids), 500):
+            chunk = ids[i:i + 500]
+            cur.execute(f"SELECT document FROM samples WHERE sample_id IN ({','.join('?' * len(chunk))})",
+                        chunk)
+            for (doc_json,) in cur.fetchall():
+                doc = json.loads(doc_json)
+                out[doc["sample_id"]] = doc
+        return out
+
+    def set_sample_llm(self, sample_id: str, llm: Document) -> None:
+        cur = self.conn.cursor()
+        cur.execute("UPDATE samples SET document = JSON_MODIFY(document, '$.llm', JSON_QUERY(?)) "
+                    "WHERE sample_id = ?", (json.dumps(llm, ensure_ascii=False), sample_id))
+        self.conn.commit()
+
+    def iter_samples(self) -> Iterator[Document]:
+        self.flush_samples()
+        rows = self.conn.cursor().execute("SELECT document FROM samples").fetchall()
+        self.conn.commit()
+        for (doc_json,) in rows:
+            yield json.loads(doc_json)
+
+    def page_records(self, after: Any, limit: int) -> tuple[list[Document], Any]:
+        self.flush()
+        cur = self.conn.cursor()
+        rows = cur.execute("SELECT TOP (?) id, document FROM files WHERE id > ? ORDER BY id",
+                           (limit, after or 0)).fetchall()
+        self.conn.commit()
+        return [json.loads(d) for _, d in rows], (rows[-1][0] if rows else after)
+
     # --- lifecycle -------------------------------------------------
     def close(self) -> None:
         self.flush()
         self.conn.close()
+        if getattr(self, "_side_conn", None) is not None:
+            self._side_conn.close()

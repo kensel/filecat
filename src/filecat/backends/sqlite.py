@@ -132,6 +132,10 @@ CREATE TABLE IF NOT EXISTS members (
     PRIMARY KEY (root_id, archive_rel_path, idx)
 );
 CREATE INDEX IF NOT EXISTS idx_members_role ON members(role);
+CREATE TABLE IF NOT EXISTS samples (
+    sample_id TEXT PRIMARY KEY,
+    document TEXT NOT NULL
+);
 CREATE INDEX IF NOT EXISTS idx_members_path ON members(path);
 """
 
@@ -154,6 +158,8 @@ def _dirkey_sql(rel_path: str | None, depth: int) -> str:
 
 class SqliteBackend(Backend):
     name = "sqlite"
+    stores_samples = True
+    batches_samples = True
 
     def __init__(self, path: str) -> None:
         self.path = path
@@ -195,6 +201,7 @@ class SqliteBackend(Backend):
             self._flush_buffer()
 
     def _flush_buffer(self) -> None:
+        self.flush_samples()    # a record never lands before the sample it names
         if not self._buffer:
             return
         self.conn.executemany(_UPSERT_SQL, list(self._buffer.values()))
@@ -570,6 +577,50 @@ class SqliteBackend(Backend):
     def clear_programs(self) -> None:
         self.conn.execute("DELETE FROM programs")
         self.conn.commit()
+
+    # --- samples ---------------------------------------------------
+    def add_samples(self, samples: list[Document]) -> None:
+        self.conn.executemany(
+            "INSERT OR IGNORE INTO samples(sample_id, document) VALUES (?, ?)",
+            [(x["sample_id"], json.dumps(x, ensure_ascii=False)) for x in samples])
+        self.conn.commit()
+
+    def get_samples(self, ids: Iterable[str]) -> dict[str, Document]:
+        ids = list(ids)
+        out: dict[str, Document] = {}
+        for i in range(0, len(ids), 500):
+            chunk = ids[i:i + 500]
+            marks = ",".join("?" * len(chunk))
+            for (doc_json,) in self.conn.execute(
+                    f"SELECT document FROM samples WHERE sample_id IN ({marks})", chunk):
+                doc = json.loads(doc_json)
+                out[doc["sample_id"]] = doc
+        return out
+
+    def set_sample_llm(self, sample_id: str, llm: Document) -> None:
+        stored = self.get_samples([sample_id]).get(sample_id)
+        if stored is None:
+            return
+        stored["llm"] = llm
+        self.conn.execute("UPDATE samples SET document=? WHERE sample_id=?",
+                          (json.dumps(stored, ensure_ascii=False), sample_id))
+        self.conn.commit()
+
+    def iter_samples(self) -> Iterator[Document]:
+        self.flush_samples()
+        cur = self.conn.execute("SELECT document FROM samples")
+        while True:
+            rows = cur.fetchmany(500)
+            if not rows:
+                break
+            for (doc_json,) in rows:
+                yield json.loads(doc_json)
+
+    def page_records(self, after: Any, limit: int) -> tuple[list[Document], Any]:
+        self._flush_buffer()
+        rows = self.conn.execute("SELECT id, document FROM files WHERE id > ? ORDER BY id LIMIT ?",
+                                 (after or 0, limit)).fetchall()
+        return [json.loads(d) for _, d in rows], (rows[-1][0] if rows else after)
 
     # --- lifecycle -------------------------------------------------
     def flush(self) -> None:

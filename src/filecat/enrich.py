@@ -12,6 +12,10 @@ and no type. This command finds those records and measures them in place:
 A file whose current size or mtime differs from the record is remeasured in
 full; the record then reflects the file as it is now.
 
+Data files of recognised backup stores (probe.backup_data: ABB pools,
+Hyper Backup buckets, Veeam chunks ...) are left unread, as a scan leaves
+them, unless --measure-backups; --force does not override that.
+
 Database data files (probe.db_data, see dbfiles/) are measured only once
 they are quiet and big enough, checked against the record and again
 against the file just before it is read; --force does not override that.
@@ -43,7 +47,7 @@ STAGES = ("names", "hash", "probe", "identify")
 NO_CONTENT_KINDS = ("dir", "link", "empty")
 # Fields from an import that a measurement does not produce and must not drop.
 KEEP_TOP = ("source", "llm")
-KEEP_PROBE = ("attributes", "readonly", "atime_ns", "installed_program", "db_data")
+KEEP_PROBE = ("attributes", "readonly", "atime_ns", "installed_program", "db_data", "backup_data")
 
 
 @dataclass
@@ -80,6 +84,8 @@ def needs(doc: dict[str, Any], stages: set[str], options: ScanOptions,
     want_names = "names" in stages and (force or "mime_glob" not in probe) and kind != "dir"
     if kind in NO_CONTENT_KINDS or not doc.get("size"):
         return want_names, False
+    if probe.get("backup_data") and not options.measure_backups:
+        return want_names, False    # listed-only backup data, as the scan left it
     db_engine = probe.get("db_data")
     if db_engine and "sha256" not in doc and "sha256_partial" not in doc:
         # listed only so far: read it once it is quiet, whatever --force says

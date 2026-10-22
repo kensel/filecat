@@ -428,3 +428,74 @@ def test_members_with_huge_ints_store(backend, backend_name):
     rows = list(backend.list_members(root, "bad.tar"))
     assert len(rows) == 1 and int(rows[0]["mtime_ns"]) == 10 ** 37
     backend.delete_members(root, "bad.tar")
+
+
+# --- content-keyed samples (filecat/samples.py) ----------------------------
+
+def _sample_id() -> str:
+    """A fresh id: a server database keeps samples from earlier runs."""
+    import uuid
+    return uuid.uuid4().hex + uuid.uuid4().hex
+
+
+def test_samples_contract(backend, backend_name):
+    if not backend.stores_samples:
+        pytest.skip(f"{backend_name} keeps samples inline")
+    a, b = _sample_id(), _sample_id()
+    first = {"sample_id": a, "hash_type": "sha256", "size": 5, "sample": "héllo",
+             "encoding": {"detected": "utf-8"}}
+    backend.add_samples([first, {"sample_id": b, "hash_type": "sha256_partial", "size": 9, "sample": "x",
+                                 "sample_truncated": True}])
+    # a stored sample is kept as it is
+    backend.add_samples([{**first, "sample": "changed"}])
+    got = backend.get_samples([a, b, _sample_id()])
+    assert set(got) == {a, b}
+    assert got[a] == first and got[b]["sample_truncated"] is True
+    assert backend.get_samples([]) == {}
+
+    llm = {"model": "m", "prompt_version": "filecat-1", "summary": "s", "labels": ["x"], "unsure": False}
+    backend.set_sample_llm(a, llm)
+    assert backend.get_samples([a])[a] == {**first, "llm": llm}
+    assert {a, b} <= {s["sample_id"] for s in backend.iter_samples()}
+
+
+def test_store_files_the_sample_under_the_hash(backend, backend_name):
+    sid = _sample_id()
+    doc = {**_make_docs(ROOT)[0], "sha256": sid, "sample": "text", "sample_truncated": True}
+    backend.store(copy.deepcopy(doc))
+    backend.flush()
+    got = backend.get(ROOT, doc["rel_path"])
+    if not backend.stores_samples:
+        assert got["sample"] == "text" and "sample_id" not in got
+        return
+    assert got["sample_id"] == sid and "sample" not in got and "sample_truncated" not in got
+    assert backend.get_samples([sid])[sid]["sample"] == "text"
+    # no hash: the sample stays on the record
+    plain = {**_make_docs(ROOT)[2], "sample": "inline"}
+    backend.store(copy.deepcopy(plain))
+    backend.flush()
+    assert backend.get(ROOT, plain["rel_path"])["sample"] == "inline"
+
+
+def test_page_records_visits_every_record_once(backend, backend_name):
+    try:
+        backend.page_records(None, 1)
+    except NotImplementedError:
+        pytest.skip(f"{backend_name} cannot page")
+    docs = _make_docs(ROOT)
+    for doc in docs:
+        backend.put(copy.deepcopy(doc))
+    backend.flush()
+    seen: list[str] = []
+    after = None
+    while True:
+        page, after = backend.page_records(after, 2)
+        if not page:
+            break
+        for d in page:
+            if d["root"] == ROOT:
+                seen.append(d["rel_path"])
+                backend.put({**d, "size": (d.get("size") or 0) + 1})   # rewriting keeps the order
+        backend.flush()
+    assert sorted(seen) == sorted(d["rel_path"] for d in docs)
+    assert all(backend.get(ROOT, d["rel_path"])["size"] == d["size"] + 1 for d in docs)

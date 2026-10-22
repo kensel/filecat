@@ -589,6 +589,12 @@ to `POST /api/chat` at `--ollama-url`, `$OLLAMA_HOST`, or `http://127.0.0.1:1143
 Only the record with its 4 KiB sample is sent, never the file itself. The reply goes in
 `llm` and never overrides a measurement. Tested with `gemma4:31b-cloud`.
 
+The database backends keep each text sample once per content hash, with
+its Ollama result, so copies of a file share one sample and one model call;
+the record keeps a `sample_id`. Records from before v0.1.2 move over with
+`filecat samples migrate`, which is batched, resumable and safe to stop at
+any point. See [docs/samples.md](docs/samples.md).
+
 ## Tests
 
 ```

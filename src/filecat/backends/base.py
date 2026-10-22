@@ -157,6 +157,11 @@ class Backend(ABC):
         """
         from ..record import MEMBERS_KEY
         members = document.pop(MEMBERS_KEY, None)
+        if self.stores_samples:
+            from .. import samples
+            sample = samples.split(document)
+            if sample is not None:
+                self.queue_sample(sample)   # reaches the store before the record does
         self.put(document)
         if members is not None:
             try:
@@ -257,6 +262,52 @@ class Backend(ABC):
 
     def clear_programs(self) -> None:
         """Remove all program records before a fresh programs scan."""
+
+    # --- content-keyed samples ------------------------------------------
+    # One document per content hash (filecat/samples.py): {"sample_id",
+    # "hash_type", "size", "encoding", "sample", "sample_truncated", "llm"}.
+    # A file record with a hash keeps "sample_id" instead of the text. A
+    # backend with stores_samples False keeps the text inline instead.
+    stores_samples: bool = False
+    # True when the backend's own record flush calls flush_samples() first,
+    # so queued samples may wait for it; otherwise queue_sample writes at once.
+    batches_samples: bool = False
+    SAMPLE_BATCH = 500
+
+    def add_samples(self, samples: list[Document]) -> None:
+        """Insert each sample whose sample_id is not stored yet; a stored one
+        is left as it is. Committed when this returns."""
+        raise NotImplementedError(f"{self.name} backend does not store samples")
+
+    def get_samples(self, ids: Iterable[str]) -> dict[str, Document]:
+        """{sample_id: sample} for the ids that are stored."""
+        raise NotImplementedError(f"{self.name} backend does not store samples")
+
+    def set_sample_llm(self, sample_id: str, llm: Document) -> None:
+        """Store an Ollama result on a stored sample (replacing any earlier one)."""
+        raise NotImplementedError(f"{self.name} backend does not store samples")
+
+    def iter_samples(self) -> Iterator[Document]:
+        raise NotImplementedError(f"{self.name} backend does not store samples")
+
+    def page_records(self, after: Any, limit: int) -> tuple[list[Document], Any]:
+        """Up to `limit` records after cursor `after` (None: from the start),
+        in an order that rewriting a record does not change, and the cursor
+        of the last one. Cursors are JSON values, so a long pass over the
+        records (samples.migrate) can checkpoint and resume."""
+        raise NotImplementedError(f"{self.name} backend cannot page through records")
+
+    def queue_sample(self, sample: Document) -> None:
+        queue: dict[str, Document] = self.__dict__.setdefault("_sample_queue", {})
+        queue.setdefault(sample["sample_id"], sample)
+        if not self.batches_samples or len(queue) >= self.SAMPLE_BATCH:
+            self.flush_samples()
+
+    def flush_samples(self) -> None:
+        queue = self.__dict__.get("_sample_queue")
+        if queue:
+            self.add_samples(list(queue.values()))
+            queue.clear()
 
     # --- lifecycle -----------------------------------------------------
     def flush(self) -> None:

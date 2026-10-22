@@ -140,10 +140,8 @@ own checksums:
 * `filecat enrich` runs the same measurement as a scan on records that lack
   it, for example ones brought in by `import`.
 
-## Known gap
+## Backup data and `enrich`
 
-`filecat enrich` does not yet skip backup data. A record with
-`probe.backup_data` has no hash, so `enrich` with its default `--what`
-(which includes `hash`) would open and hash it, ABB pools included. Until
-that is fixed, run `enrich` with `--root` / `--path` limits that leave the
-backup shares out, or with `--what names`.
+`filecat enrich` leaves backup data as the scan left it: a record with
+`probe.backup_data` is not opened or hashed, whatever `--what` and
+`--force` say, unless `enrich --measure-backups` is given.

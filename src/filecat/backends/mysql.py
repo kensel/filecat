@@ -19,7 +19,7 @@ from __future__ import annotations
 import hashlib
 import json
 import time
-from typing import Any, Iterator
+from typing import Any, Iterable, Iterator
 
 from ..record import root_id
 from .base import Backend, Document
@@ -135,6 +135,12 @@ _SCHEMA = [
         KEY idx_members_path_hash (path_hash)
     ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
     """,
+    """
+    CREATE TABLE IF NOT EXISTS samples (
+        sample_id VARCHAR(64) PRIMARY KEY,
+        document JSON NOT NULL
+    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
+    """,
 ]
 
 _UPSERT_SQL = """
@@ -222,6 +228,8 @@ def ping(dsn: str, timeout: float = 5.0) -> dict[str, Any]:
 
 class MysqlBackend(Backend):
     name = "mysql"
+    stores_samples = True
+    batches_samples = True
 
     def __init__(self, dsn: str) -> None:
         import pymysql  # lazy: only needed when this backend is used
@@ -254,6 +262,7 @@ class MysqlBackend(Backend):
             self.flush()
 
     def flush(self) -> None:
+        self.flush_samples()    # a record never lands before the sample it names
         if not self._buffer:
             return
         rows = [self._row(d) for d in self._buffer]
@@ -573,7 +582,66 @@ class MysqlBackend(Backend):
             cur.execute("DELETE FROM programs")
         self.conn.commit()
 
+    # --- samples ---------------------------------------------------
+    def add_samples(self, samples: list[Document]) -> None:
+        with self.conn.cursor() as cur:
+            cur.executemany(
+                "INSERT IGNORE INTO samples (sample_id, document) VALUES (%s, %s)",
+                [(x["sample_id"], json.dumps(_json_safe(x), ensure_ascii=False)) for x in samples])
+        self.conn.commit()
+
+    def _reader(self) -> Any:
+        """A second, autocommit connection for sample lookups: list() reads
+        with an unbuffered cursor, and no other statement may run on its
+        connection until that listing is finished."""
+        if getattr(self, "_side_conn", None) is None:
+            self._side_conn = connect(self.dsn)
+            self._side_conn.autocommit(True)
+        return self._side_conn
+
+    def get_samples(self, ids: Iterable[str]) -> dict[str, Document]:
+        ids = list(ids)
+        out: dict[str, Document] = {}
+        if not ids:
+            return out
+        with self._reader().cursor() as cur:
+            for i in range(0, len(ids), 500):
+                chunk = ids[i:i + 500]
+                cur.execute(f"SELECT document FROM samples WHERE sample_id IN ({','.join(['%s'] * len(chunk))})",
+                            chunk)
+                for (doc_json,) in cur.fetchall():
+                    doc = json.loads(doc_json)
+                    out[doc["sample_id"]] = doc
+        return out
+
+    def set_sample_llm(self, sample_id: str, llm: Document) -> None:
+        with self.conn.cursor() as cur:
+            cur.execute("UPDATE samples SET document = JSON_SET(document, '$.llm', CAST(%s AS JSON)) "
+                        "WHERE sample_id = %s", (json.dumps(_json_safe(llm), ensure_ascii=False), sample_id))
+        self.conn.commit()
+
+    def iter_samples(self) -> Iterator[Document]:
+        self.flush_samples()
+        cur = self.conn.cursor(self._pymysql.cursors.SSCursor)
+        try:
+            cur.execute("SELECT document FROM samples")
+            for (doc_json,) in cur:
+                yield json.loads(doc_json)
+        finally:
+            cur.close()
+
+    def page_records(self, after: Any, limit: int) -> tuple[list[Document], Any]:
+        self.flush()
+        with self.conn.cursor() as cur:
+            cur.execute("SELECT id, document FROM files WHERE id > %s ORDER BY id LIMIT %s",
+                        (after or 0, limit))
+            rows = cur.fetchall()
+        self.conn.commit()
+        return [json.loads(d) for _, d in rows], (rows[-1][0] if rows else after)
+
     # --- lifecycle -------------------------------------------------
     def close(self) -> None:
         self.flush()
         self.conn.close()
+        if getattr(self, "_side_conn", None) is not None:
+            self._side_conn.close()

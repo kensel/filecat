@@ -138,10 +138,21 @@ def call_ollama(url: str, model: str, doc: dict[str, Any], timeout: float = TIME
     return llm
 
 
+def _current(llm: Any, options: ScanOptions) -> bool:
+    """A result from this model and prompt version, not an error: not asked again."""
+    return (isinstance(llm, dict) and "error" not in llm and llm.get("model") == options.model
+            and llm.get("prompt_version") == PROMPT_VERSION)
+
+
 def select_candidates(backend: Backend, options: ScanOptions) -> list[dict[str, Any]]:
     """kind in options.ollama_kinds, size <= options.ollama_max_size, a
-    non-empty decoded sample, at most options.ollama_max_files."""
+    non-empty decoded sample and no current result, at most
+    options.ollama_max_files. A sample in the samples store is one
+    candidate however many records share it; candidates come back with the
+    sample attached (samples.attach)."""
+    from . import samples
     out: list[dict[str, Any]] = []
+    stored: dict[str, tuple[str, str]] = {}   # sample_id -> the first record naming it
     for doc in backend.list():
         if len(out) >= options.ollama_max_files:
             break
@@ -149,26 +160,48 @@ def select_candidates(backend: Backend, options: ScanOptions) -> list[dict[str, 
             continue
         if doc.get("size", 0) > options.ollama_max_size:
             continue
-        if not doc.get("sample"):
-            continue
-        out.append(doc)
+        if doc.get("sample"):
+            if not _current(doc.get("llm"), options):
+                out.append(doc)
+        elif doc.get("sample_id"):
+            stored.setdefault(doc["sample_id"], (doc["root"], doc["rel_path"]))
+    # Looked up only now: some servers allow no second statement while a
+    # listing is still open on the connection.
+    ids = list(stored)
+    for i in range(0, len(ids), 500):
+        if len(out) >= options.ollama_max_files:
+            break
+        found = backend.get_samples(ids[i:i + 500])
+        for sid in ids[i:i + 500]:
+            if len(out) >= options.ollama_max_files:
+                break
+            if sid not in found or _current(found[sid].get("llm"), options):
+                continue
+            doc = samples.attach_one(backend, backend.get(*stored[sid]))
+            if doc is not None and doc.get("sample"):
+                out.append(doc)
     return out
 
 
 def annotate_backend(backend: Backend, options: ScanOptions) -> None:
-    """Call Ollama for the bounded candidate set and store `llm` on each.
-    Never raises: a down server or unknown model lands in `llm.error` and
-    the rest of the scan's result (exit code, stored fields) is unaffected."""
+    """Call Ollama for the bounded candidate set and store each `llm`: on
+    the sample document when the sample is in the samples store (every copy
+    of the file shares it), else on the record. Never raises: a down server
+    or unknown model lands in `llm.error` and the rest of the scan's result
+    (exit code, stored fields) is unaffected."""
     if not options.ollama or not options.model:
         return
     url = base_url(options)
     fast_fail: str | None = None
     for doc in select_candidates(backend, options):
         if fast_fail is not None:
-            doc["llm"] = {"model": options.model, "prompt_version": PROMPT_VERSION, "error": fast_fail}
+            llm = {"model": options.model, "prompt_version": PROMPT_VERSION, "error": fast_fail}
         else:
             llm = call_ollama(url, options.model, doc)
-            doc["llm"] = llm
             if "error" in llm and _is_terminal_error(llm["error"]):
                 fast_fail = llm["error"]
-        backend.put(doc)
+        if doc.get("sample_id"):
+            backend.set_sample_llm(doc["sample_id"], llm)   # the record itself is unchanged
+        else:
+            doc["llm"] = llm
+            backend.put(doc)

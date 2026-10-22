@@ -15,7 +15,7 @@ from __future__ import annotations
 
 import json
 import time
-from typing import Any, Iterator
+from typing import Any, Iterable, Iterator
 
 from ..record import root_id
 from .base import Backend, Document
@@ -112,6 +112,10 @@ CREATE TABLE IF NOT EXISTS members (
 );
 CREATE INDEX IF NOT EXISTS idx_members_role ON members(role);
 CREATE INDEX IF NOT EXISTS idx_members_path ON members(path);
+CREATE TABLE IF NOT EXISTS samples (
+    sample_id TEXT PRIMARY KEY,
+    document JSONB NOT NULL
+);
 """
 
 _UPSERT_SQL = """
@@ -151,6 +155,8 @@ def ping(dsn: str, timeout: float = 5.0) -> dict[str, Any]:
 
 class PostgresBackend(Backend):
     name = "postgres"
+    stores_samples = True
+    batches_samples = True
 
     def __init__(self, dsn: str) -> None:
         import psycopg  # lazy: only needed when this backend is used
@@ -181,6 +187,7 @@ class PostgresBackend(Backend):
             self.flush()
 
     def flush(self) -> None:
+        self.flush_samples()    # a record never lands before the sample it names
         if not self._buffer:
             return
         rows = [self._row(d) for d in self._buffer]
@@ -489,6 +496,49 @@ class PostgresBackend(Backend):
         with self.conn.cursor() as cur:
             cur.execute("DELETE FROM programs")
         self.conn.commit()
+
+    # --- samples ---------------------------------------------------
+    def add_samples(self, samples: list[Document]) -> None:
+        with self.conn.cursor() as cur:
+            cur.executemany(
+                "INSERT INTO samples (sample_id, document) VALUES (%s, %s::jsonb) "
+                "ON CONFLICT (sample_id) DO NOTHING",
+                [(x["sample_id"], json.dumps(x, ensure_ascii=False)) for x in samples])
+        self.conn.commit()
+
+    def get_samples(self, ids: Iterable[str]) -> dict[str, Document]:
+        ids = list(ids)
+        if not ids:
+            return {}
+        with self.conn.cursor() as cur:
+            cur.execute("SELECT document FROM samples WHERE sample_id = ANY(%s)", (ids,))
+            rows = cur.fetchall()
+        # no commit: it would close a list() cursor still being read
+        return {d["sample_id"]: d for (d,) in rows}
+
+    def set_sample_llm(self, sample_id: str, llm: Document) -> None:
+        with self.conn.cursor() as cur:
+            cur.execute("UPDATE samples SET document = jsonb_set(document, '{llm}', %s::jsonb) "
+                        "WHERE sample_id = %s", (json.dumps(llm, ensure_ascii=False), sample_id))
+        self.conn.commit()
+
+    def iter_samples(self) -> Iterator[Document]:
+        self.flush_samples()
+        with self.conn.cursor(name="filecat_samples") as cur:
+            cur.itersize = 500
+            cur.execute("SELECT document FROM samples")
+            for (doc,) in cur:
+                yield doc
+        self.conn.commit()
+
+    def page_records(self, after: Any, limit: int) -> tuple[list[Document], Any]:
+        self.flush()
+        with self.conn.cursor() as cur:
+            cur.execute("SELECT id, document FROM files WHERE id > %s ORDER BY id LIMIT %s",
+                        (after or 0, limit))
+            rows = cur.fetchall()
+        self.conn.commit()
+        return [d for _, d in rows], (rows[-1][0] if rows else after)
 
     # --- lifecycle -------------------------------------------------
     def close(self) -> None:

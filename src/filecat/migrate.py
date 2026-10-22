@@ -8,6 +8,11 @@ member storage raises `NotImplementedError` from `iter_all_members()`; that
 is treated as "nothing to migrate there", not an error. The target's
 aggregates are rebuilt once at the end with `rebuild_aggregates()`.
 
+Text samples (filecat/samples.py) follow the target: when both backends
+have a samples store, the sample documents are copied first; when only the
+target has one, inline samples are split off on the way in; when only the
+source has one, each record gets its sample back inline.
+
 Public API:
     migrate(src, dst, *, roots=None, batch=2000, programs=True, members=True,
             verify=False, progress=None) -> MigrateStats
@@ -22,6 +27,7 @@ from collections import defaultdict
 from dataclasses import dataclass, field
 from typing import Any, Callable
 
+from . import samples
 from .backends import open_backend
 from .backends.base import Backend, Document
 
@@ -43,6 +49,7 @@ class MigrateStats:
     members_archives: int = 0
     members_rows: int = 0
     members_skipped: bool = False
+    samples: int = 0
     verify_checked: int = 0
     verify_mismatches: list[str] = field(default_factory=list)
     errors: list[str] = field(default_factory=list)
@@ -74,6 +81,13 @@ def _same_target(src: Backend, dst: Backend) -> bool:
     return a is not None and a == b
 
 
+def _readable(backend: Backend, doc: Document) -> Document:
+    """A record as a reader sees it, wherever its sample is kept."""
+    out = samples.attach(backend, [doc])[0]
+    out.pop("sample_id", None)
+    return out
+
+
 def migrate(src: Backend, dst: Backend, *, roots: list[str] | None = None,
             batch: int = 2000, programs: bool = True, members: bool = True,
             verify: bool = False, progress: ProgressFn | None = None) -> MigrateStats:
@@ -98,6 +112,33 @@ def migrate(src: Backend, dst: Backend, *, roots: list[str] | None = None,
 
     root_list = roots if roots else [None]
 
+    # --- samples, before the records that name them ---------------------
+    if src.stores_samples and dst.stores_samples:
+        chunk: list[Document] = []
+        for s in src.iter_samples():
+            chunk.append(s)
+            if len(chunk) >= batch:
+                dst.add_samples(chunk)
+                stats.samples += len(chunk)
+                chunk = []
+        if chunk:
+            dst.add_samples(chunk)
+            stats.samples += len(chunk)
+        maybe_progress()
+
+    def write(docs: list[Document]) -> None:
+        if src.stores_samples and not dst.stores_samples:
+            docs = samples.attach(src, docs)
+            for d in docs:
+                d.pop("sample_id", None)
+        elif dst.stores_samples and not src.stores_samples:
+            for d in docs:
+                sample = samples.split(d)
+                if sample is not None:
+                    dst.queue_sample(sample)
+                    stats.samples += 1
+        dst.put_many(docs)
+
     # --- documents ----------------------------------------------------
     buf: list[Document] = []
     for root in root_list:
@@ -105,12 +146,12 @@ def migrate(src: Backend, dst: Backend, *, roots: list[str] | None = None,
             buf.append(doc)
             stats.documents += 1
             if len(buf) >= batch:
-                dst.put_many(buf)
-                buf.clear()
+                write(buf)
+                buf = []
                 maybe_progress()
     if buf:
-        dst.put_many(buf)
-        buf.clear()
+        write(buf)
+        buf = []
     dst.flush()
     maybe_progress()
 
@@ -184,7 +225,7 @@ def migrate(src: Backend, dst: Backend, *, roots: list[str] | None = None,
             for doc in src.list(root=root):
                 stats.verify_checked += 1
                 got = dst.get(doc["root"], doc["rel_path"])
-                if got is None or got != doc:
+                if got is None or _readable(src, doc) != _readable(dst, got):
                     stats.verify_mismatches.append(f"{doc['root']}::{doc['rel_path']}")
                 maybe_progress()
 

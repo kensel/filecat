@@ -2,7 +2,7 @@
 from __future__ import annotations
 
 import copy
-from typing import Any, Iterator
+from typing import Any, Iterable, Iterator
 
 from ..record import root_id
 from .base import Backend, Document
@@ -10,6 +10,7 @@ from .base import Backend, Document
 
 class MemoryBackend(Backend):
     name = "memory"
+    stores_samples = True
 
     def __init__(self) -> None:
         self.docs: dict[tuple[str, str], Document] = {}
@@ -19,6 +20,7 @@ class MemoryBackend(Backend):
         self.root_info: dict[str, Document] = {}
         self.dropped: list[Document] = []
         self.treemaps: dict[str, tuple[Document, Document]] = {}
+        self.samples: dict[str, Document] = {}
 
     def put(self, document: Document) -> None:
         self.docs[(document["root_id"], document["rel_path"])] = copy.deepcopy(document)
@@ -113,3 +115,21 @@ class MemoryBackend(Backend):
 
     def clear_programs(self) -> None:
         self.programs.clear()
+
+    def add_samples(self, samples: list[Document]) -> None:
+        for s in samples:
+            self.samples.setdefault(s["sample_id"], copy.deepcopy(s))
+
+    def get_samples(self, ids: Iterable[str]) -> dict[str, Document]:
+        return {i: copy.deepcopy(self.samples[i]) for i in ids if i in self.samples}
+
+    def set_sample_llm(self, sample_id: str, llm: Document) -> None:
+        if sample_id in self.samples:
+            self.samples[sample_id]["llm"] = copy.deepcopy(llm)
+
+    def iter_samples(self) -> Iterator[Document]:
+        yield from (copy.deepcopy(s) for s in list(self.samples.values()))
+
+    def page_records(self, after: Any, limit: int) -> tuple[list[Document], Any]:
+        keys = sorted(k for k in self.docs if after is None or k > tuple(after))[:limit]
+        return [copy.deepcopy(self.docs[k]) for k in keys], (list(keys[-1]) if keys else after)

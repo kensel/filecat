@@ -43,6 +43,13 @@ def test_jsonl_and_sqlite_documents_compare_equal(fixture_dir: Path):
     from_jsonl = {d["rel_path"]: d for d in map(json.loads, jsonl.read_text(encoding="utf-8").splitlines())}
     with sqlite3.connect(db) as conn:
         from_sqlite = {r: json.loads(d) for r, d in conn.execute("SELECT rel_path, document FROM files")}
+        stored = {i: json.loads(d) for i, d in conn.execute("SELECT sample_id, document FROM samples")}
+    # sqlite files text samples under the content hash; put them back to compare
+    for doc in from_sqlite.values():
+        sid = doc.pop("sample_id", None)
+        if sid is not None:
+            doc.update({k: v for k, v in stored[sid].items() if k in ("sample", "sample_truncated")})
+    assert any(d.get("sample") for d in from_jsonl.values()) and stored
     assert from_jsonl == from_sqlite
     assert from_sqlite["docs/note.pdf"]["kind"] == "image"
     assert from_sqlite["docs/note.pdf"]["probe"]["identify_basis"] == "disagree"
@@ -58,9 +65,10 @@ def test_ollama_refused_port_keeps_measurements(fixture_dir: Path):
     with sqlite3.connect(db) as conn:
         doc = json.loads(conn.execute(
             "SELECT document FROM files WHERE rel_path = 'settings.zzq'").fetchone()[0])
-    assert doc["kind"] == "unknown" and doc["sample"]
-    assert "sha256" in doc
-    assert doc["llm"]["error"]
+        sample = json.loads(conn.execute(
+            "SELECT document FROM samples WHERE sample_id = ?", (doc["sample_id"],)).fetchone()[0])
+    assert doc["kind"] == "unknown" and doc["sample_id"] == doc["sha256"]
+    assert sample["sample"] and sample["llm"]["error"]    # the result is kept with the sample
 
 
 def test_summary_by_extension_matches_hand_count(fixture_dir: Path, capsys):

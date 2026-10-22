@@ -383,7 +383,8 @@ class Catalog:
         return self.call(run)
 
     def record(self, p: dict[str, str]) -> dict[str, Any] | None:
-        return self.call(lambda b: b.get(p["root"], p["rel_path"]))
+        from . import samples
+        return self.call(lambda b: samples.attach_one(b, b.get(p["root"], p["rel_path"])))
 
     def members(self, p: dict[str, str]) -> dict[str, Any]:
         offset = max(0, int(p.get("offset") or 0))
