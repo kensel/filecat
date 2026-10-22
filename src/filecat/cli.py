@@ -126,6 +126,9 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--drive", action="append", metavar="DRIVE",
                    help="local drive, e.g. C: (repeatable; replaces [everything])")
     p.add_argument("--list", action="store_true", help="print the roots that would be scanned and stop")
+    p.add_argument("--unfinished", action="store_true",
+                   help="only roots whose last scan did not finish (left in the resume file, never "
+                        "scanned, interrupted, failed, unreachable); finished roots are not walked again")
     _scan_options(p)
 
     p = sub.add_parser("summary", help="WinDirStat-style totals by extension, type and directory")
@@ -339,7 +342,16 @@ def main(argv: list[str] | None = None) -> int:
         print("filecat: --model is required with --ollama", file=sys.stderr)
         return 2
     module = importlib.import_module(COMMANDS[args.command])
-    return int(module.run(args) or 0)
+    try:
+        return int(module.run(args) or 0)
+    except KeyboardInterrupt:
+        # The scan has already marked the root interrupted and saved its
+        # resume file on the way out (scan_roots' handlers and finally).
+        hint = {"scan": "; run the same command again to resume where it stopped",
+                "scan-everything": "; run it again with --unfinished to resume only the roots "
+                                   "that have not finished"}.get(args.command, "")
+        print(f"\nfilecat: Ctrl+C pressed, {args.command} stopped{hint}", file=sys.stderr)
+        return 130
 
 
 if __name__ == "__main__":

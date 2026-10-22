@@ -96,7 +96,7 @@ filecat roots                                             # last scan, in progre
 filecat dropped                                           # records of files that vanished (kept 90 days)
 filecat backups [--versions]                              # backup stores: machines, versions, problems, copies
 filecat databases                                         # database data folders: engine, version, databases, quiet?
-filecat scan-everything [--list]                          # every share of [everything] servers + local drives
+filecat scan-everything [--list] [--unfinished]           # every share of [everything] servers + local drives
 filecat programs                                          # registry, PATH, Start Menu
 filecat programs --reg uninstall-export.reg               # from a regedit export instead
 filecat signatures status
@@ -162,7 +162,14 @@ or from the command line, where `--server` / `--drive` replace the configured se
 ```
 filecat scan-everything --list                             # show the roots, scan nothing
 filecat scan-everything --server nas-vm --drive C --workers 8
+filecat scan-everything --unfinished [--list]              # only roots whose last scan did not finish
 ```
+
+`--unfinished` finishes a stopped run without walking every finished share
+again: it keeps the roots left in the resume file (stopped part way, or a
+folder could not be listed) and those whose last attempt was not clean
+(never scanned, interrupted, failed, unreachable); `--list` shows why each
+one is kept. Ctrl+C stops a scan with a message saying how to resume.
 
 Shares are listed with NetShareEnum. Only disk shares count; `C$`, `ADMIN$`,
 `IPC$` and printers are left out. When a server refuses the listing and has

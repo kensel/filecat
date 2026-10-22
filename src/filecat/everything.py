@@ -20,6 +20,12 @@ Shares come from NetShareEnum (what `net view \\\\server /all` shows): disk
 shares only; administrative ones (C$, ADMIN$, IPC$) and printers are left
 out. A server whose shares cannot be listed is reported and skipped; the
 other servers and drives are still scanned and the exit code is 1.
+
+--unfinished scans only the roots whose last scan did not finish: those
+left in the resume file (stopped partway, or a folder could not be listed)
+and those whose last attempt in the root index is not ok / errors (never
+scanned, interrupted, failed, stalled, unreachable). A root another scan
+is walking right now is left out. Finished roots are not walked again.
 """
 from __future__ import annotations
 
@@ -127,6 +133,45 @@ def plan(servers: list[str], drives: list[str], logins: dict[str, str], exclude:
     return list(dict.fromkeys(kept)), problems
 
 
+FINISHED = ("ok", "errors")
+
+
+def unfinished(roots: list[str], aliases: dict[str, str], backend: Any,
+               resume_path: str) -> tuple[list[tuple[str, str]], list[str]]:
+    """([(root, why)] still to scan, roots another scan is walking now),
+    both in the order of `roots`."""
+    from . import rootinfo
+    from .resume import ResumeState
+    partway = {r.lower() for r in ResumeState(resume_path).roots}
+    keep, busy = [], []
+    for r in roots:
+        rec = recorded_root(r, aliases)
+        try:
+            info = backend.get_root_info(rec)
+        except NotImplementedError:
+            info = None
+        state = rootinfo.state(info)
+        if state == "in_progress":
+            busy.append(r)
+        elif rec.lower() in partway:
+            keep.append((r, "stopped partway" if state in FINISHED else state))
+        elif state not in FINISHED:
+            keep.append((r, "never scanned" if state == "never" else state))
+    return keep, busy
+
+
+def _unfinished(args: Any, roots: list[str]) -> list[tuple[str, str]]:
+    from .backends import open_backend
+    from .resume import resume_path_for
+    with open_backend(args.backend, getattr(args, "out", None), getattr(args, "dsn", None)) as backend:
+        path = resume_path_for(getattr(backend, "name", "backend"), getattr(backend, "path", None))
+        keep, busy = unfinished(roots, args.aliases or {}, backend, path)
+    for r in busy:
+        print(f"filecat: {r} is being scanned now; left out", file=sys.stderr)
+    print(f"{len(keep)} of {len(roots)} roots unfinished", file=sys.stderr)
+    return keep
+
+
 def run(args: Any) -> int:
     cfg = getattr(args, "everything", None) or {}
     if args.server or args.drive:          # the command line names the whole set
@@ -145,13 +190,19 @@ def run(args: Any) -> int:
     roots, problems = plan(servers, drives, logins, exclude, args.aliases or {})
     for p in problems:
         print(f"filecat: {p}", file=sys.stderr)
+    why: dict[str, str] = {}
+    if getattr(args, "unfinished", False):
+        why = dict(_unfinished(args, roots))
+        roots = list(why)
     if args.list:
         for r in roots:
             shown = recorded_root(r, args.aliases or {})
-            print(r if shown == r else f"{r}  -> recorded as {shown}")
+            line = r if shown == r else f"{r}  -> recorded as {shown}"
+            print(f"{line}  ({why[r]})" if r in why else line)
         return 1 if problems else 0
     if not roots:
-        return 1
+        # --unfinished with every root finished: nothing to do
+        return 0 if getattr(args, "unfinished", False) and not problems else 1
     if not getattr(args, "check_only", False):
         print(f"scanning {len(roots)} roots", file=sys.stderr)
 

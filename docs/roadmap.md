@@ -63,7 +63,7 @@ Note 05 §2.B and §2.C. See [members.md](members.md).
 The storage changes of v0.1.2 and v0.1.3 settle on the real catalog before
 the agent becomes a second writer.
 
-- CI green on GitHub: the fixes from the first run (Windows `\\?\` link
+- [x] CI green on GitHub: the fixes from the first run (Windows `\\?\` link
   targets, test ordering), and `actions/checkout@v5` /
   `astral-sh/setup-uv@v7` (Node 24). MongoDB 8.0 refuses to start on the
   runners' Linux 6.19+ kernels (SERVER-121912): CI and `compose.yaml` test
@@ -72,9 +72,20 @@ the agent becomes a second writer.
 - [x] A scan no longer stops at a Windows reparse point that is neither a
   symlink nor a junction (`os.readlink` raises `ValueError` there); it is
   recorded as a link without a target.
-- `filecat samples migrate` and `filecat member-sets migrate` timed on the
-  20-million-record catalog with `--limit`; batch sizes and progress
-  estimates from what that shows.
+- [x] `filecat samples migrate` and `filecat member-sets migrate` run on the
+  25-million-record catalog (MongoDB): samples in about an hour, 12.0M
+  samples into 11.4M documents; member sets in 47 minutes, 48.4M member
+  rows down to 8.8M (38,010 archive copies share a set, 113,899 compound
+  documents trimmed).
+- [x] `filecat scan-everything --unfinished`: only the roots whose last scan
+  did not finish (left in the resume file, never scanned, interrupted,
+  failed, unreachable), so finishing a stopped run does not walk every
+  finished share again.
+- [x] Ctrl+C ends a command with a one-line message (and, for a scan, how
+  to resume) instead of a traceback; exit code 130.
+- Rescans of unchanged trees are slow (about 50 files/s over SMB to a
+  MongoDB catalog): the walker looks up stored records one at a time. Read
+  each directory's stored records in one query.
 - Prune on large tables: the anti-join over `sample_id` / `members_id` has
   no index behind it; add expression indexes (or MongoDB partial indexes)
   if the timing calls for it.
