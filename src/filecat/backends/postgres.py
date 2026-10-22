@@ -224,7 +224,7 @@ class PostgresBackend(Backend):
             cur.execute(f"SELECT COUNT(*), COALESCE(SUM(size), 0) FROM files{where}", params)
             total, nbytes = cur.fetchone()
             cur.execute(
-                f"SELECT document FROM files{where} ORDER BY {sql_order(q)} LIMIT %s OFFSET %s",
+                f"SELECT document FROM files{where} ORDER BY {sql_order(q, POSTGRES)} LIMIT %s OFFSET %s",
                 [*params, q["limit"], q["offset"]])
             rows = [r[0] for r in cur.fetchall()]
         self.conn.commit()

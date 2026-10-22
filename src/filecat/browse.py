@@ -155,27 +155,34 @@ class Dialect:
     document has `errors`. byte_ranges: text compares byte by byte, so
     "starts with P/" can also be said as the index-friendly range
     P/ <= rel_path < P0 ('0' follows '/'); only sqlite's default BINARY
-    collation guarantees that.
+    collation guarantees that. collate: suffix that makes a text column sort
+    by code point, as Python does, rather than by the server's default
+    language-aware collation (which skips punctuation and folds case).
+    nulls_high: the server sorts NULL above every value (Postgres), so
+    ORDER BY must say NULLS FIRST/LAST to keep it lowest, as Python's
+    missing-is-0 sort and the other servers do.
     """
 
     def __init__(self, ph: str, substr: Callable[[str, str], str], left: Callable[[str, str], str],
                  instr: Callable[[str, str], str], lower: str, has_errors: str,
-                 byte_ranges: bool = False) -> None:
+                 byte_ranges: bool = False, collate: str = "", nulls_high: bool = False) -> None:
         self.ph, self.substr, self.left, self.instr = ph, substr, left, instr
         self.lower, self.has_errors, self.byte_ranges = lower, has_errors, byte_ranges
+        self.collate, self.nulls_high = collate, nulls_high
 
 
 SQLITE = Dialect("?", lambda e, p: f"substr({e}, {p})", lambda e, n: f"substr({e}, 1, {n})",
                  lambda e, n: f"instr({e}, {n})",
                  "lower", "json_extract(document, '$.errors') IS NOT NULL", byte_ranges=True)
 POSTGRES = Dialect("%s", lambda e, p: f"substr({e}, {p})", lambda e, n: f"substr({e}, 1, {n})",
-                   lambda e, n: f"strpos({e}, {n})", "lower", "document ? 'errors'")
+                   lambda e, n: f"strpos({e}, {n})", "lower", "document ? 'errors'",
+                   collate=' COLLATE "C"', nulls_high=True)
 MYSQL = Dialect("%s", lambda e, p: f"SUBSTRING({e}, {p})", lambda e, n: f"SUBSTRING({e}, 1, {n})",
                 lambda e, n: f"LOCATE({n}, {e})",
-                "LOWER", "JSON_CONTAINS_PATH(document, 'one', '$.errors')")
+                "LOWER", "JSON_CONTAINS_PATH(document, 'one', '$.errors')", collate=" COLLATE utf8mb4_bin")
 MSSQL = Dialect("?", lambda e, p: f"SUBSTRING({e}, {p}, 4000)", lambda e, n: f"SUBSTRING({e}, 1, {n})",
                 lambda e, n: f"CHARINDEX({n}, {e})",
-                "LOWER", "JSON_QUERY(document, '$.errors') IS NOT NULL")
+                "LOWER", "JSON_QUERY(document, '$.errors') IS NOT NULL", collate=" COLLATE Latin1_General_BIN2")
 
 
 def sql_where(q: Query, d: Dialect, root_id_value: str | None) -> tuple[str, list[Any]]:
@@ -198,7 +205,10 @@ def sql_where(q: Query, d: Dialect, root_id_value: str | None) -> tuple[str, lis
         add(f"{d.instr('rel_path', ph)} = 1", prefix + "/")
 
     def no_slash_after(start: int) -> None:
-        add(f"{d.instr(d.substr('rel_path', ph), ph)} = 0", start, "/")
+        # '/' inline, not a parameter: LOCATE and CHARINDEX put the needle
+        # first, which would hand the placeholders their values swapped
+        slash = "'/'"
+        add(f"{d.instr(d.substr('rel_path', ph), slash)} = 0", start)
 
     unreadable = f"(size IS NULL AND {d.has_errors})"
     if root_id_value is not None:
@@ -269,11 +279,18 @@ def sql_sizes(prefix: str, d: Dialect, root_id_value: str) -> tuple[str, list[An
             f"COALESCE(NULLIF(mime, ''), kind, 'unknown') FROM files{where}", params)
 
 
-def sql_order(q: Query) -> str:
+TEXT_SORTS = ("name", "rel_path", "kind", "suffix")
+
+
+def sql_order(q: Query, d: Dialect = SQLITE) -> str:
     """ORDER BY body (column names are from SORTS, never from the request)."""
     col = q["sort"] if q["sort"] in SORTS else "size"
     direction = "DESC" if q["desc"] else "ASC"
-    parts = [f"{col} {direction}", "rel_path ASC"]
+    collate = d.collate if col in TEXT_SORTS else ""
+    nulls = (" NULLS LAST" if q["desc"] else " NULLS FIRST") if d.nulls_high else ""
+    parts = [f"{col}{collate} {direction}{nulls}"]
+    if col != "rel_path":  # SQL Server rejects a column listed twice
+        parts.append(f"rel_path{d.collate} ASC")
     if "parent" in q:
         parts.insert(0, "CASE WHEN kind = 'dir' THEN 0 ELSE 1 END")
     return ", ".join(parts)

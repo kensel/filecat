@@ -107,7 +107,7 @@ def loaded(tmp_path):
     backends = _backends(tmp_path)
     for _, b in backends:
         for root in (ROOT, OTHER):
-            for doc in b.list(root=root):  # server backends may hold an earlier run
+            for doc in list(b.list(root=root)):  # server backends may hold an earlier run
                 b.delete(root, doc["rel_path"])
         b.put_many([dict(d) for d in DOCS])
         b.flush()

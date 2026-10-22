@@ -81,14 +81,14 @@ _TABLES = {
         CREATE TABLE agg_suffix (
             root_id VARCHAR(32) NOT NULL, root NVARCHAR(MAX) NOT NULL,
             suffix VARCHAR(190) NOT NULL, description NVARCHAR(MAX),
-            files BIGINT, bytes BIGINT, percent FLOAT,
+            files BIGINT, bytes BIGINT, [percent] FLOAT,
             PRIMARY KEY (root_id, suffix)
         )
     """,
     "agg_mime": """
         CREATE TABLE agg_mime (
             root_id VARCHAR(32) NOT NULL, root NVARCHAR(MAX) NOT NULL,
-            mime VARCHAR(190) NOT NULL, files BIGINT, bytes BIGINT, percent FLOAT,
+            mime VARCHAR(190) NOT NULL, files BIGINT, bytes BIGINT, [percent] FLOAT,
             PRIMARY KEY (root_id, mime)
         )
     """,
@@ -96,7 +96,7 @@ _TABLES = {
         CREATE TABLE agg_dir (
             root_id VARCHAR(32) NOT NULL, root NVARCHAR(MAX) NOT NULL,
             dir NVARCHAR(MAX) NOT NULL, dir_hash CHAR(64) NOT NULL,
-            files BIGINT, bytes BIGINT, percent FLOAT,
+            files BIGINT, bytes BIGINT, [percent] FLOAT,
             PRIMARY KEY (root_id, dir_hash)
         )
     """,
@@ -192,7 +192,11 @@ class MssqlBackend(Backend):
         self._pyodbc = pyodbc
         self.dsn = dsn
         self.conn = pyodbc.connect(dsn, autocommit=False)
-        self._init_schema()
+        try:
+            self._init_schema()
+        except Exception:
+            self.conn.close()  # else its open transaction blocks the next connection's DDL
+            raise
         self._buffer: list[Document] = []
         self._last_flush = time.monotonic()
 
@@ -280,7 +284,7 @@ class MssqlBackend(Backend):
         cur.execute(f"SELECT COUNT(*), COALESCE(SUM(size), 0) FROM files{where}", params)
         total, nbytes = cur.fetchone()
         cur.execute(
-            f"SELECT document FROM files{where} ORDER BY {sql_order(q)} "
+            f"SELECT document FROM files{where} ORDER BY {sql_order(q, MSSQL)} "
             "OFFSET ? ROWS FETCH NEXT ? ROWS ONLY",
             [*params, q["offset"], q["limit"]])
         rows = [json.loads(r[0]) for r in cur.fetchall()]
@@ -396,16 +400,16 @@ class MssqlBackend(Backend):
         metas = cur.fetchall()
         for rid, rname, total_files, total_bytes, unreadable, depth, built_at in metas:
             cur.execute(
-                "SELECT suffix, description, files, bytes, percent FROM agg_suffix "
+                "SELECT suffix, description, files, bytes, [percent] FROM agg_suffix "
                 "WHERE root_id=? ORDER BY bytes DESC, suffix ASC", (rid,))
             suffix = [{"suffix": r[0], "description": r[1], "files": int(r[2]), "bytes": int(r[3]), "percent": r[4]}
                       for r in cur.fetchall()]
             cur.execute(
-                "SELECT mime, files, bytes, percent FROM agg_mime "
+                "SELECT mime, files, bytes, [percent] FROM agg_mime "
                 "WHERE root_id=? ORDER BY bytes DESC, mime ASC", (rid,))
             mime = [{"mime": r[0], "files": int(r[1]), "bytes": int(r[2]), "percent": r[3]} for r in cur.fetchall()]
             cur.execute(
-                "SELECT dir, files, bytes, percent FROM agg_dir "
+                "SELECT dir, files, bytes, [percent] FROM agg_dir "
                 "WHERE root_id=? ORDER BY bytes DESC, dir ASC", (rid,))
             dirs = [{"dir": r[0], "files": int(r[1]), "bytes": int(r[2]), "percent": r[3]} for r in cur.fetchall()]
             roots_out[rname] = {
@@ -427,17 +431,17 @@ class MssqlBackend(Backend):
             rid = root_id(rname)
             if e["suffix"]:
                 cur.executemany(
-                    "INSERT INTO agg_suffix (root_id, root, suffix, description, files, bytes, percent) "
+                    "INSERT INTO agg_suffix (root_id, root, suffix, description, files, bytes, [percent]) "
                     "VALUES (?,?,?,?,?,?,?)",
                     [(rid, rname, r["suffix"], r.get("description"), r["files"], r["bytes"], r["percent"])
                      for r in e["suffix"]])
             if e["mime"]:
                 cur.executemany(
-                    "INSERT INTO agg_mime (root_id, root, mime, files, bytes, percent) VALUES (?,?,?,?,?,?)",
+                    "INSERT INTO agg_mime (root_id, root, mime, files, bytes, [percent]) VALUES (?,?,?,?,?,?)",
                     [(rid, rname, r["mime"], r["files"], r["bytes"], r["percent"]) for r in e["mime"]])
             if e["dir"]:
                 cur.executemany(
-                    "INSERT INTO agg_dir (root_id, root, dir, dir_hash, files, bytes, percent) VALUES (?,?,?,?,?,?,?)",
+                    "INSERT INTO agg_dir (root_id, root, dir, dir_hash, files, bytes, [percent]) VALUES (?,?,?,?,?,?,?)",
                     [(rid, rname, r["dir"], _rel_hash(r["dir"]), r["files"], r["bytes"], r["percent"]) for r in e["dir"]])
             cur.execute(
                 "INSERT INTO agg_meta (root_id, root, total_files, total_bytes, unreadable, depth, built_at) "

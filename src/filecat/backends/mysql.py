@@ -153,6 +153,21 @@ def _rel_hash(rel_path: str) -> str:
     return hashlib.sha256(rel_path.encode("utf-8")).hexdigest()
 
 
+_INT64 = 2 ** 63
+
+
+def _json_safe(value: Any) -> Any:
+    """`value` with every int outside int64 as a string: MySQL's JSON type
+    would store it as a double and lose digits."""
+    if isinstance(value, dict):
+        return {k: _json_safe(v) for k, v in value.items()}
+    if isinstance(value, list):
+        return [_json_safe(v) for v in value]
+    if isinstance(value, int) and not isinstance(value, bool) and not -_INT64 <= value < _INT64:
+        return str(value)
+    return value
+
+
 def connect(dsn: str, **extra: Any):
     """Accept either a pymysql-style kwargs DSN ("host=...;user=...;...")
     or a mysql://user:pass@host:port/db URL. `extra` goes to pymysql.connect."""
@@ -283,7 +298,7 @@ class MysqlBackend(Backend):
             cur.execute(f"SELECT COUNT(*), COALESCE(SUM(size), 0) FROM files{where}", params)
             total, nbytes = cur.fetchone()
             cur.execute(
-                f"SELECT document FROM files{where} ORDER BY {sql_order(q)} LIMIT %s OFFSET %s",
+                f"SELECT document FROM files{where} ORDER BY {sql_order(q, MYSQL)} LIMIT %s OFFSET %s",
                 [*params, q["limit"], q["offset"]])
             rows = [json.loads(r[0]) for r in cur.fetchall()]
         return {"total": int(total), "bytes": int(nbytes), "rows": rows}
@@ -331,7 +346,7 @@ class MysqlBackend(Backend):
             rows.append((
                 rid, ahash, rel_path, full["index"], path,
                 _rel_hash(path) if path else None, full.get("size"), full.get("csize"),
-                full.get("role"), full.get("kind"), json.dumps(full, ensure_ascii=False),
+                full.get("role"), full.get("kind"), json.dumps(_json_safe(full), ensure_ascii=False),
             ))
         with self.conn.cursor() as cur:
             cur.execute("DELETE FROM members WHERE root_id=%s AND archive_hash=%s", (rid, ahash))
