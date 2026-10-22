@@ -45,7 +45,10 @@ services:
       retries: 20
 
   mongodb:
-    image: mongo:8.0
+    image: mongo:9.0
+    environment:
+      # Lets MongoDB start on Linux 6.19+ (SERVER-121912); see ci.yml.
+      GLIBC_TUNABLES: glibc.pthread.rseq=1
     ports: ["27017:27017"]
     healthcheck:
       test: ["CMD", "mongosh", "--quiet", "--eval", "db.adminCommand('ping')"]

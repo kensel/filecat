@@ -28,9 +28,7 @@ jobs:
 
   backends:
     name: server backends
-    # MongoDB 8.0 refuses to start on Linux 6.19 and newer (SERVER-121912),
-    # which ubuntu-latest moves to with Ubuntu 26.
-    runs-on: ubuntu-24.04
+    runs-on: ubuntu-latest
     services:
       postgres:
         image: postgres:17
@@ -61,7 +59,12 @@ jobs:
           --health-cmd "/opt/mssql-tools18/bin/sqlcmd -C -S localhost -U sa -P Filecat-Test-1 -Q 'SELECT 1' || exit 1"
           --health-interval 10s --health-retries 20
       mongodb:
-        image: mongo:8.0
+        image: mongo:9.0
+        env:
+          # MongoDB 8.0+ may refuse to start on Linux 6.19+ while tcmalloc's
+          # per-CPU caches are on (SERVER-121912), and the image turns them
+          # on with rseq=0. rseq=1 lets glibc own rseq: per-thread caches.
+          GLIBC_TUNABLES: glibc.pthread.rseq=1
         ports: ["27017:27017"]
         options: >-
           --health-cmd "mongosh --quiet --eval 'db.adminCommand(\"ping\")'" --health-interval 5s --health-retries 20

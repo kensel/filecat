@@ -63,9 +63,12 @@ Note 05 §2.B and §2.C. See [members.md](members.md).
 The storage changes of v0.1.2 and v0.1.3 settle on the real catalog before
 the agent becomes a second writer.
 
-- CI green on GitHub: the fixes from the first run (MongoDB 8.0 on
-  Linux 6.19+, Windows `\\?\` link targets, test ordering), and
-  `actions/checkout@v5` / `astral-sh/setup-uv@v7` (Node 24).
+- CI green on GitHub: the fixes from the first run (Windows `\\?\` link
+  targets, test ordering), and `actions/checkout@v5` /
+  `astral-sh/setup-uv@v7` (Node 24). MongoDB 8.0 refuses to start on the
+  runners' Linux 6.19+ kernels (SERVER-121912): CI and `compose.yaml` test
+  against `mongo:9.0` with `GLIBC_TUNABLES=glibc.pthread.rseq=1`; testing 8.0
+  again waits for a fixed 8.0.x.
 - [x] A scan no longer stops at a Windows reparse point that is neither a
   symlink nor a junction (`os.readlink` raises `ValueError` there); it is
   recorded as a link without a target.
