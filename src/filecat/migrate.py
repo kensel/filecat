@@ -14,9 +14,11 @@ target has one, inline samples are split off on the way in; when only the
 source has one, each record gets its sample back inline.
 
 Member sets (filecat/member_sets.py) follow the target the same way: copied
-set by set after the records when both backends store them, written out
-under each archive's path when only the source does, and filed by hash when
-only the target does.
+set by set before the records that name them when both backends store them
+(with --root, only the sets those roots' records name), written out under
+each archive's path when only the source does, and filed by hash when only
+the target does. Sets first means a migrate that stops part way never
+leaves a record naming a set the target does not have.
 
 Public API:
     migrate(src, dst, *, roots=None, batch=2000, programs=True, members=True,
@@ -133,14 +135,32 @@ def migrate(src: Backend, dst: Backend, *, roots: list[str] | None = None,
             stats.samples += len(chunk)
         maybe_progress()
 
-    # (root, rel_path, members_id, hash_type) of the records that name a set;
-    # the sets are read once the listing is closed, as some servers allow no
-    # second statement while it is open.
+    # --- member sets, before the records that name them --------------------
+    sets_first = members and src.stores_member_sets and dst.stores_member_sets
+    if sets_first:
+        wanted: set[str] | None = None
+        if roots:
+            wanted = {d["members_id"] for root in roots for d in src.list(root=root)
+                      if d.get("members_id")}
+        # Headers first, rows after: some servers allow no second statement
+        # while a listing is open.
+        headers = [h for h in src.iter_member_sets()
+                   if wanted is None or h["members_id"] in wanted]
+        for h in headers:
+            rows = member_sets.clean_rows(src.list_member_set(h["members_id"]))
+            dst.put_member_set(member_sets.header_for((h["members_id"], h["hash_type"]), rows), rows)
+            stats.member_sets += 1
+            stats.members_rows += len(rows)
+            maybe_progress()
+
+    # (root, rel_path, members_id, hash_type) of the records that name a set,
+    # for a target without member sets: their rows are written under each
+    # archive's path once the listing is closed.
     named_sets: list[tuple[str, str, str, str]] = []
 
     def write(docs: list[Document]) -> None:
         for d in docs:
-            if d.get("members_id") and src.stores_member_sets:
+            if d.get("members_id") and src.stores_member_sets and not sets_first:
                 key = samples.key_of(d)
                 named_sets.append((d["root"], d["rel_path"], d["members_id"],
                                    key[1] if key else "sha256"))
@@ -174,20 +194,12 @@ def migrate(src: Backend, dst: Backend, *, roots: list[str] | None = None,
     dst.flush()
     maybe_progress()
 
-    # --- member sets --------------------------------------------------------
+    # --- member sets, for a target that keeps rows under each path ----------
     if members and named_sets:
-        copied: set[str] = set()
-        for root_str, rel_path, mid, hash_type in named_sets:
-            if dst.stores_member_sets and mid in copied:
-                continue
+        for root_str, rel_path, mid, _hash_type in named_sets:
             rows = member_sets.clean_rows(src.list_member_set(mid))
-            if dst.stores_member_sets:
-                dst.put_member_set(member_sets.header_for((mid, hash_type), rows), rows)
-                copied.add(mid)
-                stats.member_sets += 1
-            else:
-                dst.put_members(root_str, rel_path, rows)
-                stats.members_archives += 1
+            dst.put_members(root_str, rel_path, rows)
+            stats.members_archives += 1
             stats.members_rows += len(rows)
             maybe_progress()
 

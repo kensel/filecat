@@ -20,6 +20,7 @@ COMMANDS = {
     "members": "filecat.members_cmd",
     "samples": "filecat.samples",
     "member-sets": "filecat.member_sets",
+    "mongo-rebuild": "filecat.mongo_rebuild",
     "config": "filecat.config",
     "serve": "filecat.serve",
     "roots": "filecat.roots_cmd",
@@ -228,6 +229,17 @@ def build_parser() -> argparse.ArgumentParser:
         if name == "member-sets":
             p.add_argument("--expand-compound", dest="expand_compound", action="store_true",
                            help="keep every entry of compound documents listed before v0.1.1")
+
+    p = sub.add_parser("mongo-rebuild",
+                       help="rebuild MongoDB collections in place with zstd compression and the "
+                            "partial sha256 index, one at a time")
+    _storage(p)
+    p.add_argument("--collection", action="append", choices=("files", "members", "samples",
+                                                             "member_sets", "set_members"),
+                   help="only these collections (repeatable; default all five)")
+    p.add_argument("--dry-run", dest="dry_run", action="store_true",
+                   help="show sizes, compression and what would be rebuilt; change nothing")
+    p.add_argument("--force", action="store_true", help="rebuild even while a scan is running")
 
     p = sub.add_parser("roots", help="root index: last scan, scan in progress, newest file, last error")
     _storage(p)

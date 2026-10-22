@@ -93,5 +93,21 @@ Collections the backend creates (`files`, `members`, `samples`,
 `member_sets`, `set_members`) start out with zstd block compression, and a
 new catalog's `sha256` index covers only records that have a hash
 (`partialFilterExpression`). Existing collections keep the compression and
-indexes they were created with; `filecat migrate` into a new database
-rebuilds them this way (note 05, section 2.C).
+indexes they were created with until they are rebuilt (note 05, section
+2.C), in place:
+
+```
+filecat mongo-rebuild --dry-run            # sizes, compression, what would be rebuilt
+filecat mongo-rebuild [--collection files ...]
+```
+
+Each collection is copied on the server into `<name>__rebuild` (zstd), its
+indexes are created there (`files.sha256` as a partial index), the counts
+are compared, and `renameCollection` swaps the copy in for the original.
+A collection already on zstd only gets its `sha256` index rebuilt, if that
+is what it lacks. Nothing may write meanwhile, so it refuses while a scan
+is running (`--force` to go ahead), and it needs free disk space for a
+compressed copy of each collection in turn. It also gives back the space
+of deleted documents, as `compact` would: after `filecat member-sets
+migrate`, `members` shrinks to the rows still kept under a path.
+`filecat migrate` into a new database rebuilds them the same way.
