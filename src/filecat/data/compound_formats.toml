@@ -1,0 +1,239 @@
+# Which ZIP/gzip-wrapped files are archives (every entry becomes a member
+# row) and which are compound documents: application formats that merely
+# use ZIP or gzip as their container. A compound document keeps its
+# standard internal structure out of `members`; only anomalies are stored.
+#
+# Read by filecat/probe/compound.py. See docs/compound-formats.md and
+# docs/research/05-catalog-tuning-agent-boundary.md, section 1.
+#
+# Globs: `*` stays within one path segment, `**` crosses segments, `?` is
+# one character; matching ignores case. Extensions are without the dot.
+
+version = 1
+
+# --- 1.B True archives: unpack every entry to members ----------------------
+# An extension listed here always expands, even when the entries look like a
+# compound document (a .zip holding an unpacked .docx stays a .zip).
+[archive]
+extensions = [
+  "zip", "7z", "rar", "tar", "gz", "tgz", "tar.gz", "tbz2", "tar.bz2", "txz", "tar.xz",
+  "iso", "cat", "dat", "mpq", "pck",
+]
+
+# --- Defaults for every compound format ------------------------------------
+[defaults]
+# A member whose role (probe/members.py) is one of these is an anomaly
+# wherever it sits, even under an expected path: an .exe or .zip hidden in a
+# .docx is worth a row. A format may replace the list with its own.
+anomaly_roles = ["exe", "archive", "script"]
+# A member that matches none of the format's `expected` globs is stored with
+# reason "unexpected".
+record_unexpected = true
+
+# --- 1.B / 1.C Compound application documents ------------------------------
+# Per format:
+#   container  zip | gzip
+#   kind       record kind for the file (default: leave the probe's kind)
+#   types      extension -> MIME type; the extensions that select the format
+#   names      exact file names that select the format (beat [archive])
+#   markers    entries that identify the format when the extension is not
+#              listed (for example an OOXML file saved as .bin); optional
+#   expected   standard internal paths, never stored as members
+#   anomalies  [{glob, reason}] always stored, checked before `expected`
+#   metadata   parts holding embedded metadata (creator, title, version...);
+#              the probe notes which are present, v0.2.0 will read them
+
+[compound.ooxml]
+description = "Office Open XML (Word, Excel, PowerPoint, Visio)"
+container = "zip"
+kind = "document"
+markers = ["[Content_Types].xml"]
+metadata = ["docProps/core.xml", "docProps/app.xml", "docProps/custom.xml"]
+expected = [
+  "[Content_Types].xml", "_rels/**", "docProps/**", "customXml/**",
+  "word/**", "xl/**", "ppt/**", "visio/**",
+]
+anomalies = [
+  { glob = "**/vbaProject.bin", reason = "macros" },
+  { glob = "**/vbaData.xml", reason = "macros" },
+  { glob = "**/embeddings/**", reason = "embedded_object" },
+  { glob = "**/activeX/**", reason = "activex" },
+  { glob = "**/externalLinks/**", reason = "external_link" },
+]
+[compound.ooxml.types]
+docx = "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
+docm = "application/vnd.ms-word.document.macroEnabled.12"
+dotx = "application/vnd.openxmlformats-officedocument.wordprocessingml.template"
+dotm = "application/vnd.ms-word.template.macroEnabled.12"
+xlsx = "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+xlsm = "application/vnd.ms-excel.sheet.macroEnabled.12"
+xltx = "application/vnd.openxmlformats-officedocument.spreadsheetml.template"
+pptx = "application/vnd.openxmlformats-officedocument.presentationml.presentation"
+pptm = "application/vnd.ms-powerpoint.presentation.macroEnabled.12"
+ppsx = "application/vnd.openxmlformats-officedocument.presentationml.slideshow"
+potx = "application/vnd.openxmlformats-officedocument.presentationml.template"
+vsdx = "application/vnd.ms-visio.drawing.main+xml"
+
+[compound.odf]
+description = "OpenDocument (Writer, Calc, Impress, Draw)"
+container = "zip"
+kind = "document"
+markers = ["mimetype", "META-INF/manifest.xml"]
+metadata = ["meta.xml"]
+expected = [
+  "mimetype", "content.xml", "styles.xml", "meta.xml", "settings.xml", "manifest.rdf",
+  "META-INF/**", "Thumbnails/**", "Pictures/**", "Configurations2/**", "layout-cache",
+]
+anomalies = [
+  { glob = "Basic/**", reason = "macros" },
+  { glob = "Scripts/**", reason = "macros" },
+  { glob = "Object */**", reason = "embedded_object" },
+  { glob = "ObjectReplacements/**", reason = "embedded_object" },
+]
+[compound.odf.types]
+odt = "application/vnd.oasis.opendocument.text"
+ods = "application/vnd.oasis.opendocument.spreadsheet"
+odp = "application/vnd.oasis.opendocument.presentation"
+odg = "application/vnd.oasis.opendocument.graphics"
+ott = "application/vnd.oasis.opendocument.text-template"
+ots = "application/vnd.oasis.opendocument.spreadsheet-template"
+
+[compound.epub]
+description = "EPUB e-book"
+container = "zip"
+kind = "document"
+markers = ["mimetype", "META-INF/container.xml"]
+metadata = ["**/*.opf"]
+# Content documents, images, fonts and styles live wherever the package
+# file says, so everything is expected; only executables and archives stand out.
+expected = ["**"]
+anomaly_roles = ["exe", "archive"]
+[compound.epub.types]
+epub = "application/epub+zip"
+
+[compound.comic]
+description = "Comic book archive (pages are images)"
+container = "zip"
+kind = "document"
+metadata = ["ComicInfo.xml"]
+expected = ["**"]
+anomaly_roles = ["exe", "archive", "script"]
+[compound.comic.types]
+cbz = "application/vnd.comicbook+zip"
+
+[compound.xps]
+description = "XML Paper Specification / OpenXPS"
+container = "zip"
+kind = "document"
+metadata = ["docProps/core.xml"]
+expected = [
+  "[Content_Types].xml", "_rels/**", "docProps/**", "FixedDocumentSequence.fdseq",
+  "Documents/**", "Resources/**", "Metadata/**",
+]
+[compound.xps.types]
+xps = "application/vnd.ms-xpsdocument"
+oxps = "application/oxps"
+
+[compound.java]
+description = "Java archives (JAR, WAR, EAR)"
+container = "zip"
+metadata = ["META-INF/MANIFEST.MF"]
+expected = ["**"]
+# Fat jars carry their dependencies as nested jars by design; only a native
+# executable is out of place.
+anomaly_roles = ["exe"]
+[compound.java.types]
+jar = "application/java-archive"
+war = "application/java-archive"
+ear = "application/java-archive"
+
+[compound.android]
+description = "Android packages (APK, App Bundle)"
+container = "zip"
+metadata = ["AndroidManifest.xml", "base/manifest/AndroidManifest.xml"]
+expected = ["**"]
+# lib/<abi>/*.so are the app's own native code: role "exe", so leave exe out.
+anomaly_roles = ["archive"]
+anomalies = [
+  { glob = "assets/**/*.apk", reason = "embedded_package" },
+  { glob = "assets/**/*.dex", reason = "embedded_code" },
+]
+[compound.android.types]
+apk = "application/vnd.android.package-archive"
+aab = "application/x-android-app-bundle"
+
+[compound.python_wheel]
+description = "Python wheel"
+container = "zip"
+metadata = ["*.dist-info/METADATA"]
+expected = ["**"]
+anomaly_roles = []
+[compound.python_wheel.types]
+whl = "application/x-wheel+zip"
+
+[compound.nuget]
+description = "NuGet package"
+container = "zip"
+metadata = ["*.nuspec"]
+expected = ["**"]
+anomaly_roles = []
+[compound.nuget.types]
+nupkg = "application/vnd.nuget.package"
+
+[compound.model_3mf]
+description = "3D Manufacturing Format"
+container = "zip"
+kind = "mesh"
+markers = ["[Content_Types].xml", "3D/3dmodel.model"]
+metadata = ["3D/3dmodel.model"]
+expected = ["[Content_Types].xml", "_rels/**", "3D/**", "Metadata/**", "Auxiliaries/**"]
+[compound.model_3mf.types]
+"3mf" = "model/3mf"
+
+[compound.kmz]
+description = "Google Earth KMZ"
+container = "zip"
+metadata = ["doc.kml"]
+expected = ["*.kml", "files/**", "images/**"]
+anomaly_roles = ["exe", "script"]
+[compound.kmz.types]
+kmz = "application/vnd.google-earth.kmz"
+
+[compound.design]
+description = "Design app files (Sketch, Figma export, OpenRaster)"
+container = "zip"
+metadata = ["meta.json", "stack.xml"]
+expected = ["**"]
+anomaly_roles = ["exe", "script"]
+[compound.design.types]
+sketch = "application/x-sketch"
+fig = "application/x-figma"
+ora = "image/openraster"
+
+# --- Gzip-wrapped application data -------------------------------------------
+# These never produce member rows today (gzip lists members only when a tar
+# is inside). Listing them here stops a tar sniff from expanding them, and
+# records the format on the probe.
+
+[compound.x3_save]
+description = "X3: Terran Conflict / Albion Prelude / Farnham's Legacy savegame"
+container = "gzip"
+kind = "save"
+[compound.x3_save.types]
+sav = "application/x-x3-savegame"
+
+[compound.nbt]
+description = "Minecraft NBT data (level.dat)"
+container = "gzip"
+kind = "data"
+# By name: .dat is an X3 archive extension, so the extension cannot select it.
+names = ["level.dat", "level.dat_old"]
+[compound.nbt.types]
+nbt = "application/x-minecraft-nbt"
+
+[compound.blend_gz]
+description = "Blender file saved with compression"
+container = "gzip"
+kind = "mesh"
+[compound.blend_gz.types]
+blend = "application/x-blender"

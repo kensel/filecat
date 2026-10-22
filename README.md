@@ -108,6 +108,14 @@ What a scan reads from each file, how files over 64 MiB are hashed, and
 which files (backup and database data, cloud placeholders) are never opened
 is summarised in [docs/scanning.md](docs/scanning.md).
 
+ZIP- and gzip-based application files (`.docx`, `.xlsx`, `.odt`, `.epub`,
+`.jar`, `.apk`, savegames ...) are compound documents, not archives: only
+their anomalies, such as macros, embedded objects or a hidden `.exe`, are
+stored as members. `--expand-compound` stores every entry. The
+classification is in `src/filecat/data/compound_formats.toml`, described in
+[docs/compound-formats.md](docs/compound-formats.md). Planned releases are
+in [docs/roadmap.md](docs/roadmap.md).
+
 A scan exits 0 when every entry was recorded cleanly and 1 when any record has
 an `errors` entry. Reruns skip files whose size and mtime are unchanged
 (`--force` remeasures).

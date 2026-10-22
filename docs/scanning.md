@@ -86,7 +86,7 @@ Some kinds are read past the 8 KiB head, but each read is capped:
 
 | kind | what is read | cap |
 |---|---|---|
-| ZIP and similar | the central directory at the end of the file | the directory only |
+| ZIP and similar | the central directory at the end of the file | the directory only; compound documents (`.docx`, `.jar` ...) store only anomalies, see [compound-formats.md](compound-formats.md) |
 | `.gz`, `.bz2`, `.xz` | decompressed from the start to classify the content | 4 MiB |
 | `.tar.gz` / `.tar.bz2` / `.tar.xz` | decompressed to list members | `--archive-scan-cap` (64 MiB); `--deep-archives` reads to the end |
 | 7z, MPQ, X3 `.cat/.dat`, Godot `.pck` | their headers and file tables | `--max-members` rows stored |

@@ -33,6 +33,7 @@ class ScanOptions:
     archive_scan_cap: int = 64 * MiB    # bytes decompressed to list a .tar.gz/.bz2/.xz
     deep_archives: bool = False         # list compressed tarballs to the end
     max_members: int = 100_000          # member rows stored per archive
+    expand_compound: bool = False       # store every entry of a .docx/.jar/... (probe/compound.py)
     disk_scan_cap: int = 8 * MiB        # bytes read per volume for the disk content scan (0 = off)
     workers: int = 4
     ollama: bool = False

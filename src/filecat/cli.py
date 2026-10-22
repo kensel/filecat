@@ -57,6 +57,9 @@ def _measure(p: argparse.ArgumentParser) -> None:
                    help="decompress compressed tarballs to the end to list every member")
     p.add_argument("--max-members", dest="max_members", type=int, default=100_000,
                    help="member rows stored per archive")
+    p.add_argument("--expand-compound", dest="expand_compound", action="store_true",
+                   help="store every entry of compound documents (.docx, .jar, ...), "
+                        "not only the anomalies")
     p.add_argument("--disk-scan-cap", dest="disk_scan_cap", type=lambda s: int(float(s) * 1024 * 1024),
                    metavar="MIB", help="MiB read per volume for the disk-image content scan "
                                        "(default 8, 0 disables)")

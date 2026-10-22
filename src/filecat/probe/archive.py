@@ -19,7 +19,7 @@ from typing import Any, Callable, Iterator
 
 from ..record import suffix_of
 from ..options import GZIP_PROBE_CAP, ScanOptions
-from . import images, media, members, tarball, text, x3
+from . import compound, images, media, members, tarball, text, x3
 
 _CHUNK = 64 * 1024
 
@@ -76,9 +76,9 @@ def probe_zip(path: str, options: ScanOptions, result: Any) -> None:
     with zipfile.ZipFile(path) as zf:
         infos = zf.infolist()
 
-    names = [i.filename for i in infos]
-    is_ooxml = bool(names) and names[0] == "[Content_Types].xml"
-    result.kind = "document" if is_ooxml else "archive"
+    name = os.path.basename(path)
+    fmt = compound.for_file(name, "zip", (i.filename.replace("\\", "/") for i in infos))
+    result.kind = (fmt.kind or "archive") if fmt else "archive"
     result.container = "zip"
     result.probe["entry_count"] = len(infos)
     result.probe["uncompressed_size"] = sum(i.file_size for i in infos)
@@ -110,6 +110,9 @@ def probe_zip(path: str, options: ScanOptions, result: Any) -> None:
                 row["mtime_ns"] = dos_ns
         rows.append(row)
 
+    if fmt is not None:
+        rows, result.probe["compound"] = compound.filter_members(
+            fmt, name, rows, keep_all=options.expand_compound)
     truncated = len(rows) > options.max_members
     result.members = rows[: options.max_members]
     result.probe.update(members.summarize(result.members, truncated=truncated,
@@ -318,7 +321,14 @@ def probe_gzip(path: str, container: str, options: ScanOptions, result: Any) -> 
         if suffix_of(name) == "pck":
             from . import pck
             pck.refine_x3_pck(name, inflated_bytes, truncated, result)
-        if tarball.detect(inflated_bytes):
+        fmt = compound.for_file(name, "gzip")
+        if fmt is not None:
+            result.probe["compound"] = {"format": fmt.id}
+            if fmt.mime_for(name):
+                result.probe["compound"]["mime"] = fmt.mime_for(name)
+            if fmt.kind and result.kind == "unknown":
+                result.kind = fmt.kind
+        if tarball.detect(inflated_bytes) and (fmt is None or options.expand_compound):
             make_chunks = functools.partial(_gzip_chunks, container=container, key=key)
             _list_embedded_tar(path, container, make_chunks, options, result)
 
