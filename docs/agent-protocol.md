@@ -27,9 +27,13 @@ parser stay in Python.
   big).
 - Strictly one request, then one response, in lockstep, on a connection.
   The client sends the next request only after it has read the previous
-  response. No pipelining, no unsolicited messages. The agent serves each
+  response. No pipelining, no unsolicited messages (a `progress` line is
+  never sent unless the request set `progress_ms`). The agent serves each
   connection on its own thread, so a client wanting parallelism opens
   several connections; each has its own authentication and its own policy.
+  One exception, only when the request asks for it: a long `list_dir` (with
+  rollups) or `sum_subtree` may send `progress` lines before its response
+  ([progress and cancellation](#progress-deadline-and-cancellation)).
 - The agent may close an idle connection at any time. A client that finds
   its connection closed reconnects, authenticates again and sends its policy
   again; every command is safe to repeat.
@@ -52,6 +56,8 @@ A request is `{"cmd": "...", ...}`. A response is either
 | `not_found` | the path, or a directory above it, does not exist |
 | `permission_denied` | `EACCES` or `EPERM` |
 | `io` | any other failure reading the file system, including a file that changed while it was read |
+| `cancelled` | the request was stopped by `cancel` (**new**; only when the connection is still open) |
+| `busy` | the agent is already running its maximum number of long sums; retry later (**new**) |
 
 `error` is for people; clients branch on `code`. A client that meets an
 unknown code treats it as `io`.
@@ -87,7 +93,7 @@ other command gets `unauthorized`.
 
 ### Timestamps
 
-Every `mtime_ns`, `ctime_ns` and `newest_mtime_ns` is nanoseconds since the
+Every `mtime_ns`, `ctime_ns`, `newest_mtime_ns` and `oldest_mtime_ns` is nanoseconds since the
 Unix epoch, a JSON integer, **floored to a multiple of 100** (`div_euclid`,
 not truncation toward zero, so a time before 1970 also rounds down). A
 Windows SMB client sees times as 100 ns FILETIME ticks, so a record built
@@ -129,29 +135,61 @@ start without one.
 
 ### `configure_policy`
 
+**Changed** (rules replace `rollup_groups`; design in [rollups.md](rollups.md)).
+
 ```json
 {"cmd": "configure_policy", "policy": {
     "exclude": ["/volume1/@docker", "@eaDir"],
-    "rollup_groups": {"[CACHE]": ["*/.cache", "*/node_modules"],
-                      "[REDACTED]": ["/volume1/project/private-project"]}}}
-{"ok": true}
+    "bases": [{"base": "/volume1/project", "mpath": "nas-main/project"}],
+    "rules": [
+      {"id": 0, "tag": "[REDACTED]", "match": ["nas-main/project/private-project"],
+       "type": "any", "case": "insensitive", "private": true},
+      {"id": 1, "match": ["**/keep/node_modules"], "keep": true, "type": "any", "case": "insensitive"},
+      {"id": 2, "tag": "[CACHE]", "match": ["node_modules", "**/AppData/Local/Temp"],
+       "type": "dir", "case": "insensitive"}]}}
+{"ok": true, "policy_id": "a1b2c3d4e5f6", "rules": 3, "bases": 1}
 ```
 
-Replaces the connection's policy as a whole (both fields optional, default
+Replaces the connection's policy as a whole (all fields optional, default
 empty); a new connection starts with an empty policy. It applies to
-`list_dir` (both fields) and to `sum_subtree` (`exclude` only); `measure`
-and `read_range` act on the path they are given.
+`list_dir` (all fields) and to `sum_subtree` (`exclude` only); `measure` and
+`read_range` act on the path they are given.
 
 - `exclude`: absolute paths or bare names, compared for equality with each
   child's path and name. Excluded entries are neither listed nor counted.
-  They are not globs.
-- `rollup_groups`: tag to list of patterns. A pattern equal to a child's
-  path or name, or a glob matching either (`*` any run of characters
-  including `/`, `?` one character, `[...]` a class), puts that child in the
-  tag's rollup. Tags are tried in the order given (JSON object order is
-  kept), the first match wins. `exclude` is applied first.
-- A tag is a non-empty string without `/` or a NUL; by convention
-  `[UPPER_CASE]` in brackets (note [01](research/01-rollup-groups-privacy-indexing.md)).
+  They are not globs. Applied before the rules.
+- `bases`: how the agent finds a child's match path. For a path at or
+  beneath `base` (an absolute path, as in a request), the match path of a child
+  is `mpath` (the client's catalog-side spelling of that root: `server/share`,
+  `C:` and so on, section 2 of rollups.md) followed by the child's path
+  relative to `base`, `/`-separated. The longest base wins. A path under no
+  base has no rules applied (the client sends one base per root it scans).
+- `rules`: an ordered array, tried in order for each child, first match wins.
+  A rule has `match` (patterns, already normalised by the client), `type`
+  (`any`, `dir`, `file`; a link or special counts as `file`), `case`
+  (`insensitive`, ASCII only, the default; `sensitive`), `tag` (a name of the
+  form `[A-Z][A-Z0-9_-]{0,31}` in brackets; absent when `keep`), `keep` (a
+  matching child is listed normally and no later rule is tried), `private`
+  (the tag's contents must stay secret, see below) and `id` (the rule's index,
+  for the client's logs).
+- Patterns: no `/` after normalisation means a **name pattern**, matched
+  against the child's name at any depth; otherwise a **path pattern**, matched
+  against the whole match path, anchored at both ends. `?` is one character
+  other than `/`, `*` any run of characters other than `/`, `**` as a whole
+  component zero or more components (`a/**/b` matches `a/b`). `x/**` matches
+  what is inside `x`, not `x`. No character classes, no escapes. ASCII
+  letters compare case-insensitively unless the rule says `sensitive`; other
+  characters are compared exactly. The conformance vectors are
+  `tests/data/rollup_match_vectors.json`.
+- `private`: the agent adds nothing to the rollup beyond counters, writes no
+  log line, and puts no path or OS error text in any reply, for matches of that
+  rule.
+- The reply carries `policy_id` (the first 12 hex digits of the SHA-256 of
+  the canonical JSON of `rules`: `{"tag","match","type","case","keep",
+  "private"}` per rule in that key order, compact separators, UTF-8; the
+  client computes the same and treats a difference as a failure to scan that
+  root). Limits: 1024 rules, 64 KiB of patterns in all, 4096 bytes in a
+  pattern; more is `bad_request`.
 
 ### `list_dir`
 
@@ -164,7 +202,10 @@ and `read_range` act on the path they are given.
 Lists the immediate children, each `lstat`ed, and never recurses (except
 into a rollup). `dev`, `mtime_ns` and `ctime_ns` are the directory's own, so
 the client needs no second call for a root's record. Entries are sorted by
-name bytes; rollup entries are interleaved by their tag.
+name bytes; rollup entries are interleaved by their tag. The reply carries
+`policy_id` when the connection has rules. A `list_dir` that has to sum
+rollups can take minutes: it accepts `progress_ms`, `deadline_ms` and `id`
+([below](#progress-deadline-and-cancellation)).
 
 An entry:
 
@@ -172,10 +213,10 @@ An entry:
 |---|---|
 | `name` | the file name (the byte-string rule applies; `name_b64` when needed) |
 | `kind` | `file`, `dir`, `link`, `rollup`, or `other` (socket, FIFO, device: record it, never open it) |
-| `size` | `st_size`; for a link the link's own size; for a rollup the group's `total_size` |
+| `size` | `st_size`; for a link the link's own size; for a rollup the tag's `total_size` |
 | `allocated_size` | `st_blocks * 512`, the space actually used (a sparse file's is smaller than `size`) |
 | `ino`, `dev`, `nlink` | from `lstat`; 0, the directory's `dev` and 1 for a rollup. Hard links share `(dev, ino)`; the client deduplicates |
-| `mtime_ns`, `ctime_ns` | see Timestamps; for a rollup both are the group's newest mtime |
+| `mtime_ns`, `ctime_ns` | see Timestamps; for a rollup both are the newest mtime of a non-directory inside (0 when none) |
 | `link_target` | links only: `readlink` text (byte-string rule: `link_target_b64`) |
 | `rollup` | rollups only: the summary below |
 | `error` | `{"code": "...", "message": "..."}` when the entry could not be `lstat`ed |
@@ -186,9 +227,9 @@ the numeric fields left out. Silently dropping it would hide a file the SMB
 scan would have recorded with an error. Only a failure to open or read the
 directory itself fails the call (`not_found`, `permission_denied`, `io`).
 
-A rollup entry stands for every child of this directory matched by one tag
-(a file or a directory; a directory is summed as `sum_subtree` does, and
-counts in `total_dirs`):
+A rollup entry stands for every child of this directory matched by one
+rule's tag (a file or a directory; a directory is summed as `sum_subtree`
+does, and counts in `total_dirs`). **Changed**: new fields, marked below.
 
 ```json
 {"name": "[CACHE]", "kind": "rollup", "size": 48291049216, "allocated_size": 48295198720,
@@ -196,13 +237,28 @@ counts in `total_dirs`):
  "ctime_ns": 1761001200000000000,
  "rollup": {"tag": "[CACHE]", "matched": 3, "total_files": 14820, "total_dirs": 312,
             "total_size": 48291049216, "total_allocated_size": 48295198720,
-            "newest_mtime_ns": 1761001200000000000, "errors": 0}}
+            "newest_mtime_ns": 1761001200000000000, "oldest_mtime_ns": 1500000000000000000,
+            "errors": 2, "error_codes": {"permission_denied": 2}, "vanished": 0,
+            "skipped_mounts": 0, "hardlink_names": 12, "complete": true}}
 ```
 
-`matched` is the number of children folded in (the draft called it
-`matched_Folders`). The names of what is inside never leave the agent.
-Hard links are counted once per `(dev, ino)` across the whole group, and the
-sum does not cross onto another file system.
+| `rollup` field | Meaning |
+|---|---|
+| `tag`, `matched` | the tag; children of this directory folded in (a real child named like the tag, ignoring ASCII case, is folded in too and is not listed) |
+| `total_files` | names that are not directories (files, links, specials) |
+| `total_dirs` | directories inside, the matched ones included |
+| `total_size`, `total_allocated_size` | logical and `st_blocks * 512`; a file with `nlink` over 1 counts once per `(dev, ino)` across the whole entry |
+| `newest_mtime_ns`, `oldest_mtime_ns` | over non-directory entries; both left out when `total_files` is 0 (**new**: `oldest`) |
+| `errors`, `error_codes` | entries or directories that could not be read, and the count per protocol `code` (`permission_denied`, `io`). Codes only: no name, path or message (**new**: `error_codes`) |
+| `vanished` | entries that disappeared during the sum; not errors (**new**) |
+| `skipped_mounts` | directories on another `dev` than the summed child's, not entered or counted (**new**) |
+| `hardlink_names` | names beyond the first of a hard-linked file, whose size was not added again (**new**; may be left out) |
+| `hardlinks_approx` | present and true when the hard-link set hit its limit (2,000,000 entries) and later links were counted twice (**new**) |
+| `complete` | false when `deadline_ms` ended the sum early; the totals are then a lower bound (**new**) |
+
+The names of what is inside never leave the agent, whatever the rule; for a
+`private` rule the entry also has no optional breakdown and the agent logs
+nothing about it. `matched` was `matched_Folders` in the draft.
 
 ### `measure`
 
@@ -271,24 +327,76 @@ this.
 
 ### `sum_subtree`
 
+**Changed** (options and fields added).
+
 ```json
-{"cmd": "sum_subtree", "path": "/volume1/Backup/NAS.hbk/Pool"}
+{"cmd": "sum_subtree", "path": "/volume1/Backup/NAS.hbk/Pool", "one_filesystem": true,
+ "exclude": ["**/@tmp"], "private": false, "threads": 4,
+ "progress_ms": 5000, "deadline_ms": 21600000, "id": "7d3f0c2e"}
 {"ok": true, "path": "/volume1/Backup/NAS.hbk/Pool", "total_files": 512004,
  "total_dirs": 4210, "total_size": 48291049216, "total_allocated_size": 48295198720,
- "newest_mtime_ns": 1761001200000000000, "errors": 0}
+ "newest_mtime_ns": 1761001200000000000, "oldest_mtime_ns": 1500000000000000000,
+ "errors": 0, "error_codes": {}, "vanished": 0, "skipped_mounts": 0,
+ "hardlink_names": 0, "complete": true}
 ```
 
-The same totals as a rollup summary, for one directory the client names:
-the rollup of a backup pool without a row per bucket. `lstat` only, never
+The same totals as a rollup entry, for one directory the client names: the
+rollup of a backup pool without a row per bucket. `lstat` only, never
 follows symbolic links (a link counts as a file of its own size), and stays
-on the file system of `path` (a different `dev` is skipped, not counted).
-The directory itself is not counted. `total_files` counts names (every
-non-directory entry); `total_size` and `total_allocated_size` count a file
-with `nlink` over 1 once per `(dev, ino)` within the request. The policy's
-`exclude` applies; rollup groups do not. `errors` counts entries and
-directories that could not be read, so a total with `errors` over 0 is a
-lower bound. It can take minutes on a big tree, so a client gives it a long
-timeout.
+on the file system of `path` (a different `dev` is skipped, counted in
+`skipped_mounts`, not entered; `one_filesystem: false` enters it). The
+directory itself is counted in `total_dirs` (**changed**: the first version of
+this page did not count it; the client's rollup record and a `sum_subtree` of
+the same folder now agree). `total_files` counts names (every non-directory
+entry); `total_size` and `total_allocated_size` count a file with `nlink`
+over 1 once per `(dev, ino)` within the request. The policy's `exclude`
+applies; the policy's `rules` do not. `errors` counts entries and directories
+that could not be read, so a total with `errors` over 0 is a lower bound.
+Options:
+
+| Option | Meaning |
+|---|---|
+| `one_filesystem` | default true |
+| `exclude` | patterns, syntax of `configure_policy`, matched against the path below `path` (`**/@tmp`, `Pool/lost`) |
+| `private` | default false. When true: the reply has no `path`, the agent logs nothing about the walk, no reply field carries a name or message |
+| `threads` | 1 to 16; the agent's default (4) when omitted. A walk is `lstat` bound, so a few threads help on RAID |
+| `progress_ms`, `deadline_ms`, `id` | [below](#progress-deadline-and-cancellation) |
+| `detail` | reserved: `["by_suffix", "age"]`, not in the first agent |
+
+It can take minutes on a big tree (5 million files: 1 to 15 minutes), so a
+client sets `progress_ms` and does not depend on a long timeout.
+
+### Progress, deadline and cancellation
+
+**New.** `list_dir` (when rollups are summed) and `sum_subtree` accept:
+
+- `progress_ms` (at least 500): while the request runs the agent writes, at
+  that interval, `{"progress": {"entries": 1204113, "bytes": 8123456789}}` lines
+  (no `ok` key), then the ordinary response. The client reads lines until one
+  has `ok` and restarts its read timeout at every line. Counters only, never a
+  name, even without `private`. An agent that does not implement the field
+  sends no progress; a client that did not ask never receives any.
+- `deadline_ms` (default 21,600,000, six hours; at most 86,400,000): when it
+  passes the agent stops and answers `ok: true` with the totals so far and
+  `complete: false`. The client does not store such a total as a result.
+- `id` (a client-chosen string up to 64 characters): names the request so it
+  can be cancelled.
+- Cancelling: a running request stops, and answers `code: "cancelled"` if the
+  connection is still open, when (a) a `cancel` for its `id` arrives on another
+  authenticated connection, or (b) a `progress` write fails (the client closed
+  the connection). The deadline is not a cancellation: it ends with
+  `complete: false`. The agent tests its flag at least every 1024 entries.
+
+```json
+{"cmd": "cancel", "id": "7d3f0c2e"}
+{"ok": true, "found": true}
+```
+
+`cancel` is answered at once on its own connection; `found` is false when no
+request has that `id` (it already ended).
+
+The agent runs at most 4 long sums (`list_dir` with rollups, `sum_subtree`) at
+once, in total; the next gets `busy` and the client retries after a pause.
 
 ### `storage_topology`
 
@@ -411,13 +519,29 @@ What the Rust side changes to match this page:
    rollups come out in tag order instead of `HashMap` order. Timestamps are
    floored to 100 ns; `ctime_ns` is the birth time where `statx` gives one.
 5. **Rollups**: `rollup_meta` is `rollup`; `matched_Folders` is `matched`;
-   `errors` is added; `rollup_groups` becomes an ordered map (the draft's
-   `HashMap` makes "first tag wins" random). Hard links are counted by
-   `(dev, ino)`, not by `ino` alone, and the set is shared across the whole
-   group, not rebuilt for each matched folder. Unreadable directories add to
-   `errors` instead of being skipped silently.
+   `errors` is added. Hard links are counted by `(dev, ino)`, not by `ino`
+   alone, and the set is shared across the whole group, not rebuilt for each
+   matched folder. Unreadable directories add to `errors` instead of being
+   skipped silently. **Changed by the rollup design** ([rollups.md](rollups.md)):
+   - `rollup_groups` (tag to patterns) is replaced by an ordered `rules`
+     array with `type`, `case`, `keep`, `private`, plus `bases`; patterns are
+     matched against a match path the client supplies (`server/share/rel`),
+     with `**` and without `*` crossing `/` (the draft's `*` crossed `/`).
+     `configure_policy` answers with `policy_id`.
+   - A rollup reports `oldest_mtime_ns`, `error_codes`, `vanished`,
+     `skipped_mounts`, `hardlink_names`, `complete`; a `private` rule gets
+     counters only and no logging. A real child named like the tag is folded
+     in.
+   - A different `dev` is not entered and is counted in `skipped_mounts`;
+     the basis is the `dev` of the summed folder (a nested btrfs subvolume is
+     skipped).
+   - The hard-link set is capped at 2,000,000 entries (`hardlinks_approx`).
 6. **`sum_subtree`** is new (the iterative `sum_rollup_subtree` exposed as a
-   command, with `exclude` applied).
+   command, with `exclude` applied). **Changed**: options `one_filesystem`,
+   `exclude` (patterns), `private`, `threads`, `progress_ms`, `deadline_ms`,
+   `id`; the summed folder counts in `total_dirs`; the totals of a rollup
+   entry. New: `progress` lines, `deadline_ms`/`complete`, the `cancel`
+   command, the codes `cancelled` and `busy`.
 7. **`read_range`**: `len` over 4 MiB is `bad_request` and is checked
    before `vec![0u8; len]` (the draft allocates whatever it is asked to);
    the response adds `eof`; regular files only, `O_NOFOLLOW`.

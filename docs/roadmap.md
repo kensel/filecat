@@ -153,6 +153,22 @@ server keeps store detection, manifest verification, probing and Ollama.
 - Rollup groups (note 01): `[REDACTED]`, `[CACHE]`, `[SYNOLOGY]`,
   `[BACKUP]` synthetic `kind: "rollup"` records that never carry the names
   beneath them; `enrich` never opens them.
+  - [x] Design: [rollups.md](rollups.md). Record model and readers, one
+    ordered rule list (`[[rollups.rule]]`, match path `server/share/rel`,
+    `**`, ASCII case folding, first match, `keep`) that means the same through
+    an agent and over SMB, `[REDACTED]` guarantees on every output channel and
+    the purge of already-cataloged names, store rollups (`[BACKUP]`,
+    `[DATABASE]`) with a migration command, defaults and the old default skips
+    as `[WINDOWS]`, reporting, re-sum and fingerprint change detection,
+    progress/deadline/cancel for long sums, the agent requirements (also in
+    [agent-protocol.md](agent-protocol.md)), the Python work plan.
+  - [ ] Python side: `rollup.py` (matcher, `sum_tree`), walker/fsource/agent
+    client, backends and readers, `filecat rollups migrate`, serve and the
+    web inspector card, the privacy test, the extended fake agent.
+  - [ ] Manifests of backup and database stores read through the agent
+    (`StoreFS`), replacing `probe.store_note`.
+  - [ ] Rust agent: rules matcher with the shared vectors, rollups in
+    `list_dir`, `sum_subtree` options, progress/deadline/`cancel`.
 - Synology storage topology (note 03): `iscsi_lun.conf` and `@Repository`
   parsing, SAN LUNs, VMM disks and image-library templates, physical usage
   from `st_blocks` (never the 512 GiB `ROD` size).

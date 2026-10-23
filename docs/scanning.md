@@ -178,7 +178,12 @@ stored aggregates (`filecat summary`) still add every name.
 
 Special entries: a link is a `link` record with `probe.link_target`; a FIFO,
 socket or device is a record with `probe.special_file` and is never opened; a
-`rollup` entry (only present when the agent is given rollup groups) is skipped.
+`rollup` entry (only present when the agent is given rollup groups) is skipped
+today. Planned: folders and files a rule sends to `[REDACTED]`, `[CACHE]`,
+`[SYNOLOGY]`, `[BACKUP]` or a tag of your own become one `rollup` record per
+parent folder and tag, holding only totals and no names, and a backup or
+database store's bulk data folder is summed instead of listed
+([rollups.md](rollups.md)).
 A name that is not valid UTF-8 is stored with each bad byte `b` as the
 private-use character U+F700 + b (`fsource.to_storage`), which is valid in
 JSON and every database, and is turned back into the exact bytes when the
