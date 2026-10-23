@@ -19,6 +19,7 @@ from typing import Any, Callable, Iterator
 
 from ..record import suffix_of
 from ..options import GZIP_PROBE_CAP, ScanOptions
+from ..fsource import fopen, fsize
 from . import compound, images, media, members, tarball, text, x3
 
 _CHUNK = 64 * 1024
@@ -73,7 +74,7 @@ def probe_zip(path: str, options: ScanOptions, result: Any) -> None:
     """List every entry from the central directory only (zipfile.ZipFile on
     a path reads the EOCD/zip64-EOCD and the central directory -- it never
     touches a local file header or member data on open)."""
-    with zipfile.ZipFile(path) as zf:
+    with fopen(path) as fh, zipfile.ZipFile(fh) as zf:
         infos = zf.infolist()
 
     name = os.path.basename(path)
@@ -165,7 +166,7 @@ _FEXTRA, _FNAME, _FCOMMENT, _FHCRC = 0x04, 0x08, 0x10, 0x02
 def _gzip_original_name(path: str, container: str, key: int) -> str | None:
     """FNAME from the gzip header, when the FNAME flag is set."""
     try:
-        with open(path, "rb") as f:
+        with fopen(path, "rb") as f:
             raw = f.read(1024)
     except OSError:
         return None
@@ -200,10 +201,10 @@ def _gzip_trailer_isize(path: str, container: str, key: int) -> int | None:
     uncompressed size modulo 2**32 -- ambiguous above 4 GiB, by design of
     the format."""
     try:
-        size = os.path.getsize(path)
+        size = fsize(path)
         if size < 8:
             return None
-        with open(path, "rb") as f:
+        with fopen(path, "rb") as f:
             f.seek(-4, os.SEEK_END)
             tail = f.read(4)
     except OSError:
@@ -220,7 +221,7 @@ def _gzip_chunks(path: str, container: str, key: int, step: int = _STEP) -> Iter
     pathological ratio can't produce an unbounded chunk. Restarts on a
     concatenated gzip member."""
     unwrap = _make_unwrap(container, key)
-    with open(path, "rb") as f:
+    with fopen(path, "rb") as f:
         decompressor = zlib.decompressobj(16 + zlib.MAX_WBITS)
         first = True
         while True:
@@ -255,7 +256,7 @@ def probe_gzip(path: str, container: str, options: ScanOptions, result: Any) -> 
     result.kind = "unknown"
 
     try:
-        with open(path, "rb") as f:
+        with fopen(path, "rb") as f:
             prefix = f.read(16)
     except OSError as exc:
         result.errors.append({"stage": "archive", "message": str(exc)})
@@ -282,7 +283,7 @@ def probe_gzip(path: str, container: str, options: ScanOptions, result: Any) -> 
     cap = GZIP_PROBE_CAP
     reached_cap = False
     try:
-        with open(path, "rb") as f:
+        with fopen(path, "rb") as f:
             first = True
             while True:
                 chunk = f.read(_CHUNK)
@@ -434,7 +435,7 @@ def _bz2_chunks(path: str, step: int = _STEP) -> Iterator[bytes]:
     """Decompressed chunks, bounded to `step` bytes per call. Restarts on a
     concatenated bzip2 stream. bzip2 carries no uncompressed-size field, so
     there is nothing to report without decompressing."""
-    with open(path, "rb") as f:
+    with fopen(path, "rb") as f:
         decomp = bz2.BZ2Decompressor()
         pending = b""
         while True:
@@ -501,10 +502,10 @@ def _parse_xz_index(path: str) -> dict[str, Any] | None:
     """Uncompressed size and block count from the xz stream footer + index,
     without decompressing anything. None on anything unexpected."""
     try:
-        size = os.path.getsize(path)
+        size = fsize(path)
         if size < 32:
             return None
-        with open(path, "rb") as f:
+        with fopen(path, "rb") as f:
             f.seek(-12, os.SEEK_END)
             footer = f.read(12)
             if len(footer) != 12 or footer[10:12] != _XZ_FOOTER_MAGIC:
@@ -535,7 +536,7 @@ def _parse_xz_index(path: str) -> dict[str, Any] | None:
 def _xz_chunks(path: str, step: int = _STEP) -> Iterator[bytes]:
     """Decompressed chunks, bounded to `step` bytes per call. Restarts on a
     concatenated xz stream."""
-    with open(path, "rb") as f:
+    with fopen(path, "rb") as f:
         decomp = lzma.LZMADecompressor(format=lzma.FORMAT_XZ)
         pending = b""
         while True:

@@ -80,6 +80,39 @@ def new_document(root: str, rel_path: str, *, kind: str, size: int = 0,
     return doc
 
 
+def add_fs_info(doc: dict[str, Any], *, allocated_size: int | None = None, ino: int | None = None,
+                dev: int | None = None, nlink: int | None = None) -> None:
+    """The optional file-system fields only a scan through filecat-agent knows
+    (an SMB scan leaves them out): `allocated_size`, the space the file really
+    takes (st_blocks * 512; a sparse file's is smaller than `size`), and
+    `ino` / `dev` / `nlink`, the identity of the file on its volume. Names
+    sharing (dev, ino) are hard links to one file; HardLinks counts it once."""
+    if allocated_size is not None:
+        doc["allocated_size"] = allocated_size
+    if ino:
+        doc["ino"], doc["dev"], doc["nlink"] = ino, dev or 0, nlink or 1
+
+
+class HardLinks:
+    """Counts the size of a hard-linked file once per (dev, ino), where a
+    scan totals sizes. Only files with nlink above 1 are remembered."""
+
+    def __init__(self) -> None:
+        self._seen: set[tuple[int, int]] = set()
+
+    def counted(self, size: int, ino: int | None, dev: int | None, nlink: int | None) -> int:
+        if not ino or not nlink or nlink <= 1:
+            return size
+        key = (dev or 0, ino)
+        if key in self._seen:
+            return 0
+        self._seen.add(key)
+        return size
+
+    def counted_doc(self, doc: dict[str, Any]) -> int:
+        return self.counted(doc.get("size") or 0, doc.get("ino"), doc.get("dev"), doc.get("nlink"))
+
+
 def add_error(doc: dict[str, Any], stage: str, message: str | BaseException) -> None:
     """Append {stage, message} to doc['errors']."""
     if isinstance(message, BaseException):

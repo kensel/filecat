@@ -41,7 +41,7 @@ from typing import Any
 
 from . import browse
 from .backends.base import Backend, Document
-from .record import ROOT_REL, root_id
+from .record import ROOT_REL, HardLinks, root_id
 
 
 HEARTBEAT_SECONDS = 30.0
@@ -87,6 +87,7 @@ class ScanTracker:
         self.root = root
         self.files = self.dirs = self.bytes = self.errors = 0
         self.last_error: dict[str, Any] | None = None
+        self._links = HardLinks()   # a hard-linked file's bytes are counted once
         self.last_path = ""
         self.unreachable = False
         self.attempt: dict[str, Any] | None = None  # set by begin(); enables heartbeats
@@ -120,7 +121,7 @@ class ScanTracker:
             self.dirs += 1
         else:
             self.files += 1
-            self.bytes += doc.get("size") or 0
+            self.bytes += self._links.counted_doc(doc)
         errors = doc.get("errors")
         if errors:
             self.errors += 1

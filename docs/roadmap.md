@@ -128,6 +128,15 @@ server keeps store detection, manifest verification, probing and Ollama.
     `ShareMap` (POSIX and UNC paths both ways), tested against a fake agent
     in Python.
   - [x] `filecat agents list` and `filecat agents test`.
+  - [x] `filecat scan` and `scan-everything` read a UNC root through the
+    agent that covers it: listing, stat, measuring and probing from an
+    agent-backed source (`fsource.py`, [scanning.md](scanning.md#6-scanning-through-filecat-agent)),
+    records that line up with an SMB scan, rescans that skip unchanged
+    files, `--agent`, `--no-agent` and `--agent-fallback`. Allocated size,
+    inode, device and link count are recorded (optional fields); hard links
+    are totalled once per scan. Still to do: backup-store and database
+    manifests (and `sum_subtree` rollups) through the agent, rollup groups,
+    `enrich` through the agent, hard-link dedup in the stored aggregates.
   - [ ] `filecat-agent` itself changed to match the protocol page.
 - RPCs: list a directory (lstat, inode, `st_blocks`), measure (hash plus
   the 8 KiB head), read a range, sum a subtree. The agent records

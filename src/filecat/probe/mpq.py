@@ -13,6 +13,7 @@ import zlib
 from typing import Any
 
 from ..options import ScanOptions
+from ..fsource import fopen
 from . import members as members_mod
 
 _MPQ_MAGIC = b"MPQ\x1a"
@@ -498,7 +499,7 @@ def probe_mpq(path: str, head: bytes, options: ScanOptions, result: Any) -> None
     result.container = "unknown"
     result.probe["format"] = "mpq"
 
-    with open(path, "rb") as f:
+    with fopen(path, "rb") as f:
         header_offset = _resolve_header_offset(f)
         if header_offset is None:
             result.errors.append({"stage": "mpq", "message": "no MPQ header found"})

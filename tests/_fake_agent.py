@@ -52,6 +52,8 @@ class FakeAgent:
         self.connections = 0
         self.entry_errors: set[str] = set()             # names list_dir reports with an error
         self.extra_entries: list[dict[str, Any]] = []   # raw entries appended to every list_dir
+        self.extras: dict[str, list[dict[str, Any]]] = {}   # ... or only to list_dir of this path
+        self.served_as: dict[str, bytes] = {}           # real name -> the (non-UTF-8) bytes it is listed as
         self._ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
         self._ctx.load_cert_chain(cert, key)
         self._listener = socket.create_server(("127.0.0.1", 0))
@@ -155,7 +157,9 @@ class FakeAgent:
     # --- commands ---
     def real(self, req: dict[str, Any]) -> Path:
         if "path_b64" in req:
-            path = base64.b64decode(req["path_b64"]).decode("utf-8", "surrogateescape")
+            raw = base64.b64decode(req["path_b64"])
+            back = {v: k.encode() for k, v in self.served_as.items()}
+            path = b"/".join(back.get(part, part) for part in raw.split(b"/")).decode("utf-8")
         else:
             path = req.get("path")
         if not isinstance(path, str) or not path.startswith("/"):
@@ -223,14 +227,25 @@ class FakeAgent:
                     acc["total_allocated_size"] += self._numbers(st)["allocated_size"]
                 acc["newest_mtime_ns"] = max(acc["newest_mtime_ns"], floor100(st.st_mtime_ns))
                 continue
-            kind = "dir" if child.is_dir(follow_symlinks=False) else "file"
-            entries.append({"name": child.name, "kind": kind, **self._numbers(st)})
+            entry: dict[str, Any] = {"kind": "file", **self._numbers(st)}
+            if child.is_symlink():
+                entry.update(kind="link", link_target=os.readlink(child.path))
+            elif child.is_dir(follow_symlinks=False):
+                entry["kind"] = "dir"
+            elif not child.is_file(follow_symlinks=False):
+                entry["kind"] = "other"
+            if child.name in self.served_as:
+                raw = self.served_as[child.name]
+                entry.update(name=raw.decode("utf-8", "replace"), name_b64=base64.b64encode(raw).decode())
+            else:
+                entry["name"] = child.name
+            entries.append(entry)
         for tag, acc in rollups.items():
             entries.append({"name": tag, "kind": "rollup", "size": acc["total_size"],
                             "allocated_size": acc["total_allocated_size"], "ino": 0,
                             "dev": dst.st_dev, "nlink": 1, "mtime_ns": acc["newest_mtime_ns"],
                             "ctime_ns": acc["newest_mtime_ns"], "rollup": acc})
-        entries += self.extra_entries
+        entries += self.extra_entries + self.extras.get(req.get("path"), [])
         return {"ok": True, "path": req.get("path"), "dev": dst.st_dev,
                 "mtime_ns": floor100(dst.st_mtime_ns), "ctime_ns": floor100(dst.st_ctime_ns),
                 "entries": entries}

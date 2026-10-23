@@ -271,6 +271,11 @@ def agent_for(agents: list[AgentConfig], unc_path: str) -> AgentConfig | None:
     return best
 
 
+def has_agent(agents: list[AgentConfig], name: str) -> bool:
+    """Is there an agent called `name`? (the --agent check)"""
+    return any(a.name == name for a in agents)
+
+
 def mask_token(token: str) -> str:
     """***, except a ${NAME} reference, which is not a secret (as in mask)."""
     return token if "${" in token else "***"
@@ -290,6 +295,11 @@ def apply(args: Any, cfg: dict[str, Any]) -> None:
             args.aliases = {**table, **aliases.parse(args.alias)}
         except ValueError as exc:
             raise ConfigError(str(exc)) from None
+    if hasattr(args, "no_agent"):
+        args.agents = [] if args.no_agent else load_agents(cfg)
+        if args.agent and not has_agent(args.agents, args.agent):
+            known = ", ".join(a.name for a in args.agents) or "none configured"
+            raise ConfigError(f"--agent {args.agent}: no such [[agents]] in filecat.toml ({known})")
     if getattr(args, "command", None) == "scan-everything":
         everything = cfg.get("everything") or {}
         if not isinstance(everything, dict):

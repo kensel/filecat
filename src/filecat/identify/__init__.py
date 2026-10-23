@@ -11,6 +11,7 @@ import subprocess
 from pathlib import Path
 from typing import Any
 
+from ..fsource import fopen
 from ..options import ScanOptions
 from ..record import suffix_of
 from . import trid
@@ -299,7 +300,8 @@ class Identifier:
             if head is not None:
                 buf = head
             elif path is not None:
-                buf = Path(path).read_bytes()[:8192]
+                with fopen(path) as f:
+                    buf = f.read(8192)
             else:
                 return
             res = self._magika.identify_bytes(buf)

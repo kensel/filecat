@@ -2,7 +2,7 @@
 
 The wire protocol is docs/agent-protocol.md (version 1): newline-delimited
 JSON over TLS, one request then one response at a time. This module is the
-Python end of it and nothing else; scanning does not use it yet.
+Python end of it and nothing else; scans use it through fsource.py.
 
     with AgentClient("192.0.2.13", 9876, cert_sha256, token) as agent:
         listing = agent.list_dir("/volume1/Backup")

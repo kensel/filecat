@@ -76,6 +76,11 @@ other command gets `unauthorized`.
   `/`, and the entry's `name_b64`. A path that is valid UTF-8 is always sent
   as `path`. Clients that need a lossless round trip decode `X_b64` with
   UTF-8 and `surrogateescape` (what the Python client does).
+- What the catalog stores for such a name is the client's business
+  (`fsource.py`): each byte `b` of 0x80 to 0xFF that is not part of valid
+  UTF-8 becomes the private-use character U+F700 + `b`, so the record is
+  valid JSON and database text, and the same mapping is undone when the
+  path goes back to the agent. The agent needs to do nothing for it.
 - A path the client sends is never rewritten. Mapping between these paths
   and catalog (UNC) paths is the client's job; see
   [Path mapping](#path-mapping-client-side).

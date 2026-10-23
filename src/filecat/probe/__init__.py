@@ -11,6 +11,7 @@ from dataclasses import dataclass, field
 from typing import Any
 
 from ..options import ScanOptions
+from ..fsource import fopen
 from ..record import suffix_of
 from . import archive, disk, images, media, mpq, pck, pe, sevenzip, tarball, text, x3
 
@@ -93,7 +94,7 @@ def _looks_like_pe(path: str, head: bytes) -> bool:
     if e_lfanew + 4 <= len(head):
         return head[e_lfanew:e_lfanew + 4] == b"PE\x00\x00"
     try:
-        with open(path, "rb") as f:
+        with fopen(path, "rb") as f:
             f.seek(e_lfanew)
             sig = f.read(4)
     except OSError:
@@ -242,7 +243,7 @@ _BOB1_READ_CAP = 32 * 1024 * 1024
 
 def _read_whole(path: str, head: bytes) -> bytes:
     try:
-        with open(path, "rb") as f:
+        with fopen(path, "rb") as f:
             return f.read(_BOB1_READ_CAP)
     except OSError:
         return head

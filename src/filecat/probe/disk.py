@@ -16,6 +16,7 @@ import struct
 from typing import Any
 
 from ..options import ScanOptions
+from ..fsource import fopen
 from ..record import suffix_of
 from . import diskfs, diskio, diskscan, iso, members, udf
 
@@ -67,7 +68,7 @@ def probe_disk(path: str, name: str, size: int, head: bytes, opts: ScanOptions, 
     if not (magic or suffix_of(name) in _SUFFIXES or _strong_signature(head, size)):
         return False
     try:
-        with open(path, "rb") as f:
+        with fopen(path, "rb") as f:
             io = diskio.Io(f, size)
             rep = _inspect(io, head, name, magic, opts)
             if rep is not None:

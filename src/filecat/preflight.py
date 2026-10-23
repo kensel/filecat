@@ -8,6 +8,9 @@ reads it, and is that the account its last scan used?
     ! \\\\nas-zfs\\x: cannot open: [WinError 5] Access is denied
     ! \\\\nas-old\\Backup: read as scanuser (connection); the last scan used jdoe (2026-10-16)
 
+A root read through a filecat-agent is checked by listing it through the
+agent (it has no SMB account to report: the line says `as filecat-agent`).
+
 Roots are opened in parallel, each with the scan's per-entry timeout, so a
 dead server costs one timeout rather than one per share. Problems are
 warnings: the scan still runs, and an unreachable root is recorded as such.
@@ -50,13 +53,19 @@ def _previous_account(backend: Any, root: str) -> tuple[dict[str, Any] | None, s
     return None, None
 
 
-def check(paths: list[str], roots: list[str], backend: Any, timeout: float) -> list[RootCheck]:
-    out = [RootCheck(p, r, netaccount.account_for(p)) for p, r in zip(paths, roots)]
+def check(paths: list[str], roots: list[str], backend: Any, timeout: float,
+          agents: list[Any] | None = None) -> list[RootCheck]:
+    """`agents` is aligned with `paths`: the (fsource.AgentSource, path it
+    knows the root by) that reads each root, or None for an SMB or local root."""
+    agents = agents or [None] * len(paths)
+    out = [RootCheck(p, r, {"user": "filecat-agent", "source": a[0].name} if a
+                     else netaccount.account_for(p)) for p, r, a in zip(paths, roots, agents)]
     if not out:
         return out
     pool = ThreadPoolExecutor(max_workers=min(16, len(out)))
     try:
-        futures = [pool.submit(_open, c.path) for c in out]
+        futures = [pool.submit(a[0].check, a[1]) if a else pool.submit(_open, c.path)
+                   for c, a in zip(out, agents)]
         for c, fut in zip(out, futures):
             try:
                 fut.result(timeout=timeout)
@@ -66,7 +75,9 @@ def check(paths: list[str], roots: list[str], backend: Any, timeout: float) -> l
                 c.error = str(e)
     finally:
         pool.shutdown(wait=False)   # a hung open is abandoned, as in the walker
-    for c in out:
+    for c, a in zip(out, agents):
+        if a:
+            continue        # switching between SMB and an agent is not a change of account
         prev, at = _previous_account(backend, c.root)
         if prev and not netaccount.same_user(prev, c.account):
             c.previous, c.previous_at = prev, at

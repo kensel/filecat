@@ -43,6 +43,11 @@ Design notes:
   directory entry with probe.cloud; --force does not change that. Files in
   a sync root that are on the device are measured and get probe.cloud too.
   A rescan measures a file recorded while cloud-only once it is local.
+* Agent scans (fsource.py). With a `source`, the tree is read through a
+  filecat-agent: its listing entries and stats stand in for os.DirEntry and
+  os.stat_result, and the same walk follows. Backup and database stores are
+  detected from the listing as usual, but their manifests are not read
+  through the agent yet (probe.store_note says so).
 * Rescans of unchanged trees. A directory's stored records are read in one
   Backend.get_stats() call when it is entered (its subdirectories' own
   records included), not one get() per entry; and the listings of the next
@@ -60,7 +65,7 @@ from concurrent.futures import ThreadPoolExecutor, TimeoutError as FutureTimeout
 from dataclasses import dataclass, field
 from typing import Any, Callable, Iterable
 
-from . import backup, browse, cloudfiles, dbfiles, record
+from . import backup, browse, cloudfiles, dbfiles, fsource, record
 from .backends.base import Backend
 from .options import ScanOptions, is_unc
 from .resume import ResumeState
@@ -220,8 +225,10 @@ class _Lister:
     handles it as before; one read ahead and never taken costs only the time."""
 
     def __init__(self, wanted: Callable[[os.DirEntry, str], str | None],
-                 threads: int = LIST_THREADS) -> None:
+                 threads: int = LIST_THREADS,
+                 list_dir: Callable[[str], list] | None = None) -> None:
         self._wanted = wanted
+        self._list_dir = list_dir or (lambda path: _list_dir(path))
         self._pool = ThreadPoolExecutor(max_workers=threads) if threads > 0 else None
         self._pending: dict[str, Any] = {}
         self._lock = threading.Lock()
@@ -237,7 +244,7 @@ class _Lister:
         return True
 
     def _read(self, abs_path: str, rel_path: str, depth: int) -> list[os.DirEntry]:
-        entries = _list_dir(abs_path)
+        entries = self._list_dir(abs_path)
         if depth > 0:
             queued = 0
             for e in entries:
@@ -265,7 +272,7 @@ class _Lister:
         frame.ahead.discard(child_abs)
         with self._lock:
             fut = self._pending.pop(child_abs, None)
-        return fut.result() if fut is not None else _list_dir(child_abs)
+        return fut.result() if fut is not None else self._list_dir(child_abs)
 
     def close(self) -> None:
         if self._pool is not None:
@@ -387,6 +394,13 @@ def _delete_stale_children(backend: Backend, root: str, rel_path: str,
     return dropped
 
 
+def _identity(st: Any) -> tuple[int | None, int | None, int | None]:
+    """(ino, dev, nlink) of an agent stat, else Nones (HardLinks.counted)."""
+    if isinstance(st, fsource.AgentStat):
+        return st.st_ino, st.st_dev, st.st_nlink
+    return None, None, None
+
+
 def _apply_unc(doc: dict[str, Any], unc: str | None) -> None:
     if unc is not None:
         doc.setdefault("probe", {})["unc"] = unc
@@ -396,16 +410,20 @@ def walk_root(root: str, options: ScanOptions, backend: Backend, identifier: Any
               resume: ResumeState, measure_file: MeasureFunc, *,
               unc: str | None = None, progress: ProgressFunc | None = None,
               extra_root_errors: list[dict[str, str]] | None = None,
-              path: str | None = None) -> bool:
+              path: str | None = None, source: Any = None) -> bool:
     """Walk one root, writing file/dir documents to `backend` as they are
     finished (post-order for directories). Returns True if any document
     recorded for this root carries an `errors` entry. `path` is where the
-    tree is read from when that differs from the recorded `root` (an alias)."""
+    tree is read from when that differs from the recorded `root` (an alias).
+    `source` is an fsource.AgentSource when the tree is read through a
+    filecat-agent; None reads the local file system (or an SMB share)."""
     had_errors = False
     path = path or root
+    join = record.join_root if source is None else source.join
+    links = record.HardLinks()      # a hard-linked file's size is totalled once
 
     try:
-        root_st = os.stat(path)
+        root_st = os.stat(path) if source is None else source.stat_root(path)
     except OSError as e:
         doc = record.new_document(root, record.ROOT_REL, kind="dir")
         record.add_error(doc, "stat", e)
@@ -418,8 +436,11 @@ def walk_root(root: str, options: ScanOptions, backend: Backend, identifier: Any
     root_mtime_ns, root_ctime_ns = stat_times(root_st)
 
     try:
-        with os.scandir(path) as it:
-            root_entries = sorted(it, key=lambda e: e.name)
+        if source is None:
+            with os.scandir(path) as it:
+                root_entries = sorted(it, key=lambda e: e.name)
+        else:
+            root_entries = source.list_dir(path)
     except OSError as e:
         doc = record.new_document(root, record.ROOT_REL, kind="dir",
                                    mtime_ns=root_mtime_ns, ctime_ns=root_ctime_ns)
@@ -452,7 +473,7 @@ def walk_root(root: str, options: ScanOptions, backend: Backend, identifier: Any
         if is_reparse_point(st) or should_skip_dir(entry.name, options.default_skips):
             return None
         child_rel = f"{parent_rel}/{entry.name}" if parent_rel else entry.name
-        child_abs = record.join_root(path, child_rel)
+        child_abs = join(path, child_rel)
         if exclude and excluded(exclude, child_abs, record.join_root(root, child_rel)):
             return None
         done = None if options.force else resume.get_dir(root, child_rel)
@@ -460,7 +481,7 @@ def walk_root(root: str, options: ScanOptions, backend: Backend, identifier: Any
             return None
         return child_abs
 
-    lister = _Lister(_will_enter)
+    lister = _Lister(_will_enter, list_dir=None if source is None else source.list_dir)
 
     def _drain(pending: list, count: int) -> bool:
         """Write the first `count` pending files in submission order."""
@@ -486,7 +507,7 @@ def walk_root(root: str, options: ScanOptions, backend: Backend, identifier: Any
                 errors = True
             backend.store(doc)
             if progress:
-                progress(child_abs, doc.get("size", st.st_size), "measured")
+                progress(child_abs, links.counted(doc.get("size", st.st_size), *_identity(st)), "measured")
         del pending[:count]
         return errors
 
@@ -498,6 +519,11 @@ def walk_root(root: str, options: ScanOptions, backend: Backend, identifier: Any
         return {rel[cut:]: size for rel, size, _, _ in backend.sizes(root, frame.rel_path)}
 
     def _backup_summary(frame: _Frame, doc: dict[str, Any]) -> None:
+        if source is not None:
+            # the manifests are not read through the agent yet
+            doc.setdefault("probe", {})["store_note"] = (
+                f"{frame.store.format.name}: manifest not read; scanned through filecat-agent")
+            return
         try:
             doc.setdefault("probe", {})[frame.store.probe_key] = backup.summarize(
                 frame.store, frame.abs_path, {e.name for e in frame.entries},
@@ -546,7 +572,7 @@ def walk_root(root: str, options: ScanOptions, backend: Backend, identifier: Any
             entry = frame.entries[frame.idx]
             name = entry.name
             child_rel = f"{frame.rel_path}/{name}" if frame.rel_path else name
-            child_abs = record.join_root(path, child_rel)
+            child_abs = join(path, child_rel)
 
             try:
                 st = entry.stat(follow_symlinks=False)
@@ -562,9 +588,10 @@ def walk_root(root: str, options: ScanOptions, backend: Backend, identifier: Any
                 mtime_ns, ctime_ns = stat_times(st)
                 doc = record.new_document(root, child_rel, kind="link", size=st.st_size,
                                            mtime_ns=mtime_ns, ctime_ns=ctime_ns, name=name)
-                target = read_link_target(child_abs)
+                target = read_link_target(child_abs) if source is None else entry.link_target
                 if target is not None:
                     doc.setdefault("probe", {})["link_target"] = target
+                fsource.apply_stat_extras(doc, st)
                 _apply_unc(doc, unc)
                 if doc.get("errors"):
                     had_errors = True
@@ -625,7 +652,7 @@ def walk_root(root: str, options: ScanOptions, backend: Backend, identifier: Any
                             and stored.get("mtime_ns") == st.st_mtime_ns
                             and (cloud_only or not _was_cloud_only(stored))):
                         if progress:
-                            progress(child_abs, size, "unchanged")
+                            progress(child_abs, links.counted(size, *_identity(st)), "unchanged")
                         frame.idx += 1
                         continue
 
@@ -636,7 +663,7 @@ def walk_root(root: str, options: ScanOptions, backend: Backend, identifier: Any
                     _apply_unc(doc, unc)
                     backend.put(doc)
                     if progress:
-                        progress(child_abs, size, "cloud")
+                        progress(child_abs, links.counted(size, *_identity(st)), "cloud")
                     frame.idx += 1
                     continue
 
@@ -646,12 +673,14 @@ def walk_root(root: str, options: ScanOptions, backend: Backend, identifier: Any
                     _apply_unc(doc, unc)
                     backend.put(doc)
                     if progress:
-                        progress(child_abs, size, "listed")
+                        progress(child_abs, links.counted(size, *_identity(st)), "listed")
                     frame.idx += 1
                     continue
 
                 if store is not None and not getattr(store.format, "tag_measured", False):
                     store = None
+                if source is not None:
+                    child_abs = source.file_path(child_abs, size)   # opens through the agent
                 if store is not None or cloud is not None:
                     fut = executor.submit(_measure_tagged, measure_file, store, cloud, root,
                                           child_rel, child_abs, st, options, identifier)
@@ -667,7 +696,20 @@ def walk_root(root: str, options: ScanOptions, backend: Backend, identifier: Any
                 frame.idx += 1
                 continue
 
-            # anything that is neither dir, link nor regular file (device,
+            if getattr(entry, "special", False):
+                # a FIFO, socket or device on the agent's host: recorded from
+                # its listing, never opened (opening a FIFO blocks)
+                mtime_ns, ctime_ns = stat_times(st)
+                doc = record.new_document(root, child_rel, kind="unknown", size=st.st_size,
+                                           mtime_ns=mtime_ns, ctime_ns=ctime_ns, name=name)
+                doc["probe"] = {"special_file": True}
+                fsource.apply_stat_extras(doc, st)
+                _apply_unc(doc, unc)
+                backend.put(doc)
+                if progress:
+                    progress(child_abs, 0, "listed")
+
+            # anything else that is neither dir, link nor regular file (device,
             # pipe, ...) -- vanishingly unlikely on Windows; ignore it.
             frame.idx += 1
 

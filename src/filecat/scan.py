@@ -12,7 +12,8 @@ import sys
 import time
 from typing import Any
 
-from . import aliases, preflight, record, rootinfo
+from . import aliases, fsource, preflight, record, rootinfo
+from .agent_client import Measurement
 from .backends import open_backend
 from .backends.base import Backend
 from .hashing import hash_file
@@ -29,9 +30,25 @@ def measure_file(root: str, rel_path: str, abs_path: str, st: os.stat_result,
                  options: ScanOptions, identifier: Any) -> dict[str, Any]:
     """Build the full document for one regular file: identity, hash policy,
     built-in probe, type identification. Used by scan and by enrich.
-    Errors are recorded on the document, never raised."""
+    Errors are recorded on the document, never raised. A file on a
+    filecat-agent (abs_path is an fsource.RemotePath) is measured by one agent
+    call that returns the head, the digest and the size and mtime they
+    describe; the probes then read what else they need through the agent."""
     size = st.st_size
     mtime_ns = st.st_mtime_ns
+    remote = abs_path if isinstance(abs_path, fsource.RemotePath) else None
+    head = b""
+    measured: Measurement | None = None
+    measure_error: OSError | None = None
+    if remote is not None and (size > 0 or options.hash == "full"):
+        try:
+            measured = remote.measure(options.hash, options.timeout_for(root) + 10)
+        except OSError as e:
+            measure_error = e
+        else:
+            head = measured.head
+            size, mtime_ns = measured.size, measured.mtime_ns   # what the digest was computed from
+            remote.size = size
     ctime_ns = getattr(st, "st_birthtime_ns", None)
     if ctime_ns is None:
         ctime_ns = st.st_ctime_ns
@@ -40,8 +57,10 @@ def measure_file(root: str, rel_path: str, abs_path: str, st: os.stat_result,
     doc = record.new_document(root, rel_path, kind="unknown", size=size,
                                mtime_ns=mtime_ns, ctime_ns=ctime_ns, name=name)
 
-    head = b""
-    if size > 0:
+    fsource.apply_stat_extras(doc, st)
+    if measure_error is not None:
+        record.add_error(doc, "read", measure_error)
+    elif remote is None and size > 0:
         try:
             with open(abs_path, "rb") as f:
                 head = f.read(HEAD_BYTES)
@@ -73,10 +92,16 @@ def measure_file(root: str, rel_path: str, abs_path: str, st: os.stat_result,
             if ident.get("probe"):
                 doc.setdefault("probe", {}).update(ident["probe"])
 
-    try:
-        doc.update(hash_file(abs_path, size, mtime_ns, options.hash))
-    except OSError as e:
-        record.add_error(doc, "hash", e)
+    if remote is not None:
+        if measure_error is not None:
+            record.add_error(doc, "hash", measure_error)
+        elif measured is not None:
+            doc.update(measured.hashes)
+    else:
+        try:
+            doc.update(hash_file(abs_path, size, mtime_ns, options.hash))
+        except OSError as e:
+            record.add_error(doc, "hash", e)
 
     return doc
 
@@ -96,8 +121,8 @@ class _Progress:
     vanished from disk and were moved to the dropped store. Only counters
     are kept, so this costs nothing per file."""
 
-    def __init__(self, root: str, interval: float, stream: Any = None) -> None:
-        self.root = root
+    def __init__(self, root: str, interval: float, stream: Any = None, via: str = "") -> None:
+        self.root = root + via      # via: " (filecat-agent NAME)" when read through an agent
         self.interval = interval
         self.stream = stream or sys.stderr
         self.files = 0
@@ -172,16 +197,44 @@ def scan_roots(roots: list[str], backend: Backend, options: ScanOptions,
                resume_path: str | None = None) -> int:
     """Scan every root into backend. Returns the process exit code (0 or 1).
     A root matching options.aliases is read from its path as given and
-    recorded under the aliased root (see aliases.py)."""
+    recorded under the aliased root (see aliases.py). A root a configured
+    filecat-agent covers is read through that agent (fsource.pick)."""
     paths = roots
     roots = [aliases.recorded_root(p, options.aliases) for p in paths]
+    if options.agent and not any(a.name == options.agent for a in options.agents):
+        print(f"filecat: --agent {options.agent}: no such [[agents]] in filecat.toml", file=sys.stderr)
+        return 2
+    agent_sources: dict[str, fsource.AgentSource] = {}      # one per agent, shared by its roots
+    plans: list[tuple[fsource.AgentSource, str] | None] = []
+    for path, root in zip(paths, roots):
+        picked = fsource.pick(options, root, path)
+        if picked is None:
+            plans.append(None)
+            continue
+        config, unc = picked
+        plans.append((agent_sources.setdefault(config.name, fsource.AgentSource(config)), unc))
+    try:
+        return _scan(paths, roots, plans, backend, options, resume_path)
+    finally:
+        for src in agent_sources.values():
+            src.close()
+
+
+def _scan(paths: list[str], roots: list[str], plans: list[tuple[fsource.AgentSource, str] | None],
+          backend: Backend, options: ScanOptions, resume_path: str | None) -> int:
     # Before anything is read: can each root be opened, with which account,
     # and is it the account the last scan used? Warnings only.
-    checks = preflight.check(paths, roots, backend, options.timeout_for(paths[0]) if paths else 30.0)
+    checks = preflight.check(paths, roots, backend, options.timeout_for(paths[0]) if paths else 30.0,
+                             agents=plans)
+    for i, c in enumerate(checks):
+        if plans[i] and c.error and options.agent_fallback:
+            print(f"{c.root}: {plans[i][0].description} cannot be used ({c.error}); "
+                  "reading over SMB (--agent-fallback)", file=sys.stderr)
+            plans[i] = None
     problems = preflight.report(checks)
     if options.check_only:
         return 1 if problems else 0
-    accounts = {c.path: c.account for c in checks}
+    accounts = {c.path: None if plans[i] else c.account for i, c in enumerate(checks)}
 
     if resume_path is None:
         resume_path = resume_path_for(getattr(backend, "name", "backend"),
@@ -195,13 +248,19 @@ def scan_roots(roots: list[str], backend: Backend, options: ScanOptions,
     had_errors = False
     try:
         for i, (path, root) in enumerate(zip(paths, roots)):
+            source = None
+            if plans[i]:
+                source, path = plans[i]     # the agent knows the root by this UNC path
             try:
                 unc = resolve_unc(path)
             except Exception:
                 unc = None
-            if path != root:
+            if source is not None:
+                print(f"{root}: scanning through {source.description}", file=sys.stderr)
+            elif path != root:
                 print(f"{root}: reading through {path}", file=sys.stderr)
-            progress = _Progress(root, options.progress_interval)
+            progress = _Progress(root, options.progress_interval,
+                                 via=f" (filecat-agent {source.name})" if source else "")
             if resume.resuming(root) and not options.force:
                 print(f"{root}: resuming an unfinished scan; {resume.done_count(root)} finished "
                       "folders are skipped unless they changed", file=sys.stderr)
@@ -218,7 +277,7 @@ def scan_roots(roots: list[str], backend: Backend, options: ScanOptions,
                     root, options, tracker, identifier, resume, measure_file,
                     unc=unc, progress=progress,
                     extra_root_errors=scan_level_errors if i == 0 else None,
-                    path=path,
+                    path=path, source=source,
                 )
             except BaseException as exc:
                 resume.flush()  # keep what finished, for the rerun

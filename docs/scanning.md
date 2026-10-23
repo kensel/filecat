@@ -16,7 +16,8 @@ the short version, with pointers to the code.
    Skipped: `$Recycle.Bin` and `System Volume Information` everywhere, and
    `pagefile.sys`, `hiberfil.sys` and `swapfile.sys` at a drive's root
    (`--no-default-skips` keeps them), plus anything under `exclude` /
-   `--exclude`.
+   `--exclude`. A root covered by a `[[agents]]` entry is walked through
+   `filecat-agent` instead of SMB (section 6).
 3. **Detect stores.** When a folder is listed, its entries are checked against
    the backup formats (`backup/`) and the database engines (`dbfiles/`). A
    match marks the folder's data files as *listed only* (section 4).
@@ -139,6 +140,55 @@ own checksums:
   shows them). See [dupes.md](dupes.md).
 * `filecat enrich` runs the same measurement as a scan on records that lack
   it, for example ones brought in by `import`.
+
+## 6. Scanning through filecat-agent
+
+A UNC root that a configured `[[agents]]` entry covers (its `alias` server,
+or a `[agents.shares]` root; `agent_for` picks the longest match) is read
+through that agent instead of over SMB. `--no-agent` reads every root over
+SMB; `--agent NAME` uses that agent for the roots it covers; an agent that
+cannot be reached fails its root like an unreachable share (a `stat` error on
+the root record, exit code 1) unless `--agent-fallback` is given, which reads
+that root over SMB instead. The preflight lists the root through the agent, and
+the start line, the progress lines and the root index's account (`as
+filecat-agent`) say that an agent is in use.
+
+The walk is the same walk (`walker.py`): `fsource.AgentSource` hands it
+listing entries and stats shaped like `os.DirEntry` and `os.stat_result`, so
+record identity (`root`, `rel_path`), sizes, `mtime_ns` (100 ns), hashes and
+probe results are the ones an SMB scan gives. Per file:
+
+| step | through the agent |
+|---|---|
+| listing | one `list_dir` per folder, with lstat for every child; read ahead in the same background threads |
+| unchanged? | size and `mtime_ns` from the listing against the stored record; no call at all for a file that matches (`--force` remeasures) |
+| head, size, mtime, hash | one `measure` call (`hash` from `--hash`); the record keeps the size and mtime it returns |
+| probe | the head from `measure`; more (ZIP directories, PE, tar, 7z, disk images, gzip/xz tails, MPQ, PCK, X3 catalogues, CSV counts) through `read_range`, via `fsource.fopen`; a PE is read whole up to 64 MiB |
+| identify | as over SMB: the head is only given to libmagic with `--identify always` |
+
+Every thread that reads (the walker, the 8 listing threads, the `--workers`
+measuring threads) has its own connection, since a connection carries one
+request at a time. The agent's `exclude` is sent as the connection's policy.
+
+Extra fields on agent records (absent from SMB scans, so optional):
+`allocated_size` (the space used, `st_blocks * 512`), and `ino`, `dev` and
+`nlink`. The size of a file with `nlink` above 1 is counted once per
+`(dev, ino)` in the progress line and in the root index's byte count; the
+stored aggregates (`filecat summary`) still add every name.
+
+Special entries: a link is a `link` record with `probe.link_target`; a FIFO,
+socket or device is a record with `probe.special_file` and is never opened; a
+`rollup` entry (only present when the agent is given rollup groups) is skipped.
+A name that is not valid UTF-8 is stored with each bad byte `b` as the
+private-use character U+F700 + b (`fsource.to_storage`), which is valid in
+JSON and every database, and is turned back into the exact bytes when the
+path is sent to the agent.
+
+Not yet through the agent: a backup store's or database folder's manifest
+(`backup/`, `dbfiles/` read their folder with `os` calls), so such a folder
+is detected, its data files are listed only, and its record carries
+`probe.store_note` instead of `probe.backup` / `probe.database`; `enrich`;
+the sibling-file probes other than X3's `.cat`/`.dat`.
 
 ## Backup data and `enrich`
 

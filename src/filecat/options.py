@@ -50,6 +50,10 @@ class ScanOptions:
     measure_databases: bool = False     # read database data files that are quiet and big enough (dbfiles/)
     exclude: list[str] = field(default_factory=list)  # folders/files not walked (walker.excluded)
     check_only: bool = False            # preflight (open each root, account) and stop
+    agents: list[Any] = field(default_factory=list)  # config.AgentConfig: filecat-agent hosts (fsource.pick)
+    agent: str | None = None            # --agent NAME: use that agent for the roots it covers
+    no_agent: bool = False              # --no-agent: read every root over SMB, whatever agents are configured
+    agent_fallback: bool = False        # --agent-fallback: an unreachable agent's roots are read over SMB
 
     @classmethod
     def from_args(cls, args: Any) -> "ScanOptions":

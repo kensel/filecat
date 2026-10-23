@@ -108,6 +108,15 @@ def _scan_options(p: argparse.ArgumentParser) -> None:
     p.add_argument("--exclude", action="append", metavar="PATH",
                    help="folder or file not to scan, e.g. C:\\code\\filecat, or a whole root "
                         "(repeatable; matched as read or as recorded under an alias)")
+    g = p.add_mutually_exclusive_group()
+    g.add_argument("--agent", metavar="NAME",
+                   help="read the roots that [[agents]] NAME covers through that agent, even when "
+                        "another agent covers them more closely (by default a root is read through "
+                        "the agent whose alias or shares match it)")
+    g.add_argument("--no-agent", dest="no_agent", action="store_true",
+                   help="read every root over SMB, even when an agent covers it")
+    p.add_argument("--agent-fallback", dest="agent_fallback", action="store_true",
+                   help="a root whose agent cannot be reached is read over SMB instead of failing")
 
 
 def build_parser() -> argparse.ArgumentParser:
