@@ -76,6 +76,21 @@ def _measure(p: argparse.ArgumentParser) -> None:
     p.add_argument("--ollama-max-files", dest="ollama_max_files", type=int, default=200)
 
 
+def _verify_level(text: str) -> int:
+    """--verify-backups=N: 0 and 1 exist; 2 and 3 are refused with what to use instead."""
+    try:
+        level = int(text)
+    except ValueError:
+        raise argparse.ArgumentTypeError(f"{text!r} is not a level (0 or 1)") from None
+    if level in (2, 3):
+        raise argparse.ArgumentTypeError(
+            f"level {level} is not available in v0.2.0 (it needs a per-file check of the store); "
+            "use --measure-backups to scan a store per file, or --verify-backups=1 for the totals")
+    if level not in (0, 1):
+        raise argparse.ArgumentTypeError(f"{level} is not a verify level (0 or 1)")
+    return level
+
+
 def _scan_options(p: argparse.ArgumentParser) -> None:
     """Everything `scan` takes besides its roots (scan and scan-everything)."""
     _storage(p)
@@ -86,13 +101,15 @@ def _scan_options(p: argparse.ArgumentParser) -> None:
                    help="read and hash the data files of recognised backup stores (ABB pools, "
                         "Windows Backup zips, system-image VHDs, duplicity volumes); by default "
                         "they are recorded from the directory listing only")
-    p.add_argument("--verify-backups", dest="verify_backups", action="store_true",
-                   help="read the data of recognised backup stores and check it against the "
-                        "store's own checksums (Hyper Backup: Guard's CRC32 of every file; "
-                        "Google Workspace: the size and MD5 of every fragment and Drive "
-                        "version its metadata names; Veeam: each backup file's metadata "
-                        "CRC32C); "
-                        "by default only presence and size are checked, from the listing")
+    p.add_argument("--verify-backups", dest="verify_backups", nargs="?", const=1, default=None,
+                   type=_verify_level, metavar="N",
+                   help="how far a backup store is checked against its own manifest: 0 nothing "
+                        "(the default; probe.backup.checked is \"none\"), 1 (also a bare "
+                        "--verify-backups) the rolled-up data's total bytes and file count "
+                        "(checked is \"totals\"). 2 (every file the manifest names exists with its "
+                        "size) and 3 (their hashes) are not in v0.2.0; --measure-backups gives "
+                        "per-file rows for a store. Veeam's and Google Workspace's own metadata "
+                        "checks run from level 1")
     p.add_argument("--measure-databases", dest="measure_databases", action="store_true",
                    help="read and hash the data files of recognised database folders (PostgreSQL, "
                         "MySQL/MariaDB, MongoDB, SQL Server) when they are quiet: unmodified for 90 "
@@ -349,6 +366,22 @@ def build_parser() -> argparse.ArgumentParser:
     _storage(r)
     r.add_argument("--root", action="append", help="only these roots (repeatable)")
     r.add_argument("--json", action="store_true", help="one JSON object per root")
+    r = rsub.add_parser("migrate", help="turn the rows an existing catalog holds for what rollups now "
+                                        "replace (stores' bulk folders, what the rules match) into rollups, "
+                                        "without a rescan; safe to stop and run again")
+    _storage(r)
+    r.add_argument("--tags", nargs="+", metavar="TAG", help="only these tags, e.g. [BACKUP] [REDACTED]")
+    r.add_argument("--root", action="append", help="only these roots (repeatable)")
+    r.add_argument("--dry-run", dest="dry_run", action="store_true",
+                   help="report, per target, the rows and bytes and the rollup it would write; change nothing")
+    r.add_argument("--batch", type=int, default=1000, metavar="N", help="rows per page and per delete (max 1000)")
+    r.add_argument("--checkpoint", metavar="FILE", help="where to report where a run stopped "
+                                                          "(default beside the catalog)")
+    r.add_argument("--progress-interval", dest="progress_interval", type=float, default=5.0, metavar="SECONDS")
+    r.add_argument("--rollup", action="append", metavar="TYPE=MODE",
+                   help="override one [rollups] mode for this run, e.g. --rollup backup=automatic")
+    r.add_argument("--new-redaction-key", dest="new_redaction_key", action="store_true",
+                   help="proceed although redact.key is missing for existing sticky redactions")
     red = rsub.add_parser("redacted", help="sticky redactions: list them, or release one in two steps")
     dsub = red.add_subparsers(dest="redacted_action", required=True)
     r = dsub.add_parser("list", help="ids, status, folder they sit in and counts; never names or hashes")
@@ -417,6 +450,9 @@ def main(argv: list[str] | None = None) -> int:
             stream.reconfigure(encoding="utf-8", errors="replace")
         except (AttributeError, ValueError):
             pass
+    # a bare --verify-backups means level 1; argparse would take the next word (a ROOT) as its level
+    argv = ["--verify-backups=1" if a == "--verify-backups" else a
+            for a in (sys.argv[1:] if argv is None else argv)]
     args = build_parser().parse_args(argv)
     if args.command != "config":
         from . import config

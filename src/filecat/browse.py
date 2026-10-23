@@ -133,6 +133,25 @@ def subtree_documents(documents: Iterable[dict[str, Any]], parent: str) -> list[
                   key=lambda r: (-r["bytes"], r["name"]))
 
 
+def with_rollups(folders: list[dict[str, Any]], rollups: Iterable[dict[str, Any]],
+                 parent: str) -> list[dict[str, Any]]:
+    """`subtree` rows with what the rollups beneath `parent` add: each folder
+    gains `rollup_bytes` / `rollup_files` (a folder's total is bytes +
+    rollup_bytes), and a folder that holds nothing but rollups appears too."""
+    prefix = parent + "/" if parent else ""
+    by_name = {f["name"]: dict(f) for f in folders}
+    for doc in rollups:
+        rel = doc.get("rel_path") or ""
+        if not rel.startswith(prefix) or "/" not in rel[len(prefix):]:
+            continue        # directly in `parent`: listed beside the folders, not in one
+        row = by_name.setdefault(rel[len(prefix):].split("/", 1)[0], {"name": rel[len(prefix):].split("/", 1)[0],
+                                                                    "files": 0, "bytes": 0})
+        row["rollup_bytes"] = row.get("rollup_bytes", 0) + (doc.get("size") or 0)
+        row["rollup_files"] = row.get("rollup_files", 0) + (((doc.get("probe") or {}).get("rollup") or {})
+                                                            .get("total_files", 0))
+    return sorted(by_name.values(), key=lambda r: (-(r["bytes"] + r.get("rollup_bytes", 0)), r["name"]))
+
+
 def size_rows(documents: Iterable[dict[str, Any]], prefix: str) -> Iterator[tuple[str, int, str, str]]:
     """(rel_path, size, suffix, mime key) of each readable file beneath
     `prefix` ("" = the whole root): what Backend.sizes() returns. The mime

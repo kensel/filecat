@@ -56,6 +56,7 @@ from .backends import open_backend
 
 _EMPTY = {"suffix": [], "mime": [], "dir": [], "total_files": 0, "total_bytes": 0, "unreadable": 0}
 ROW_FIELDS = ("rel_path", "name", "kind", "size", "mtime_ns", "suffix", "mime", "sha256")
+ROLLUP_FIELDS = ("tag", "total_files", "total_dirs", "matched", "partial", "errors", "newest_mtime_ns")
 MEMBER_LIMIT = 500
 TREEMAP_CACHE = 256
 MAX_DEPTH = 6
@@ -71,6 +72,8 @@ def _row(doc: dict[str, Any]) -> dict[str, Any]:
     probe = doc.get("probe") or {}
     if probe.get("child_count") is not None:
         row["child_count"] = probe["child_count"]
+    if doc.get("kind") == "rollup":
+        row["rollup"] = {k: v for k, v in (probe.get("rollup") or {}).items() if k in ROLLUP_FIELDS}
     return row
 
 
@@ -276,7 +279,10 @@ class Catalog:
 
     def subtree(self, p: dict[str, str]) -> dict[str, Any]:
         root, parent = p["root"], p.get("parent", "").strip("/")
-        return {"root": root, "parent": parent, "folders": self.call(lambda b: b.subtree(root, parent))}
+
+        def run(b: Any) -> list[dict[str, Any]]:
+            return browse.with_rollups(b.subtree(root, parent), b.rollups(root, parent), parent)
+        return {"root": root, "parent": parent, "folders": self.call(run)}
 
     def _stores_treemaps(self, b: Any) -> bool:
         """Snapshots go in the catalog unless --no-save or the backend has no store for them."""
@@ -320,7 +326,7 @@ class Catalog:
                 found = b.get_treemap(current["id"])
                 if found is not None:
                     return {**found[1], **found[0], "source": "stored"}
-            data = treemap.build(b.sizes(root, prefix), prefix, depth)
+            data = treemap.build(b.sizes(root, prefix), prefix, depth, rollups=b.rollups(root, prefix))
             meta = treemap.save(b, root, data, datetime.now(timezone.utc).isoformat())
             return {**data, **meta, "source": "saved"}
 
@@ -333,7 +339,7 @@ class Catalog:
         cached = treemaps.get(key)
         if cached is not None and not refresh and treemap.age(cached, now) < max_age:
             return {**cached, "source": "memory"}
-        cached = {"root": root, **self.call(lambda b: treemap.build(b.sizes(root, prefix), prefix, depth)),
+        cached = {"root": root, **self.call(lambda b: treemap.build(b.sizes(root, prefix), prefix, depth, rollups=b.rollups(root, prefix))),
                   "built_at": datetime.now(timezone.utc).isoformat(), "id": None, "pin": None, "can_pin": False,
                   "max_age": max_age.total_seconds()}
         treemaps.pop(key, None)
@@ -384,7 +390,20 @@ class Catalog:
 
     def record(self, p: dict[str, str]) -> dict[str, Any] | None:
         from . import samples
-        return self.call(lambda b: samples.attach_one(b, b.get(p["root"], p["rel_path"])))
+
+        def run(b: Any) -> dict[str, Any] | None:
+            doc = samples.attach_one(b, b.get(p["root"], p["rel_path"]))
+            if doc is not None and doc.get("kind") == "rollup":
+                # the inspector card of a [BACKUP] / [DATABASE] shows the store it belongs to
+                ref = ((doc.get("probe") or {}).get("rollup") or {}).get("store") or {}
+                store = b.get(p["root"], ref["path"]) if ref.get("path") is not None else None
+                if store is not None:
+                    keep = {k: v for k, v in (store.get("probe") or {}).items()
+                            if k in ("backup", "database", "store_note")}
+                    doc = {**doc, "store_record": {"rel_path": store["rel_path"], "name": store.get("name"),
+                                                   "probe": keep}}
+            return doc
+        return self.call(run)
 
     def members(self, p: dict[str, str]) -> dict[str, Any]:
         offset = max(0, int(p.get("offset") or 0))

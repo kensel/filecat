@@ -490,6 +490,7 @@ function folderTree(tm, root, name, kind) {
       node.segs = segs(node.own);
       if (node.own.merged) { node.name = `${num(node.own.merged)} smaller folders`; node.merged = node.own.merged; }
     }
+    if (node.own && node.own.rollup && !node.kids.length) { node.kind = "rollup"; node.rollup = node.own.rollup; }
     node.colorKey = colorKey;
     node.bytes = node.kids.length ? node.kids.reduce((a, k) => a + k.bytes, 0) : (node.own ? node.own.bytes : 0);
     node.files = node.kids.length ? node.kids.reduce((a, k) => a + k.files, 0) : (node.own ? node.own.files : 0);
@@ -749,7 +750,9 @@ async function viewGraph(params, force) {
     if (n.kind === "more") return {root: n.root, prefix: n.path.split("/").slice(0, -1).join("/")};
     return {root: n.root, prefix: n.path};
   }
-  const goTo = n => go("graph", graphTarget(p, nodeTarget(n)));
+  // a rollup has nothing beneath it to zoom into: its tile opens its record (the inspector card)
+  const goTo = n => n.kind === "rollup" ? go("record", {root: n.root, rel_path: n.path, vs: p.vs || null})
+    : go("graph", graphTarget(p, nodeTarget(n)));
   function hitAt(e) {
     const r = canvas.getBoundingClientRect(), x = e.clientX - r.left, y = e.clientY - r.top;
     for (let i = hits.length - 1; i >= 0; i--) {
@@ -766,6 +769,8 @@ async function viewGraph(params, force) {
       : `${n.root}\\${n.path.replaceAll("/", "\\")}`;
     const lines = [h("span", {class: "mono"}, where + (n.kind === "files" ? "  (files directly here)" : ""))];
     if (n.merged) lines.push(h("div", {}, `${num(n.merged)} smaller folders, merged`));
+    if (n.rollup) lines.push(h("div", {class: "muted"}, `${n.rollup.tag} rollup: ${num(n.rollup.total_dirs)} folders, ${num(n.rollup.matched)} folded in`
+      + (n.rollup.newest_mtime_ns ? `, newest ${when(n.rollup.newest_mtime_ns)}` : "") + (n.rollup.partial ? " - a lower bound" : "")));
     lines.push(h("div", {}, h("b", {}, bytes(n.bytes)), ` in ${num(n.files)} files`));
     if (n.kind === "pending") lines.push(h("div", {class: "muted"}, n.error ? "Error: " + n.error : "size from the root index; summarising…"));
     if (t.seg && (mode === "suffix" || mode === "mime")) lines.push(h("div", {}, h("span", {class: "swatch", style: `background:${t.seg[2]}`}),
@@ -777,7 +782,8 @@ async function viewGraph(params, force) {
         : [`At the pin ${bytes(c.then)}, now ${bytes(n.bytes)}: `, h("b", {}, signed(c.delta)),
            c.ratio != null ? ` (${c.ratio > 0 ? "+" : ""}${(c.ratio * 100).toFixed(1)}%)` : ""]));
     }
-    lines.push(h("div", {class: "muted"}, n.kind === "group" ? "click: just this server/drive" : "click: zoom in (asks the server)"));
+    lines.push(h("div", {class: "muted"}, n.kind === "group" ? "click: just this server/drive"
+      : n.kind === "rollup" ? "click: open the rollup's record" : "click: zoom in (asks the server)"));
     fill(tip, lines);
     tip.hidden = false;
     const bw = box.clientWidth, tw = tip.offsetWidth, th = tip.offsetHeight;
@@ -1073,9 +1079,10 @@ async function viewBrowse(params) {
   const filesCard = h("section", {class: "card"}, h("h2", {}, "Files"), h("div", {class: "loading"}, "Loading…"));
   show(h("div", {}, crumbs(root, parent, false), h("div", {class: "stack"}, foldersCard, filesCard)));
 
-  const [sub, dirs] = await Promise.all([
+  const [sub, dirs, rolls] = await Promise.all([
     api("/api/subtree", {root, parent}).catch(e => e),
     api("/api/records", {root, parent, kind: "dir", sort: "name", desc: "0", limit: 1000}).catch(e => e),
+    api("/api/records", {root, parent, kind: "rollup", sort: "name", desc: "0", limit: 200}).catch(e => e),
   ]);
   if (sub instanceof Error) fill(foldersCard, h("h2", {}, "Folders"), failed(sub));
   else {
@@ -1084,18 +1091,25 @@ async function viewBrowse(params) {
       if (!byName.has(d.name)) byName.set(d.name, {name: d.name, files: 0, bytes: 0, record: d});
       else byName.get(d.name).record = d;
     }
-    const folders = [...byName.values()].sort((a, b) => b.bytes - a.bytes || a.name.localeCompare(b.name));
-    const total = folders.reduce((a, f) => a + f.bytes, 0);
+    for (const f of byName.values()) { f.total = f.bytes + (f.rollup_bytes || 0); f.allFiles = f.files + (f.rollup_files || 0); }
+    const folders = [...byName.values()].sort((a, b) => b.total - a.total || a.name.localeCompare(b.name));
+    const rollRows = rolls instanceof Error ? [] : rolls.rows;
+    const total = folders.reduce((a, f) => a + f.total, 0) + rollRows.reduce((a, r) => a + (r.size || 0), 0);
     const rows = folders.map(f => {
       const path = parent ? parent + "/" + f.name : f.name;
       return h("tr", {class: "click", onclick: () => go("browse", {root, parent: path})},
-        h("td", {class: "path"}, "📁 ", f.name, f.record ? null : h("span", {class: "badge", title: "no dir record yet (scan in progress, or imported without dirs)"}, "no record")),
-        h("td", {class: "num"}, num(f.files)), h("td", {class: "num", title: num(f.bytes) + " bytes"}, bytes(f.bytes)),
-        pctCell(total ? f.bytes / total * 100 : 0),
+        h("td", {class: "path"}, "📁 ", f.name, f.record ? null : h("span", {class: "badge", title: "no dir record yet (scan in progress, or imported without dirs)"}, "no record"),
+          f.rollup_bytes ? h("span", {class: "badge", title: `${bytes(f.rollup_bytes)} of this is in rollups (counted, not listed)`}, "rollups") : null),
+        h("td", {class: "num"}, num(f.allFiles)), h("td", {class: "num", title: num(f.total) + " bytes"}, bytes(f.total)),
+        pctCell(total ? f.total / total * 100 : 0),
         h("td", {class: "num"}, f.record ? h("a", {href: route("record", {root, rel_path: path}), onclick: e => e.stopPropagation()}, "record") : ""));
     });
-    fill(foldersCard, h("h2", {}, "Folders", h("small", {}, `${num(folders.length)} · ${bytes(total)} beneath`)),
-      folders.length ? h("div", {class: "scroll"}, h("table", {},
+    for (const r of rollRows) rows.push(h("tr", {class: "click", onclick: () => go("record", {root, rel_path: r.rel_path})},
+      h("td", {class: "path"}, "🗜 ", r.name, h("span", {class: "badge", title: "counted, not listed"}, "rollup"), r.rollup && r.rollup.partial ? h("span", {class: "badge warn"}, "lower bound") : null),
+      h("td", {class: "num"}, num(r.rollup && r.rollup.total_files)), h("td", {class: "num", title: num(r.size) + " bytes"}, bytes(r.size)),
+      pctCell(total ? (r.size || 0) / total * 100 : 0), h("td", {class: "num"}, "")));
+    fill(foldersCard, h("h2", {}, "Folders", h("small", {}, `${num(folders.length)}${rollRows.length ? " + " + num(rollRows.length) + " rollups" : ""} · ${bytes(total)} beneath`)),
+      rows.length ? h("div", {class: "scroll"}, h("table", {},
         h("thead", {}, h("tr", {}, h("th", {}, "name"), h("th", {class: "num"}, "files beneath"), h("th", {class: "num"}, "size"), h("th", {class: "num"}, "% here"), h("th", {}))),
         h("tbody", {}, rows))) : h("div", {class: "empty"}, "No subfolders"));
   }
@@ -1137,6 +1151,57 @@ function jsonTree(v, key, depth) {
   const cls = typeof v === "string" ? "s" : typeof v === "number" ? "n" : "b";
   return h("div", {class: "row"}, k, h("span", {class: cls}, JSON.stringify(v)));
 }
+// A rollup stands for files the catalog counts but does not list (docs/rollups.md): its card says what
+// is known, per tag.
+async function rollupCard(d, params, root) {
+  const info = (d.probe || {}).rollup || {}, tag = info.tag || d.name;
+  const parent = dirOf(d.rel_path || "");
+  const fact = (label, value) => value == null || value === "" ? [] : [h("dt", {}, label), h("dd", {}, value)];
+  const day = 86400e3, newest = info.newest_mtime_ns ? Number(BigInt(info.newest_mtime_ns) / 1000000n) : null;
+  const store = d.store_record, sprobe = store ? (store.probe.backup || store.probe.database || {}) : {};
+  const rows = [
+    fact("folder", h("a", {href: route("browse", {root, parent})}, parent || "(root)")),
+    fact("logical size", `${bytes(d.size)} (${num(d.size)} bytes)`),
+    fact("allocated", d.allocated_size != null ? bytes(d.allocated_size) : null),
+    fact("files", num(info.total_files)), fact("folders", num(info.total_dirs)), fact("folded in", num(info.matched)),
+    tag === "[REDACTED]" ? [] : [fact("newest", when(info.newest_mtime_ns)), fact("oldest", when(info.oldest_mtime_ns))],
+    fact("made by", info.rule ? `${info.rule}${info.via ? ", summed by " + info.via : ""}${info.summed_at ? " " + ago(info.summed_at) : ""}` : null)];
+  const out = [h("h2", {}, h("span", {class: "badge"}, tag), " ", d.rel_path, h("small", {}, "rollup")),
+    info.partial ? h("div", {class: "errors"}, `A lower bound: ${num(info.errors)} entries could not be read`
+      + (info.error_codes && Object.keys(info.error_codes).length ? " (" + Object.entries(info.error_codes).map(([c, n]) => `${c} ${n}`).join(", ") + ")" : "") + ".") : null];
+  if (tag === "[REDACTED]") out.push(h("p", {class: "muted"}, "Contents are hidden by a rule. Names are not recorded."));
+  out.push(h("dl", {class: "facts"}, rows));
+  if (tag !== "[REDACTED]" && newest != null && tag !== "[BACKUP]" && tag !== "[DATABASE]")
+    out.push(h("p", {class: "muted"}, `Last changed ${Math.max(0, Math.round((Date.now() - newest) / day))} days ago.`,
+      " ", h("a", {href: route("records", {root, kind: "rollup", q: tag})}, `every ${tag} rollup`)));
+  if (store) {
+    const checked = (store.probe.backup || {}).checked;
+    out.push(h("h3", {}, "The store"),
+      h("dl", {class: "facts"},
+        fact("store", h("a", {href: route("record", {root, rel_path: store.rel_path})}, store.rel_path)),
+        fact("format", sprobe.format || sprobe.engine), fact("machines", (sprobe.machines || []).join(", ")),
+        fact("task", sprobe.task), fact("versions", sprobe.versions), fact("latest", sprobe.latest ? stamp(sprobe.latest) : null),
+        fact("protected", sprobe.storage && sprobe.storage.source_bytes ? bytes(sprobe.storage.source_bytes) : null),
+        fact("pool / protected", sprobe.storage && sprobe.storage.source_bytes && d.size
+          ? `${bytes(d.size)} for ${bytes(sprobe.storage.source_bytes)} protected (${(sprobe.storage.source_bytes / d.size).toFixed(2)}x)` : null),
+        fact("databases", (sprobe.databases || []).length ? (sprobe.databases || []).map(x => x.name || x.oid).join(", ") : null),
+        fact("checked", checked ? h("span", {class: "badge " + (checked === "none" ? "" : "ok")}, checked === "totals" ? "totals" : "none") : null),
+        fact("problems", (sprobe.problems || []).length ? (sprobe.problems || []).join("; ") : null),
+        fact("note", store.probe.store_note)),
+      tag === "[BACKUP]" && checked !== "totals" ? h("p", {class: "muted"}, "To compare the pool with the manifest, scan with ",
+        h("span", {class: "mono"}, "--verify-backups=1"), ".") : null);
+  }
+  if (params.vs) {
+    try {
+      const snap = await api("/api/treemap", {id: params.vs});
+      const join = q => snap.prefix && q ? snap.prefix + "/" + q : snap.prefix || q;
+      const then = (snap.folders || []).find(f => join(f.path) === d.rel_path);
+      const delta = d.size - (then ? then.bytes : 0);
+      out.push(h("p", {}, "Since the pin: ", h("b", {}, signed(delta)), then ? ` (${bytes(then.bytes)} then, ${bytes(d.size)} now)` : " (new since the pin)"));
+    } catch (e) { /* the pin is gone: no comparison */ }
+  }
+  return h("section", {class: "card"}, out);
+}
 async function viewRecord(params) {
   const root = curRoot(params), rel = params.rel_path || "";
   show(h("div", {class: "loading"}, "Loading record…"));
@@ -1158,11 +1223,13 @@ async function viewRecord(params) {
   const errs = (d.errors || []).length ? h("div", {class: "errors"},
     d.errors.map(e => h("div", {}, h("b", {}, e.stage + ": "), e.message))) : null;
   const membersCard = h("section", {class: "card", hidden: true});
+  const rollCard = d.kind === "rollup" ? await rollupCard(d, params, root) : null;
   show(h("div", {}, crumbs(root, d.rel_path, d.kind === "dir"), h("div", {class: "stack"},
+    rollCard,
     h("section", {class: "card"}, h("h2", {}, d.name || d.rel_path || root, h("small", {}, d.kind || "")), errs, facts),
     membersCard,
     h("section", {class: "card"}, h("h2", {}, "Stored document"), h("div", {class: "json"}, jsonTree(d, null, 0))))));
-  if (d.kind !== "dir") loadMembers(membersCard, root, d.rel_path, 0, null);
+  if (d.kind !== "dir" && d.kind !== "rollup") loadMembers(membersCard, root, d.rel_path, 0, null);
 }
 async function loadMembers(card, root, rel, offset, tbody) {
   let m;

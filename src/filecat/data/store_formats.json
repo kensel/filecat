@@ -1,6 +1,6 @@
 {
   "version": "1.0",
-  "description": "Folders that filecat recognises by their layout as a database server's data or a backup program's store, what it does with each, and what is known about them. The detection itself is code (module); this catalog is its reference, and filecat reads the measure thresholds (actions.measure_when) from it. tests/test_store_formats.py keeps the two in step. The \"archives\" and \"archives_identified_only\" lists sit beside it as reference only: file formats the probe lists (module and function named) or only identifies from freedesktop, with magic bytes, globs, a spec link and notes. No code reads them.",
+  "description": "Folders that filecat recognises by their layout as a database server's data or a backup program's store, what it does with each, and what is known about them. The detection itself is code (module); this catalog is its reference, and filecat reads the measure thresholds (actions.measure_when) from it. tests/test_store_formats.py keeps the two in step. rollup_children lists the immediate sub-folders of a store (names or * wildcards) that a [BACKUP] or [DATABASE] rollup replaces when the store type is automatic or the store is listed in the config (docs/rollups.md section 4); an empty list means the format has no bulk folder to roll up. The \"archives\" and \"archives_identified_only\" lists sit beside it as reference only: file formats the probe lists (module and function named) or only identifies from freedesktop, with magic bytes, globs, a spec link and notes. No code reads them.",
   "actions": {
     "list": "Data file recorded from the directory listing only: name, size, created/modified times, kind 'data', probe.<data_tag> = <id>. Never opened.",
     "measure": "Read, hashed and probed like any other file.",
@@ -16,6 +16,7 @@
       "module": "filecat.dbfiles.postgres",
       "summary_key": "database",
       "data_tag": "db_data",
+      "rollup_children": ["base", "pg_wal", "pg_xact", "pg_multixact", "global"],
       "detection": {
         "folder_contains_all": ["PG_VERSION", "base", "global"],
         "description": "A folder holding the PG_VERSION file and the base/ and global/ folders."
@@ -56,6 +57,7 @@
       "module": "filecat.dbfiles.mysql",
       "summary_key": "database",
       "data_tag": "db_data",
+      "rollup_children": ["*"],
       "detection": {
         "folder_contains_any": ["ibdata1", "mysql.ibd", "ib_logfile0", "#innodb_redo", "aria_log_control"],
         "and_any": ["mysql", "mysql.ibd"],
@@ -90,6 +92,7 @@
       "module": "filecat.dbfiles.mongodb",
       "summary_key": "database",
       "data_tag": "db_data",
+      "rollup_children": ["journal", "diagnostic.data", "_tmp"],
       "detection": {
         "folder_contains_all": ["WiredTiger"],
         "and_any": ["_mdb_catalog.wt", "storage.bson"],
@@ -135,6 +138,7 @@
       "module": "filecat.dbfiles.mssql",
       "summary_key": "database",
       "data_tag": "db_data",
+      "rollup_children": [],
       "detection": {
         "folder_contains_any": ["*.mdf"],
         "except": "an .mdf with an .mds of the same name beside it (Alcohol 120% disc image)",
@@ -168,6 +172,7 @@
       "module": "filecat.backup.abb",
       "summary_key": "backup",
       "data_tag": "backup_data",
+      "rollup_children": ["@data"],
       "detection": {
         "folder_name": "@ActiveBackup",
         "folder_contains_all": ["@data", "storage_info.json"],
@@ -194,6 +199,7 @@
       "module": "filecat.backup.abb",
       "summary_key": "backup",
       "data_tag": "backup_data",
+      "rollup_children": [],
       "detection": {"folder_name": "ActiveBackupData", "description": "The ActiveBackupData folder beside @ActiveBackup."},
       "listed_only": ["** (not walked at all)"],
       "measured_normally": [],
@@ -209,6 +215,7 @@
       "module": "filecat.backup.hyperbackup",
       "summary_key": "backup",
       "data_tag": "backup_data",
+      "rollup_children": ["Pool"],
       "detection": {
         "folder_contains_any": ["SynologyHyperBackup.bkpi"],
         "or": {"folder_name_suffix": ".hbk", "folder_contains_all": ["Config", "Pool"]},
@@ -243,6 +250,7 @@
       "module": "filecat.backup.thunderbird",
       "summary_key": "backup",
       "data_tag": "backup_data",
+      "rollup_children": [],
       "detection": {
         "folder_contains_all": ["Backup.log", "ExternalMailFolders"],
         "description": "A <profile with . as _>-<yyyymmdd>-<hhmm> folder (or a fixed custom name) written by the add-on's profile backup."
@@ -275,6 +283,7 @@
       "module": "filecat.backup.veeam",
       "summary_key": "backup",
       "data_tag": "backup_data",
+      "rollup_children": [],
       "detection": {
         "folder_contains_any": ["*.vbm"],
         "and_any": ["*.vbk", "*.vib", "*.vrb", "*.vlb", "*.vsb"],
@@ -306,6 +315,7 @@
       "module": "filecat.backup.abg",
       "summary_key": "backup",
       "data_tag": "backup_data",
+      "rollup_children": [],
       "detection": {
         "folder_contains_any": ["@ActiveBackupGSuite-Databases"],
         "description": "ActiveBackupForGoogleWorkspace/task_<n> on an Active Backup for Business share: one folder per user plus the databases."
@@ -343,6 +353,7 @@
       "module": "filecat.backup.windows",
       "summary_key": "backup",
       "data_tag": "backup_data",
+      "rollup_children": [],
       "detection": {"folder_contains_any": ["Backup Set <yyyy-mm-dd hhmmss>"], "description": "A <COMPUTER> folder holding Backup Set folders."},
       "listed_only": ["Backup Set */Backup Files */Backup files N.zip", "*.wbcat", "*.wbverify"],
       "measured_normally": ["MediaID.bin", "everything else"],
@@ -359,6 +370,7 @@
       "module": "filecat.backup.windows",
       "summary_key": "backup",
       "data_tag": "backup_data",
+      "rollup_children": [],
       "detection": {"folder_contains_any": ["Backup <yyyy-mm-dd hhmmss>"], "and_any": ["Catalog", "MediaId"], "description": "WindowsImageBackup/<COMPUTER> with Backup folders."},
       "listed_only": ["Backup */*.vhd", "Backup */*.vhdx"],
       "measured_normally": ["*_Components.xml", "BackupSpecs.xml", "Catalog/**"],
@@ -375,6 +387,7 @@
       "module": "filecat.backup.duplicity",
       "summary_key": "backup",
       "data_tag": "backup_data",
+      "rollup_children": [],
       "detection": {"folder_contains_any": ["duplicity-(full|inc|full-signatures|new-signatures).<time>...(manifest|volN.difftar|sigtar)"], "description": "A folder of duplicity set files."},
       "listed_only": ["*.difftar*", "*.sigtar*"],
       "measured_normally": ["*.manifest", "*.manifest.gpg"],

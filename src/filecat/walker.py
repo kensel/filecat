@@ -37,6 +37,16 @@ Design notes:
   table) is measured instead and keeps its probe.db_data tag. A file
   listed earlier that has since gone quiet is unchanged to a rescan;
   `filecat enrich` measures those.
+* Store rollups (docs/rollups.md section 4). With `backup` / `database` set
+  to `automatic`, or the store's folder listed in `[[rollups.backup_store]]` /
+  `[[rollups.database_store]]`, a detected store's bulk folders
+  (store_formats.json `rollup_children`: Hyper Backup's Pool, ABB's @data, a
+  database's data folders) leave the listing for one `<store>/[BACKUP]` or
+  `<store>/[DATABASE]` rollup; the store's own record keeps probe.backup /
+  probe.database, and its top-level data files stay listed-only. A backup
+  store's sum is carried forward while its fingerprint (manifests, listing,
+  the rolled folders' mtimes) is unchanged and younger than `store_resum`.
+  --measure-backups / --measure-databases scan a store per file instead.
 * Cloud placeholders (cloudfiles.py). A file whose attributes say its data
   is not on the device (OneDrive/iCloud online-only, offline/tiered) is
   never opened -- reading it would download it -- and is recorded from its
@@ -69,11 +79,14 @@ Design notes:
 from __future__ import annotations
 
 import ctypes
+import hashlib
+import json
 import os
 import sys
 import threading
 import time
 from contextlib import closing
+from datetime import datetime, timedelta, timezone
 from concurrent.futures import ThreadPoolExecutor, TimeoutError as FutureTimeoutError, wait
 from dataclasses import dataclass, field
 from typing import Any, Callable, Iterable
@@ -229,6 +242,13 @@ class _Frame:
     fresh: bool = False
     stored_count: int | None = None
     stored_tags: list = field(default_factory=list)
+    # Store rollups: every name in the store's folder (summarize() wants them
+    # although the bulk folders left `entries`), the group of its bulk folders
+    # and what summing it came to.
+    store_names: set = field(default_factory=set)
+    store_group: Any = None
+    store_kids: set = field(default_factory=set)
+    store_totals: Any = None
 
 
 def _list_dir(path: str, markers: dict[str, rollup.Marker] | None = None
@@ -269,8 +289,10 @@ class _Lister:
 
     def __init__(self, wanted: Callable[[os.DirEntry, str], str | None],
                  threads: int = LIST_THREADS,
-                 list_dir: Callable[[str], Any] | None = None) -> None:
+                 list_dir: Callable[[str], Any] | None = None,
+                 prune: Callable[[str, list], set] | None = None) -> None:
         self._wanted = wanted
+        self._prune = prune         # (folder, its entries) -> child names not to read ahead
         self._list_dir = list_dir or (lambda path: _list_dir(path))
         self._pool = ThreadPoolExecutor(max_workers=threads) if threads > 0 else None
         self._pending: dict[str, Any] = {}
@@ -290,9 +312,12 @@ class _Lister:
         entries = self._list_dir(abs_path)
         if depth > 0 and not isinstance(entries, rollup.Marked):
             queued = 0
+            skip = self._prune(rel_path, entries) if self._prune is not None else ()
             for e in entries:
                 if queued >= LIST_AHEAD:
                     break
+                if skip and e.name in skip:
+                    continue        # a store's bulk folder: rolled up, never listed
                 child_abs = self._wanted(e, rel_path)
                 if child_abs is not None:
                     child_rel = f"{rel_path}/{e.name}" if rel_path else e.name
@@ -362,6 +387,11 @@ def _partition(entries: list, rel_path: str, plan: rollup.RollupPlan, skipped: C
     return recorded, groups, _names(groups)
 
 
+def _store_kids(frame: "_Frame") -> set:
+    """Names of a store's bulk folders rolled up in this folder (no secret)."""
+    return frame.store_kids if frame.store_group is not None else set()
+
+
 def _names(groups: dict) -> set:
     return {m.name for g in groups.values() for m in g.members}
 
@@ -382,7 +412,8 @@ def _make_frame(root: str, rel_path: str, abs_path: str, mtime_ns: int, ctime_ns
                 entries: list[os.DirEntry], options: ScanOptions, backend: Backend,
                 parent_stores: tuple = (), stored: dict[str, Any] | None = None,
                 plan: rollup.RollupPlan | None = None,
-                skipped: Callable[[Any, str], bool] | None = None) -> _Frame:
+                skipped: Callable[[Any, str], bool] | None = None,
+                store_rolls: Callable[[backup.Store, str], bool] | None = None) -> _Frame:
     """`stored` is this directory's own record, read with its parent's
     entries; the root's is read here. With a `plan`, the listing is first
     partitioned: the children a rule or the sticky store rolls up (or, on an
@@ -399,6 +430,28 @@ def _make_frame(root: str, rel_path: str, abs_path: str, mtime_ns: int, ctime_ns
     store = backup.detect(rel_path, dir_name, names) or dbfiles.detect(rel_path, dir_name, names)
     if store is not None and store.virtual and not options.measure_backups:
         entries = []    # recorded with its summary, not walked (see backup/__init__.py)
+    store_names: set = set()
+    store_kids: set = set()
+    store_group = None
+    if store is not None and store_rolls is not None and store_rolls(store, rel_path):
+        kids = store.rollup_children(entries)
+        existing = rolled.get(store.tag)
+        if kids and (existing is None or existing.agent is None):
+            store_names = set(names)
+            store_group = existing or rollup.Group(store.tag, f"store:{store.format.name}", False)
+            if existing is None:
+                store_group.store = store
+                rolled[store.tag] = store_group
+            kid_names = {k.name for k in kids}
+            store_kids = set(kid_names)
+            for k in kids:
+                store_group.add(k)
+            for e in entries:   # a real child named like the tag is folded in too
+                if (e.name not in kid_names and e.name[:1] == "[" and rollup.fold(e.name) == rollup.fold(store.tag)):
+                    store_group.add(e)
+                    kid_names.add(e.name)
+            entries = [e for e in entries if e.name not in kid_names]
+            rolled_names = rolled_names | kid_names
     children: dict[str, Any] = {}
     if not options.force:
         if not rel_path:
@@ -423,7 +476,9 @@ def _make_frame(root: str, rel_path: str, abs_path: str, mtime_ns: int, ctime_ns
                   stored_tags=sorted(probe.get("rollup_tags") or ()), had_previous=stored is not None,
                   is_drive_root=is_drive_root(abs_path),
                   stores=parent_stores + ((store,) if store else ()), store=store,
-                  stored=children, rolled=rolled, rolled_names=rolled_names)
+                  stored=children, rolled=rolled, rolled_names=rolled_names,
+                  store_names=store_names, store_group=store_group,
+                  store_kids=store_kids)
 
 
 def _listed_only(root: str, rel_path: str, name: str, st: os.stat_result,
@@ -493,7 +548,8 @@ def _stored_rel_paths(backend: Backend, root: str, **filters: Any) -> list[str]:
 
 def _delete_stale_children(backend: Backend, root: str, rel_path: str, current: set[str],
                            rolled: set[str], rolled_all: bool = False,
-                           purged: list[str] | None = None, produced: Iterable[str] = ()) -> int:
+                           purged: list[str] | None = None, produced: Iterable[str] = (),
+                           quiet: Iterable[str] = ()) -> int:
     """A changed directory may have lost entries since the last scan; move
     their stored documents -- and everything stored beneath a vanished
     subdirectory -- to the dropped store (Backend.drop_many) so the catalog
@@ -503,12 +559,14 @@ def _delete_stale_children(backend: Backend, root: str, rel_path: str, current: 
     name is in `rolled` (or any, with `rolled_all`) is not gone from disk but
     replaced by a rollup: it and everything beneath it are deleted for good
     (Backend.delete_many), never dropped, and its path is added to `purged`
-    for the cleanup that follows. A stored rollup that was not produced this
+    for the cleanup that follows (not for a name in `quiet`: a store's bulk
+    folder, whose names are no secret). A stored rollup that was not produced this
     time is deleted, and so is anything stored beneath a path a rollup now
     occupies (a real folder that was called [CACHE]). Returns how many were
     dropped."""
     dropped = 0
     produced = set(produced)
+    quiet = set(quiet)
     for rp in _stored_rel_paths(backend, root, parent=rel_path):
         name = rp.rsplit("/", 1)[-1]
         if name in current:
@@ -516,13 +574,13 @@ def _delete_stale_children(backend: Backend, root: str, rel_path: str, current: 
                 beneath = _stored_rel_paths(backend, root, dir=rp, depth=len(rp.split("/")))
                 if beneath:
                     backend.delete_many(root, beneath)
-                    if purged is not None:
+                    if purged is not None and name not in quiet:
                         purged.append(rp)
             continue
         if rolled_all or name in rolled:
             beneath = _stored_rel_paths(backend, root, dir=rp, depth=len(rp.split("/")))
             backend.delete_many(root, beneath + [rp])
-            if purged is not None:
+            if purged is not None and name not in quiet:
                 purged.append(rp)
             continue
         if name[:1] == "[" and (backend.get_stats(root, [rp]).get(rp) or {}).get("kind") == "rollup":
@@ -618,10 +676,47 @@ def walk_root(root: str, options: ScanOptions, backend: Backend, identifier: Any
         child_rel = f"{parent_rel}/{entry.name}" if parent_rel else entry.name
         return excluded(exclude, join(path, child_rel), record.join_root(root, child_rel))
 
+    cfg = plan.cfg
+    stores_on = (cfg.mode_of("backup") == "automatic" or cfg.mode_of("database") == "automatic"
+                 or bool(cfg.backup_stores or cfg.database_stores))
+
+    def _store_rolls(store: backup.Store, rel_path: str) -> bool:
+        """Do this detected store's bulk folders roll up in this scan? Not a
+        virtual store, not one that --measure-backups / --measure-databases
+        reads per file, and only when its type is `automatic` or the store's
+        folder is listed in [[rollups.backup_store]] / [[rollups.database_store]]."""
+        if not stores_on or store.virtual or not store.rollup_patterns:
+            return False
+        db = store.probe_key == "database"
+        mode = cfg.mode_of("database" if db else "backup")
+        if mode == "disabled" or (options.measure_databases if db else options.measure_backups):
+            return False
+        if mode == "automatic":
+            return True
+        listed = cfg.database_stores if db else cfg.backup_stores
+        if not listed:
+            return False
+        here = {_norm_path(join(path, rel_path)), _norm_path(record.join_root(root, rel_path))}
+        if source is not None:
+            here.add(_norm_path(source.posix(join(path, rel_path))))
+        return any(_norm_path(p) in here for p in listed)
+
+    def _prune(rel_path: str, entries: list) -> set:
+        """Names in a read-ahead listing that are a store's bulk folders."""
+        if not stores_on or isinstance(entries, rollup.Marked):
+            return set()
+        names = {e.name for e in entries}
+        store = backup.detect(rel_path, rel_path.rsplit("/", 1)[-1], names) or dbfiles.detect(
+            rel_path, rel_path.rsplit("/", 1)[-1], names)
+        if store is not None and _store_rolls(store, rel_path):
+            return {k.name for k in store.rollup_children(entries)}
+        return set()
+
     if options.force:
         resume.forget_root(root)
     root_frame = _make_frame(root, record.ROOT_REL, path, root_mtime_ns, root_ctime_ns,
-                              root_entries, options, backend, plan=plan, skipped=_skipped)
+                              root_entries, options, backend, plan=plan, skipped=_skipped,
+                              store_rolls=_store_rolls)
     if plan.policy_changed:
         resume.forget_root(root)
     if root_marker is not None:
@@ -659,7 +754,7 @@ def walk_root(root: str, options: ScanOptions, backend: Backend, identifier: Any
         return child_abs
 
     lister = _Lister(_will_enter, list_dir=(lambda p: _list_dir(p, markers)) if source is None
-                     else source.list_dir)
+                     else source.list_dir, prune=_prune)
 
     def _drain(pending: list, count: int) -> bool:
         """Write the first `count` pending files in submission order."""
@@ -699,18 +794,90 @@ def walk_root(root: str, options: ScanOptions, backend: Backend, identifier: Any
     def _recorded_names(frame: _Frame) -> set[str]:
         return {e.name for e in frame.entries if e.name not in frame.not_recorded}
 
+    def _rollup_info(frame: _Frame) -> dict[str, Any] | None:
+        """What summarize() is told when this store's bulk folders are a
+        rollup: their names and, once summed, the totals."""
+        if frame.store_group is None:
+            return None
+        t = frame.store_totals
+        info: dict[str, Any] = {"children": sorted(frame.store_kids)}
+        if t is None:
+            info.update(files=None, bytes=None, partial=True)
+        else:
+            info.update(files=t.total_files, bytes=t.size, partial=t.errors > 0)
+        return info
+
     def _backup_summary(frame: _Frame, doc: dict[str, Any]) -> None:
         if source is not None:
             # the manifests are not read through the agent yet
             doc.setdefault("probe", {})["store_note"] = (
                 f"{frame.store.format.name}: manifest not read; scanned through filecat-agent")
             return
+        names = (frame.store_names - frame.not_recorded) if frame.store_names else _recorded_names(frame)
         try:
             doc.setdefault("probe", {})[frame.store.probe_key] = backup.summarize(
-                frame.store, frame.abs_path, _recorded_names(frame),
-                listing=lambda: _store_listing(frame), verify=options.verify_backups)
+                frame.store, frame.abs_path, names,
+                listing=lambda: _store_listing(frame), verify=options.verify_backups >= getattr(frame.store.format, "verify_level", 1),
+                rollup=_rollup_info(frame), level=options.verify_backups)
         except Exception as e:  # a bad manifest must not stop the walk
             record.add_error(doc, frame.store.probe_key, e)
+
+    def _manifest_stat(frame: _Frame, inner: str) -> list[int | None]:
+        """[size, mtime_ns] of a file inside the store, [None, None] when it is not there."""
+        where = join(frame.abs_path, inner)
+        try:
+            if source is None:
+                st = os.stat(where)
+                return [st.st_size, st.st_mtime_ns]
+            m = source.client().measure(source.posix(where), hash="none", head_bytes=0)
+            return [m.size, m.mtime_ns]
+        except (OSError, ValueError):
+            return [None, None]
+
+    def _fingerprint(frame: _Frame, group: rollup.Group) -> str | None:
+        """SHA-256 of what would change when a backup program ran: the store
+        folder's mtime, the name, size and mtime of everything in it (the rolled
+        folders included, so their mtimes) and of the manifest files the format
+        reads. None for a format with no manifest list: it is always summed."""
+        manifests = getattr(frame.store.format, "manifests", None)
+        if manifests is None:
+            return None
+        listing = []
+        for e in list(frame.entries) + list(group.members):
+            try:
+                # a folder's own stat: on NTFS the listing shows its mtime late
+                st = (os.lstat(join(frame.abs_path, e.name)) if source is None
+                      else e.stat(follow_symlinks=False))
+                listing.append([e.name, st.st_size, st.st_mtime_ns])
+            except OSError:
+                listing.append([e.name, None, None])
+        listing.sort(key=lambda x: x[0])
+        inner = [[m, *_manifest_stat(frame, m)] for m in sorted(manifests)]
+        try:
+            own = os.lstat(frame.abs_path).st_mtime_ns if source is None else frame.mtime_ns
+        except OSError:
+            own = None
+        blob = json.dumps([frame.store.format.name, frame.store.rel_path, own, listing, inner],
+                          separators=(",", ":"))
+        return hashlib.sha256(blob.encode("utf-8", "surrogatepass")).hexdigest()
+
+    def _carried(group: rollup.Group, fp: str | None, rel_path: str) -> dict[str, Any] | None:
+        """The stored rollup of a backup store when it still stands: same
+        fingerprint, same rules, no read errors, summed less than
+        `store_resum` days ago. --force never carries."""
+        if fp is None or options.force:
+            return None
+        prev = backend.get_stats(root, [rel_path]).get(rel_path)
+        info = ((prev or {}).get("probe") or {}).get("rollup") or {}
+        if (prev is None or prev.get("kind") != "rollup" or info.get("fp") != fp
+                or info.get("partial") or info.get("errors") or info.get("policy") != plan.policy_id
+                or info.get("matched") != group.matched):
+            return None
+        try:
+            age = datetime.now(timezone.utc) - datetime.fromisoformat(info["summed_at"])
+        except (KeyError, ValueError, TypeError):
+            return None
+        return prev if age < timedelta(days=cfg.store_resum_days) else None
 
     def _roll_marked(frame: _Frame, entry: Any, child_rel: str, marker: rollup.Marker) -> None:
         """The listing of this child held a marker: it is rolled up under the
@@ -749,18 +916,33 @@ def walk_root(root: str, options: ScanOptions, backend: Backend, identifier: Any
             complete=info.get("complete", True))
         return t
 
+    def _sum_agent(member_path: str, deadline: float | None) -> rollup.Totals:
+        """A store's bulk folder summed by the agent (`sum_subtree`, with
+        progress lines and the deadline)."""
+        left = max(deadline - time.monotonic(), 1.0) if deadline is not None else None
+        try:
+            return rollup.Totals.from_summary(source.sum_subtree(member_path, deadline_s=left))
+        except OSError:
+            raise rollup.RollupError("rollup failed") from None
+
     def _roll(frame: _Frame) -> bool:
         """Sum each group of the folder and write its rollup record. Returns
-        whether a record carries an error."""
+        whether a record carries an error. A backup store's rollup whose
+        fingerprint is unchanged is carried forward as it is."""
         errors = False
         if not frame.rolled:
             return False
         deadline = time.monotonic() + options.rollup_timeout if options.rollup_timeout else None
-        started: list[tuple[rollup.Group, list]] = []
+        started: list[tuple[rollup.Group, list, dict | None, str | None]] = []
         for tag in sorted(frame.rolled):
             group = frame.rolled[tag]
             futures = []
-            if group.agent is None:
+            fp = carried = None
+            if (group is frame.store_group and group.store is not None
+                    and group.store.probe_key != "database"):
+                fp = _fingerprint(frame, group)
+                carried = _carried(group, fp, rollup.rollup_path(frame.rel_path, tag))
+            if group.agent is None and carried is None:
                 if not rollup_pool:
                     rollup_pool.append(ThreadPoolExecutor(max_workers=max(1, options.rollup_workers)))
                 for m in group.members:
@@ -768,11 +950,21 @@ def walk_root(root: str, options: ScanOptions, backend: Backend, identifier: Any
                         futures.append(rollup_pool[0].submit(_sum_member, path, True, True, deadline))
                         continue
                     child_rel = f"{frame.rel_path}/{m.name}" if frame.rel_path else m.name
-                    futures.append(rollup_pool[0].submit(
-                        _sum_member, join(path, child_rel), _is_dir_entry(m), False, deadline))
-            started.append((group, futures))
-        for group, futures in started:
+                    if source is not None:
+                        futures.append(rollup_pool[0].submit(_sum_agent, join(path, child_rel), deadline))
+                    else:
+                        futures.append(rollup_pool[0].submit(
+                            _sum_member, join(path, child_rel), _is_dir_entry(m), False, deadline))
+            started.append((group, futures, carried, fp))
+        for group, futures, carried, fp in started:
             shown = join(path, rollup.rollup_path(frame.rel_path, group.tag))   # the rollup's own path
+            if carried is not None:
+                totals = rollup.Totals.from_document(carried)
+                if group is frame.store_group:
+                    frame.store_totals = totals
+                if progress:
+                    progress(shown, totals.size, "carried")
+                continue
             if group.agent is not None:
                 totals = _agent_totals(group.agent)
             else:
@@ -794,13 +986,17 @@ def walk_root(root: str, options: ScanOptions, backend: Backend, identifier: Any
                 errors = True
                 continue
             totals.matched = group.matched
+            store_ref = ({"format": group.store.format.name, "path": group.store.rel_path}
+                         if group is frame.store_group and group.store is not None else None)
             doc = rollup.rollup_document(root, frame.rel_path, group.tag, totals, rule=group.rule,
-                                         via="agent" if group.agent is not None else "python",
-                                         policy=plan.policy_id)
+                                         via="agent" if (group.agent is not None or source is not None)
+                                         else "python", policy=plan.policy_id, store=store_ref, fp=fp)
             _apply_unc(doc, unc)
             if doc.get("errors"):
                 errors = True
             backend.put(doc)
+            if group is frame.store_group:
+                frame.store_totals = totals
             if progress:
                 progress(shown, totals.size, "rollup")
         return errors
@@ -823,7 +1019,8 @@ def walk_root(root: str, options: ScanOptions, backend: Backend, identifier: Any
                         current = _recorded_names(frame) | set(frame.rolled)
                         gone = _delete_stale_children(
                             backend, root, frame.rel_path, current, frame.rolled_names,
-                            frame.rolled_all, plan.purged, frame.rolled)
+                            frame.rolled_all, plan.purged, frame.rolled,
+                            quiet=_store_kids(frame))
                         if gone and progress:
                             progress(frame.abs_path, gone, "dropped")
                     doc = record.new_document(root, frame.rel_path, kind="dir",
@@ -924,7 +1121,7 @@ def walk_root(root: str, options: ScanOptions, backend: Backend, identifier: Any
                     child_frame = _make_frame(root, child_rel, child_abs, mtime_ns, ctime_ns,
                                               child_entries, options, backend, frame.stores,
                                               stored=frame.stored.get(child_rel), plan=plan,
-                                              skipped=_skipped)
+                                              skipped=_skipped, store_rolls=_store_rolls)
                     for rolled_name in child_frame.rolled_names:
                         resume.forget_beneath(root, f"{child_rel}/{rolled_name}")
                     stack.append(child_frame)

@@ -4,6 +4,8 @@
                                     user's rules as counts (never patterns)
     list [--root R] [--json]        the rollup records in the catalog: by tag and
                                     parent folder, with how each was made
+    migrate [--dry-run] ...         turn existing rows into rollups without a rescan
+                                    (rollup_migrate.py)
     suggest [--root R] [--json]     what a built-in rule of a type that is not
                                     automatic would match, from the last complete
                                     scan of each root
@@ -227,6 +229,9 @@ def run(args: Any) -> int:
             return _list(args)
         if args.action == "suggest":
             return _suggest(args)
+        if args.action == "migrate":
+            from . import rollup_migrate
+            return rollup_migrate.run(args)
         return _redacted(args)
     except config.ConfigError as exc:
         print(f"filecat rollups: {exc}", file=sys.stderr)

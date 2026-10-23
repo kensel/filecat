@@ -110,6 +110,56 @@ data by design, and (for databases) it changes while the server runs. Listing
 only keeps the space totals right: a 1 TB ABB pool takes about a minute
 instead of hours.
 
+### Rolled-up stores
+
+Listing a 1 TB pool still writes 500,000 records that say nothing the sum does
+not. With `backup` or `database` set to `automatic` in `[rollups]` (or
+`--rollup backup=automatic`), or the store's folder listed in
+`[[rollups.backup_store]]` / `[[rollups.database_store]]`, a detected store's
+**bulk folders** (Hyper Backup `Pool`, ABB `@data`, PostgreSQL `base`,
+`pg_wal`, ..., every MySQL schema folder, MongoDB `journal`, ...; the list is
+`rollup_children` in [`store_formats.json`](../src/filecat/data/store_formats.json))
+become one `<store>/[BACKUP]` or `<store>/[DATABASE]` record of totals
+(files, folders, bytes, newest, oldest, errors) and are not listed. The
+store's own folder record keeps `probe.backup` / `probe.database` exactly as
+before (task, machines, versions, problems), and the small files at the
+store's top (manifests, `ibdata1`, binlogs, `*.wt`) are recorded as listed-only
+rows as before. `--measure-backups` / `--measure-databases` scan that store per
+file instead, and `mssql`, Veeam, duplicity, Windows Backup, Thunderbird and
+Google Workspace have no bulk folder to roll up.
+
+The sum is `lstat` only. On a local or SMB scan Python sums (`--rollup-workers`
+threads); through an agent the store's folders go to `sum_subtree`, with
+progress lines and the deadline, so an hours-long sum is not a timeout. Until
+manifests are read through the agent too, an agent scan of a store records
+`probe.store_note` instead of `probe.backup`.
+
+**When it is summed again.** A `[BACKUP]` rollup carries a fingerprint (the
+store folder's mtime, the name, size and mtime of everything in it, the rolled
+folders' mtimes, and the manifest files the format reads) and is kept as it is
+while the fingerprint is the same, the rules are the same and it is younger
+than `store_resum` (default `30d`; progress shows "carried"). A change below the
+pool's top folder that does not touch a manifest is therefore seen at most
+`store_resum` later; `--force` sums again at once. A `[DATABASE]` is summed on
+every scan.
+
+**`--verify-backups[=N]`** says how far a backup store is checked against its
+manifest. Level 0 (default): nothing, `probe.backup.checked` is `"none"`.
+Level 1 (also a bare `--verify-backups`): Hyper Backup compares the pool's total
+bytes and file count with the sum of the entries Guard lists under `Pool/` (and
+its other files with the listing), `checked` is `"totals"`; other formats have
+no totals to compare and stay `"none"`. Levels 2 and 3 (every file exists with
+its size; hashes) are refused in v0.2.0: scan with `--measure-backups` for
+per-file rows. Veeam's and Google Workspace's own metadata checks (below) run
+from level 1; Hyper Backup's whole-target CRC32 read is level 2.
+
+**Existing catalogs.** `filecat rollups migrate [--dry-run] [--tags ...]
+[--root R]` turns the listed-only rows of stores that now roll up (and of
+anything the current rules match) into the rollups without a rescan. It writes
+the rollup first, deletes the rows in checkpointed batches, then cleans up; it
+can be stopped and run again, refuses while a scan of the root runs, and leaves
+a store that holds files that were read (hashes) alone.
+
 ### What is read from a backup store
 
 Only the store's own metadata, which is small. The full list per format is in
@@ -122,11 +172,12 @@ Thunderbird's `Backup.log`, `prefs.js` and `compatibility.ini`.
 The default check compares the manifest against the scan's listing: files
 that should exist and don't, or have the wrong size. That costs no extra
 reads. `--verify-backups` goes further and reads data to check the store's
-own checksums:
+own checksums (at level 1, except Hyper Backup, whose whole-target read is level 2 and so
+not available in v0.2.0):
 
 | format | what `--verify-backups` reads |
 |---|---|
-| Hyper Backup | every file Guard lists, checked against its CRC32 (reads the whole target) |
+| Hyper Backup | level 2, not available yet: every file Guard lists, checked against its CRC32 (reads the whole target). Level 1 compares a rolled-up pool's totals with Guard's |
 | Veeam | each backup file's header, snapshot slots and metadata banks, checked against CRC32C (well under 1% of the file) |
 | Google Workspace | every META and Drive `.metadata`, then the size and MD5 of each fragment and version they name |
 | Thunderbird, ABB, Windows Backup, duplicity | nothing more (no checksums to check) |

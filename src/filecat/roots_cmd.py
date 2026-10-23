@@ -9,7 +9,7 @@ from typing import Any
 
 from . import rootinfo
 from .backends import open_backend
-from .summary import _human_bytes
+from .summary import _human_bytes, by_tag
 
 STATE_LABELS = {"in_progress": "SCANNING", "stalled": "STALLED", "never": "not scanned",
                 "ok": "ok", "errors": "errors", "unreachable": "UNREACHABLE",
@@ -63,7 +63,9 @@ def _print_root(row: dict[str, Any]) -> None:
         print(f"  last scan   {_local(last.get('started_at'))} -> {_local(last.get('finished_at'))} "
               f"({_duration(last.get('seconds'))}) on {last.get('host', '?')}: {last.get('status')}, "
               f"{last.get('files', 0)} files + {last.get('dirs', 0)} dirs written, "
-              f"{_human_bytes(last.get('bytes', 0))}, {last.get('errors', 0)} with errors")
+              f"{_human_bytes(last.get('bytes', 0))}, {last.get('errors', 0)} with errors"
+              + (f", {last['rollups']} rollups ({_human_bytes(last.get('rollup_bytes', 0))})"
+                 if last.get("rollups") else ""))
     elif not attempt:
         print("  last scan   none recorded (imported, or scanned before the root index existed)")
     newest = info.get("newest_file")
@@ -73,6 +75,11 @@ def _print_root(row: dict[str, Any]) -> None:
     if err:
         where = f" at {err['rel_path'] or 'the root itself'}" if err.get("rel_path") is not None else ""
         print(f"  last error  {_local(err.get('at'))} {err.get('stage')}: {err.get('message')}{where}")
+    tags = by_tag(row.get("rollups") or [])
+    if tags:
+        shown = ", ".join(f"{t['tag']} {_human_bytes(t['size'])}" for t in tags[:3])
+        print(f"  rollups     {shown}" + (f" and {len(tags) - 3} more" if len(tags) > 3 else "")
+              + f"  ({sum(t['folders'] for t in tags)} records, not listed)")
     totals = row["summary"]
     if totals:
         print(f"  summary     {totals.get('total_files')} files, {_human_bytes(totals.get('total_bytes') or 0)}, "
@@ -90,8 +97,12 @@ def run(args: Any) -> int:
     backend = open_backend(args.backend, args.out, args.dsn)
     try:
         rows = rootinfo.index(backend)
+        rollups = backend.rollup_totals()
     finally:
         backend.close()
+    for r in rows:
+        if r["root"] in rollups:
+            r["rollups"] = rollups[r["root"]]
     if args.root:
         rows = [r for r in rows if r["root"] in args.root]
     if args.json:

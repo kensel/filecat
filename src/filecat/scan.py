@@ -138,6 +138,7 @@ class _Progress:
         self.dropped = 0
         self.rollups = 0
         self.rollup_bytes = 0
+        self.carried = 0
         self.last_path = ""
         self._started = self._last_print = time.monotonic()
         self._mark = (0, 0, 0)  # files, measured, measured_bytes at the previous line
@@ -148,6 +149,10 @@ class _Progress:
         elif how == "rollup":
             self.rollups += 1
             self.rollup_bytes += size
+        elif how == "carried":
+            self.rollups += 1       # a store's rollup kept as it was: its fingerprint did not change
+            self.rollup_bytes += size
+            self.carried += 1
         elif how == "summing":
             pass        # a long sum is still going: only the clock and the path move
         elif how == "dropped":
@@ -182,6 +187,7 @@ class _Progress:
         resumed += f", {self.resumed_dirs} dirs resumed" if self.resumed_dirs else ""
         resumed += f", {self.dropped} dropped" if self.dropped else ""
         resumed += f", {self.rollups} rollups ({self.rollup_bytes} bytes)" if self.rollups else ""
+        resumed += f", {self.carried} carried" if self.carried else ""
         print(f"{self.root}: {self.files} files, {self.bytes} bytes | {rate:.1f} files/s, "
               f"measuring {m_rate:.1f} files/s {mb_rate:.1f} MB/s (avg {avg:.1f} files/s) | "
               f"{self.measured} measured, {self.unchanged} unchanged{resumed} | last: {self.last_path}",

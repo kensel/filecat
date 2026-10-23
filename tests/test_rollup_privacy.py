@@ -448,3 +448,83 @@ def test_the_unpinned_treemap_snapshots_of_a_root_go_when_a_folder_is_redacted(f
     scan.scan_roots([str(root)], backend, options(), resume_path=str(FIXTURE_ROOT / f"r-{uuid.uuid4().hex}"))
     assert backend.get_treemap(meta["id"]) is None
     assert backend.list_treemaps(str(root)) == []
+
+
+# --- store rollups and `rollups migrate` ---------------------------------------------------
+class _Boom(Exception):
+    pass
+
+
+def test_store_rollups_and_a_killed_and_resumed_migration_leave_no_redacted_name(fixture_dir, capsys, logs,
+                                                                                tmp_path, monkeypatch):
+    from tests.test_hyperbackup import make_hbk
+    root = fixture_dir / "share"
+    secret = root / f"cfg-{CFG}"
+    tokens = [f"cfg-{CFG}"] + fill(secret, "c") + ["ZXQ-note.txt", "ZXQ-pack.zip", "ZXQ-member-a.txt",
+                                                    "ZXQ-member-b.txt", "secret words"]
+    write(secret / "ZXQ-note.txt", ("secret words " * 20).encode())
+    write(secret / "ZXQ-pack.zip", _zip(["ZXQ-member-a.txt", "ZXQ-dir/ZXQ-member-b.txt"]))
+    write(root / "open" / "readme.txt", b"public")
+    make_hbk(root / "Backup")
+    monkeypatch.setenv("FILECAT_REDACT_KEY_FILE", str(tmp_path / "redact.key"))
+    toml = tmp_path / "filecat.toml"
+    toml.write_text('[rollups]\nbackup = "automatic"\n[[rollups.rule]]\ntag = "[REDACTED]"\nmatch = ["cfg-*"]\n',
+                    encoding="utf-8")
+    store = fixture_dir / "store"
+    store.mkdir()
+    db = str(store / "c.sqlite")
+    resume = str(FIXTURE_ROOT / f"resume-{uuid.uuid4().hex}.json")
+    backend = SqliteBackend(db)
+    scan.scan_roots([str(root)], backend, options(identify="never"), resume_path=resume)    # before: no rules
+    before = dump(backend, store)
+    assert b"ZXQ-member-a.txt" in before and b"secret words" in before
+    backend.close()
+
+    monkeypatch.setenv("FILECAT_CONFIG", str(toml))
+    base = ["--backend", "sqlite", "--out", db, "--root", str(root)]
+    haystacks: dict[str, bytes] = {}
+    haystacks["dry run"] = cli_output(capsys, ["rollups", "migrate", "--dry-run", *base]).encode()
+    assert "would migrate 2 of 2 targets" in haystacks["dry run"].decode()
+    # the process dies in phase 2 of the second target ...
+    real = SqliteBackend.delete_many
+    calls = [0]
+
+    def dying(self, root_, paths):
+        calls[0] += 1
+        if calls[0] == 2:
+            raise _Boom
+        return real(self, root_, paths)
+
+    monkeypatch.setattr(SqliteBackend, "delete_many", dying)
+    with pytest.raises(_Boom):
+        cli.main(["rollups", "migrate", "--batch", "2", *base])
+    monkeypatch.setattr(SqliteBackend, "delete_many", real)
+    out, err = capsys.readouterr()
+    haystacks["killed stdout"], haystacks["killed stderr"] = out.encode(), err.encode()
+    ck = Path(db + ".rollups-migrate.json")
+    assert ck.exists()
+    haystacks["checkpoint"] = ck.read_bytes()
+    # ... and a rerun finishes it
+    haystacks["rerun"] = cli_output(capsys, ["rollups", "migrate", "--batch", "2", *base]).encode()
+    assert not ck.exists()
+    reopened = SqliteBackend(db)
+    docs = {d["rel_path"]: d for d in reopened.list(root=str(root))}
+    assert docs["[REDACTED]"]["probe"]["rollup"]["migrated"] is True and docs["[REDACTED]"]["size"] > 0
+    assert docs["Backup/NAS-LEGACY_1.hbk/[BACKUP]"]["probe"]["rollup"]["migrated"] is True
+    assert not [d for d in reopened.list_dropped(str(root)) if "ZXQ" in d["rel_path"]]
+    haystacks["after"] = dump(reopened, store)
+    reopened.close()
+    haystacks["resume"] = Path(resume).read_bytes() if os.path.exists(resume) else b""
+    haystacks["log"] = "\n".join(r.getMessage() + " " + str(r.args) for r in logs.records).encode()
+    # and a scan over the migrated catalog (store rollup, redaction by rule and sticky entry) adds nothing
+    reopened = SqliteBackend(db)
+    scan.scan_roots([str(root)], reopened, options(config({"backup": "automatic"},
+                    [{"tag": "[REDACTED]", "match": ["cfg-*"]}]), identify="never", progress_interval=0),
+                    resume_path=resume)
+    reopened.close()
+    out, err = capsys.readouterr()
+    haystacks["scan stdout"], haystacks["scan stderr"] = out.encode(), err.encode()
+    haystacks["after scan"] = dump(SqliteBackend(db), store)
+    haystacks.update(run_commands(capsys, base[:4], str(root), "open/readme.txt"))
+    assert_absent(haystacks, tokens)
+    assert any(t.encode() in before for t in tokens)           # control: they were there before

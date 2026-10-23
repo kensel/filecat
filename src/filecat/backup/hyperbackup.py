@@ -36,6 +36,12 @@ Checks:
 - versions whose status is a failure;
 - error lines the last integrity check wrote to Guard/detect/error.log.
 
+With the store's `Pool/` rolled up (docs/rollups.md, section 4) the listing
+does not hold it: at verify level 0 nothing is compared, and at level 1 the
+pool's total bytes and file count are compared with the sum of Guard's entries
+under `Pool/` (and the files outside it with the listing); `checked` is
+"totals".
+
 Files under the store's subfolders are listed only; the small files at its
 top are read like any other. The full on-disk format, as far as it is
 known, is in docs/formats/synology-hyperbackup.md.
@@ -136,6 +142,11 @@ class _HyperBackup:
     name = "synology-hyperbackup"
     uses_listing = True     # summarize() takes the walk's listing of the store
     verifies = True         # and verify=True: check Guard's CRC32 of every file
+    uses_rollup = True      # and rollup=, level=: the pool is a rollup, not in the listing
+    verify_level = 2        # the CRC32 read of every file is the per-file level (docs/rollups.md 4.5)
+    manifests = ("_Syno_TaskConfig", "last_status.conf", "storage_statistics.db", "synobkpinfo.db",
+                 "Config/version_info.db", "Guard/local_bucket.db", "Guard/local_file.db",
+                 "Guard/config.json", "Guard/detect.prog")
 
     def matches(self, dir_name: str, names: set[str]) -> bool:
         if "SynologyHyperBackup.bkpi" in names:
@@ -147,7 +158,8 @@ class _HyperBackup:
 
     def summarize(self, path: str, names: set[str],
                   listing: Callable[[], dict[str, int]] | None = None,
-                  verify: bool = False) -> dict[str, Any]:
+                  verify: bool = False, rollup: dict[str, Any] | None = None,
+                  level: int = 0) -> dict[str, Any]:
         out: dict[str, Any] = {"format": self.name}
         problems: list[str] = []
 
@@ -196,7 +208,9 @@ class _HyperBackup:
         except Exception:
             pass
 
-        guard = self._guard(path, listing, problems, verify)
+        guard = self._guard(path, listing, problems, verify, rollup, level)
+        if rollup is not None:
+            out["checked"] = "totals" if level >= 1 and not rollup.get("partial") else "none"
         if guard:
             storage["stored_bytes"] = guard.pop("bytes")
             out["guard"] = guard
@@ -253,7 +267,8 @@ class _HyperBackup:
         return out
 
     def _guard(self, path: str, listing: Callable[[], dict[str, int]] | None,
-               problems: list[str], verify: bool = False) -> dict[str, Any] | None:
+               problems: list[str], verify: bool = False, rollup: dict[str, Any] | None = None,
+               level: int = 0) -> dict[str, Any] | None:
         """Every file Guard's manifest lists, against the listing of the store
         (and, with verify, against Guard's CRC32 of its contents)."""
         expected: dict[str, int] = {}
@@ -289,6 +304,10 @@ class _HyperBackup:
         except (OSError, ValueError, AttributeError):
             pass
 
+        if rollup is not None:
+            self._check_rolled(guard, expected, listing, problems, rollup, level)
+            return guard
+
         on_disk = listing() if listing else _os_listing(path)
         missing = sorted(p for p in expected if p not in on_disk)
         differ = sorted(p for p, s in expected.items() if p in on_disk and s is not None and on_disk[p] != s)
@@ -322,6 +341,45 @@ class _HyperBackup:
                 problems.append(f"{len(unreadable)} files could not be read to check their CRC32, e.g. "
                                 + ", ".join(unreadable[:_MAX_EXAMPLES]))
         return guard
+
+    def _check_rolled(self, guard: dict[str, Any], expected: dict[str, int],
+                      listing: Callable[[], dict[str, int]] | None, problems: list[str],
+                      rollup: dict[str, Any], level: int) -> None:
+        """Guard's manifest against a store whose `Pool/` is a rollup. Level 0
+        compares nothing. Level 1 compares the bytes and file count Guard lists
+        under the rolled folders with the rollup's, and the other files with
+        the walk's listing."""
+        if level < 1:
+            return
+        prefixes = tuple(f"{c}/" for c in rollup.get("children", ()))
+        pool = {p: s for p, s in expected.items() if p.startswith(prefixes)}
+        rest = {p: s for p, s in expected.items() if p not in pool}
+        want_bytes, want_files = sum(s or 0 for s in pool.values()), len(pool)
+        guard["rollup"] = {"guard_files": want_files, "guard_bytes": want_bytes,
+                           "files": rollup.get("files"), "bytes": rollup.get("bytes")}
+        if rollup.get("partial"):
+            problems.append("the pool's totals could not be compared with Guard's: some of it could not "
+                            "be read, so its sum is a lower bound")
+        else:
+            got_bytes, got_files = rollup.get("bytes") or 0, rollup.get("files") or 0
+            if got_bytes != want_bytes:
+                problems.append(f"the pool holds {got_bytes} bytes; Guard's manifest lists {want_bytes}")
+            if got_files < want_files:
+                problems.append(f"the pool holds {got_files} files; Guard's manifest lists {want_files}")
+            elif got_files > want_files:
+                guard["rollup"]["unlisted_files"] = got_files - want_files
+        if listing is not None:
+            on_disk = listing()
+            missing = sorted(p for p in rest if p not in on_disk)
+            differ = sorted(p for p, s in rest.items() if p in on_disk and s is not None and on_disk[p] != s)
+            guard["missing"], guard["size_mismatch"] = len(missing), len(differ)
+            if missing:
+                problems.append(f"{len(missing)} of {len(rest)} files in Guard's manifest outside the pool "
+                                f"are missing, e.g. {', '.join(missing[:_MAX_EXAMPLES])}")
+            if differ:
+                problems.append(f"{len(differ)} files differ in size from Guard's manifest, e.g. "
+                                + ", ".join(f"{p} ({on_disk[p]} bytes, manifest {rest[p]})"
+                                            for p in differ[:_MAX_EXAMPLES]))
 
     def _integrity_check(self, path: str) -> dict[str, Any] | None:
         out: dict[str, Any] = {}

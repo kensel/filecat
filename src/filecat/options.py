@@ -46,7 +46,7 @@ class ScanOptions:
     keep_dropped: int = 90              # days a vanished file's record stays in the dropped store
     aliases: dict[str, str] = field(default_factory=dict)  # read PATH, record ROOT (aliases.py)
     measure_backups: bool = False       # read backup data files (chunks, volumes) like any other
-    verify_backups: bool = False        # read backup data and check it against its manifest's checksums
+    verify_backups: int = 0             # --verify-backups[=N]: 0 nothing, 1 rolled-up totals against the manifest (docs/rollups.md 4.5)
     measure_databases: bool = False     # read database data files that are quiet and big enough (dbfiles/)
     exclude: list[str] = field(default_factory=list)  # folders/files not walked (walker.excluded)
     check_only: bool = False            # preflight (open each root, account) and stop

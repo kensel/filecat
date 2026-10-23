@@ -794,11 +794,12 @@ for no information the sum does not hold. Nothing rolls up until a type is
 
 What is lost in rollup mode: the per-file checks of `uses_listing` formats
 (Hyper Backup's "every file Guard lists is in the listing with Guard's size").
-`summarize()` is passed `rollup_totals` (the bytes and file count of each
-rolled child) and `listing=None`. At verify level 0 (default) nothing is
+`summarize()` is passed `rollup` (the rolled folders' names and the bytes and
+file count of the rollup; stage B, see the notes in section 9) and Hyper Backup
+no longer lists the pool. At verify level 0 (default) nothing is
 compared (`probe.backup.checked = "none"`); at level 1 Hyper Backup checks
 totals and file count (Guard's against the rollup's) and sets `checked =
-"totals"` instead of `"files"`; the `problems` text says so. The per-file check
+"totals"`; the `problems` text says so. The per-file check
 is level 2 (4.5, v0.2.x); until then `--measure-backups` scans that store per
 file. Veeam, ABB and the others do not use the pool listing in the roll-up
 set.
@@ -1363,6 +1364,78 @@ privacy test; (6) `rollups list|suggest|redacted`.
   (summary, roots, browse filters, `subtree`, treemap tile and pin diff,
   `dupes` line, the SQL and in-memory backends in `test_backend_contract.py`).
 - Later: `StoreFS` (manifests through the agent, section 4.3).
+
+**Stage B is implemented.** Where it differs from the list above:
+
+- *Where the code is.* The store decision is made in the walker's
+  `_make_frame` after the listing is partitioned, from the folder's entries
+  (`backup.Store.rollup_children(entries)` and `Store.tag` instead of a
+  method on names); `rollup_children` is read from `store_formats.json` and
+  `tests/test_store_formats.py` checks it against the code. A store rollup
+  is a `rollup.Group` with `.store` set, summed with `rollup.sum_tree` on an
+  SMB or local scan and with `AgentSource.sum_subtree` (progress, deadline,
+  cancel) through an agent. A real child named `[BACKUP]` and a `[BACKUP]`
+  from a rule or marker in the same folder are folded into the store's group.
+  A store's folder is matched against `[[rollups.backup_store]]` paths as
+  recorded, as read, and (agent) in the agent's POSIX form, ignoring case.
+  Names rolled up by a store are not "purged" (no redaction cleanup, no
+  treemap deletion): they are not secret; the rows are deleted, not dropped.
+  The read-ahead lister does not list a store's bulk folders.
+- *`summarize(..., rollup=, level=)`.* Instead of `rollup_totals=`; a format
+  opts in with `uses_rollup`. `rollup` is `{"children", "files", "bytes",
+  "partial"}`; `listing` is still passed (the files outside the rolled
+  folders are compared with it at level 1). `probe.backup.checked` is set on a
+  rolled backup store only (`"none"` or `"totals"`); a store that is listed per
+  file has no `checked`, and a database folder never has one.
+- *Hyper Backup, level 1.* Guard's bytes under `Pool/` must equal the
+  pool's; the file count may be higher (files Guard does not list, such as
+  `.lock`) and is noted in `guard.rollup.unlisted_files`, not reported as a
+  problem; fewer is a problem. Files outside `Pool/` are compared with the
+  listing as before (`guard.missing`, `guard.size_mismatch`). A partial sum
+  (read errors) is not compared and says so.
+- *`--verify-backups`.* `=0|1|2|3` or bare (rewritten to `=1` before argparse
+  sees it, so it cannot swallow the root). The refusal names `--measure-backups`.
+  Veeam's and Google Workspace's own metadata reads stay on the flag from
+  level 1 (they are not the per-file comparison the design moves to level 2);
+  Hyper Backup's whole-target CRC32 read is `verify_level = 2`, which no CLI
+  level reaches in v0.2.0.
+- *Fingerprint.* A format lists the manifest files `summarize()` reads
+  (`manifests`: Hyper Backup, ABB); the fingerprint is the SHA-256 of the store
+  folder's mtime, the name, size and mtime of every entry in it (the rolled
+  folders included), and those files' size and mtime (an agent: `measure` with
+  `hash: "none"`). Folder mtimes are `lstat`ed, not taken from the listing
+  (NTFS shows them late). A format without `manifests`, and every database,
+  is summed every scan. The stored rollup is carried only when it is complete,
+  made under the same rule-set id, and `matched` is unchanged.
+- *Reporting.* `rollup_bytes` / `rollup_files` are added to `/api/subtree`
+  rows by `browse.with_rollups` in `serve`, not inside each backend's
+  `subtree`; a folder holding only rollups appears. `/api/record` of a store
+  rollup carries `store_record` (the store's `probe.backup` / `database` /
+  `store_note`). Clicking a rollup tile opens its record (the inspector card)
+  instead of zooming. `summary` prints "-- Rollups --" before the totals and a
+  "recorded files ...; rollups ...; together ..." line; `roots` adds a
+  "rollups" line; `show` prints a one-line summary to stderr; `dupes` prints
+  "not examined" to stderr and, with `--json`, a final `{"rollups_not_examined":
+  ...}` object.
+- *`rollups migrate`* is in `rollup_migrate.py`. It takes `--tags`, `--root`,
+  `--dry-run`, `--batch`, `--checkpoint`, `--progress-interval`, `--rollup
+  TYPE=MODE`. The plan finds rule targets (one pass over the root's records
+  through the same matcher a scan uses, so user rules, the sticky store and
+  automatic built-ins all count) and store targets from the stored
+  `probe.backup` / `probe.database` / `probe.store_note`. The rollup is written
+  with `migrated: true`, `via: "python"`, no `fp` and no `allocated_size`
+  unless every row had one; a store whose rows include one that was read (a
+  hash) is skipped, as is a target that already has a rollup a scan made; a
+  rerun that finds more children than the rollup holds also skips it. Phase 2
+  deletes from the front of the sorted rows (deleting shifts the next page to
+  the start) and removes each child's own record last, so a rerun still finds
+  it. The checkpoint reports where a run stopped; the catalog is what a rerun
+  trusts. Phase 3 runs `redaction.cleanup` for `[REDACTED]` targets (and
+  registers their sticky entries first), prunes samples and member sets for
+  the others, drops resume markers beneath the folded paths, rebuilds the
+  root's aggregates and, for `[REDACTED]`, scrubs. It also fixes the parent
+  folder's `child_count` and `rollup_tags`. Nothing is migrated through an
+  agent; it works on the catalog.
 
 ## 10. Open questions
 

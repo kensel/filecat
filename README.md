@@ -250,9 +250,12 @@ with a failed status, every file in the target's own `Guard` manifest
 that is missing or of another size (checked against the scan's listing, so
 it costs no extra reads), and errors in the last integrity check's log;
 the summary has the task, source NAS and folders, each version's size and
-file counts, and source vs target size. `scan --verify-backups` also reads
-every file Guard lists and compares its CRC32, which reads the whole
-target. What is known of the format itself, enough to build a reader, is in
+file counts, and source vs target size. With the target's `Pool/` rolled up
+into one `[BACKUP]` record (`--rollup backup=automatic`, see
+[docs/rollups.md](docs/rollups.md)) `scan --verify-backups` compares the
+pool's total bytes and file count with Guard's (`probe.backup.checked` is
+`totals`); Guard's per-file CRC32 read of the whole target is verify level 2,
+not in v0.2.0. What is known of the format itself, enough to build a reader, is in
 [docs/formats/synology-hyperbackup.md](docs/formats/synology-hyperbackup.md).
 For Veeam it covers every backup file the job's `.vbm` lists that is
 missing or of another size, restore points Veeam marked corrupt (and how

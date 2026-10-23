@@ -29,7 +29,7 @@ def test_catalog_entries_match_the_code():
         store = backup.Store(fmt, "")
         assert entry["summary_key"] == store.probe_key, name
         assert entry["data_tag"] == store.data_key, name
-        for key in ("name", "detection", "listed_only", "measured_normally", "actions", "notes"):
+        for key in ("name", "detection", "listed_only", "measured_normally", "actions", "notes", "rollup_children"):
             assert key in entry, (name, key)
         default = "virtual" if store.virtual else "list"
         assert entry["actions"]["default"] == default, name
@@ -78,3 +78,42 @@ def test_identified_only_archives_use_freedesktop_types():
         known = {m.get("type") for m in ET.parse(f).getroot()}
     for entry in _raw()["archives_identified_only"]:
         assert entry["mime"] in known, entry["id"]
+
+
+def test_rollup_children_are_the_folders_the_code_lists_only():
+    """The bulk folders of a store (docs/rollups.md section 4.1) are exactly
+    folders whose files the format records from the listing; only folders, and
+    only formats with a bulk pool have any."""
+    by = {n: e["rollup_children"] for n, e in dbfiles.catalog().items()}
+    assert by["synology-hyperbackup"] == ["Pool"] and by["synology-abb"] == ["@data"]
+    assert by["postgres"] == ["base", "pg_wal", "pg_xact", "pg_multixact", "global"]
+    assert by["mysql"] == ["*"] and by["mongodb"] == ["journal", "diagnostic.data", "_tmp"]
+    for name in ("mssql", "veeam", "duplicity", "windows-backup", "windows-image-backup", "synology-abg",
+                 "thunderbird-ietng", "synology-abb-view"):
+        assert by[name] == [], name
+    for name, (category, fmt) in _code_formats().items():
+        store = backup.Store(fmt, "")
+        assert list(store.rollup_patterns) == by[name], name
+        for child in by[name]:
+            if "*" not in child:
+                assert fmt.opaque(f"{child}/file"), (name, child)
+
+
+def test_store_children_are_folders_only_and_match_by_pattern():
+    class Entry:
+        def __init__(self, name, is_dir):
+            self.name, self._dir = name, is_dir
+
+        def is_dir(self, follow_symlinks=True):
+            return self._dir
+
+        def is_symlink(self):
+            return False
+
+    mysql = backup.Store(dbfiles.engine("mysql"), "")
+    names = [e.name for e in mysql.rollup_children(
+        [Entry("sales", True), Entry("ibdata1", False), Entry("#innodb_redo", True), Entry("mysql", True)])]
+    assert names == ["sales", "#innodb_redo", "mysql"]
+    hb = backup.Store(next(f for f in backup.formats() if f.name == "synology-hyperbackup"), "")
+    assert [e.name for e in hb.rollup_children([Entry("Pool", True), Entry("Config", True), Entry("Pool", False)])]         == ["Pool"]
+    assert hb.tag == "[BACKUP]" and mysql.tag == "[DATABASE]"

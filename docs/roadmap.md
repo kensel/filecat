@@ -173,9 +173,11 @@ server keeps store detection, manifest verification, probing and Ollama.
     `fsource`/`agent_client`, the records and the readers that must skip
     them, the privacy test, the extended fake agent, and
     `filecat rollups rules|list|suggest|redacted list|release|approve`.
-  - [ ] Python stage B: backup and database store rollups, verify levels 0
-    and 1 (`--verify-backups[=N]`), `filecat rollups migrate`, summary,
-    roots and treemap reporting, the web tiles and inspector card.
+  - [x] Python stage B: backup and database store rollups (local, SMB and
+    agent, with the manifest fingerprint and `store_resum`), verify levels 0
+    and 1 (`--verify-backups[=N]`, 2 and 3 refused), `filecat rollups
+    migrate`, the `summary`, `roots`, `show` and `dupes` reporting, the
+    treemap tiles and pins, and the web inspector card.
   - [ ] Manifests of backup and database stores read through the agent
     (`StoreFS`), replacing `probe.store_note`.
   - [ ] Rust agent: rules matcher with the shared vectors, markers, the

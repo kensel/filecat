@@ -31,6 +31,7 @@ Restore file backups, WindowsImageBackup), duplicity.py.
 """
 from __future__ import annotations
 
+import fnmatch
 from dataclasses import dataclass
 from typing import Any, Callable, Protocol
 
@@ -56,11 +57,19 @@ class Format(Protocol):
     #
     # A format may set `verifies = True`: summarize() then also takes
     # `verify` (scan --verify-backups), asking it to read the data and check
-    # it against the manifest's checksums instead of sizes alone.
+    # it against the manifest's checksums instead of sizes alone. The walker
+    # passes it when the scan's level (--verify-backups=N) reaches the format's
+    # `verify_level` (default 1; Hyper Backup's whole-target CRC32 read is 2).
     #
     # A format may set `virtual = True`: its folder shows data that lives
     # elsewhere (ABB's ActiveBackupData), so the walker records the folder
     # and its summary but does not descend into it.
+    #
+    # A format may set `manifests`, the files (inner paths) summarize() reads:
+    # their size and mtime are part of a rolled-up store's fingerprint
+    # (docs/rollups.md section 7); without it the store is always re-summed.
+    # `uses_rollup = True`: summarize() also takes `rollup` and `level` (see
+    # summarize() below) when the store's bulk folders are rolled up.
     #
     # Database data folders (dbfiles/) use the same hooks and also set
     # `probe_key` (the folder's summary key, default "backup"), `data_key`
@@ -85,6 +94,35 @@ class Store:
     @property
     def data_key(self) -> str:
         return getattr(self.format, "data_key", "backup_data")
+
+    @property
+    def tag(self) -> str:
+        """The tag the store's bulk folders roll up under."""
+        return "[DATABASE]" if self.probe_key == "database" else "[BACKUP]"
+
+    @property
+    def rollup_patterns(self) -> tuple[str, ...]:
+        """`rollup_children` of data/store_formats.json: names or `*` wildcards
+        of the store root's immediate folders that are bulk data."""
+        from ..dbfiles import catalog
+        return tuple(catalog().get(self.format.name, {}).get("rollup_children") or ())
+
+    def rollup_children(self, entries: Any) -> list[Any]:
+        """The folders among `entries` (directory entries of the store root)
+        that a rollup replaces. Files are never rolled: top-level data files
+        keep their listed-only rows."""
+        patterns = self.rollup_patterns
+        if not patterns:
+            return []
+        out = []
+        for e in entries:
+            if any(fnmatch.fnmatchcase(e.name, pat) for pat in patterns):
+                try:
+                    if e.is_dir(follow_symlinks=False) and not e.is_symlink():
+                        out.append(e)
+                except OSError:
+                    pass
+        return out
 
     def measured(self, st: Any, options: Any) -> bool:
         """Is this data file read like any other instead of listed only?"""
@@ -111,16 +149,28 @@ def detect(rel_path: str, dir_name: str, names: set[str]) -> Store | None:
 
 
 def summarize(store: Store, path: str, names: set[str],
-              listing: Callable[[], dict[str, int]] | None = None, verify: bool = False) -> dict[str, Any]:
+              listing: Callable[[], dict[str, int]] | None = None, verify: bool = False,
+              rollup: dict[str, Any] | None = None, level: int = 0) -> dict[str, Any]:
+    """probe.backup / probe.database of a store. With `rollup` (the store's
+    bulk folders are a rollup: {"children": [names], "files", "bytes",
+    "partial", "complete"}) the walk's listing does not hold them: a format
+    that checks against the listing (`uses_rollup`) compares the rollup's
+    totals instead, at verify `level` 1. A rolled backup store's
+    `checked` says what was compared: "none" (level 0, or a format with
+    nothing to compare against) or "totals"."""
     kwargs: dict[str, Any] = {}
     if getattr(store.format, "uses_listing", False):
         kwargs["listing"] = listing
     if verify and getattr(store.format, "verifies", False):
         kwargs["verify"] = True
+    if rollup is not None and getattr(store.format, "uses_rollup", False):
+        kwargs["rollup"], kwargs["level"] = rollup, level
     out = store.format.summarize(path, names, **kwargs)
     out.setdefault("format", store.format.name)
     out.setdefault("problems", [])
     if store.probe_key == "backup":
         out.setdefault("copy_keys", [])
         out.setdefault("machine_keys", [])
+        if rollup is not None:
+            out.setdefault("checked", "none")
     return out

@@ -72,6 +72,7 @@ def _json_field(text: str | None) -> Any:
 
 class _ActiveBackup:
     name = "synology-abb"
+    manifests = ("storage_info.json", "storage.cache", "@data/repo_size", "@data/file_map.db")
 
     def matches(self, dir_name: str, names: set[str]) -> bool:
         return dir_name == "@ActiveBackup" and "@data" in names and "storage_info.json" in names

@@ -846,13 +846,14 @@ class Group:
     """The children of one folder that roll up into one record: the
     entries (names, in memory only), how they were matched, and for an agent
     scan the rollup entry the agent made."""
-    __slots__ = ("tag", "rule", "private", "members", "agent", "matched")
+    __slots__ = ("tag", "rule", "private", "members", "agent", "matched", "store")
 
     def __init__(self, tag: str, rule: str, private: bool) -> None:
         self.tag, self.rule, self.private = tag, rule, private
         self.members: list[Any] = []            # entries (os.DirEntry) or (path, is_dir)
         self.agent: dict[str, Any] | None = None
         self.matched = 0
+        self.store: Any = None                  # the backup.Store whose bulk folders these are
 
     def add(self, member: Any) -> None:
         self.members.append(member)
@@ -922,6 +923,26 @@ class Totals:
             self.hardlink_names = (self.hardlink_names or 0) + other.hardlink_names
         self.complete = self.complete and other.complete
 
+    @classmethod
+    def from_summary(cls, s: Any) -> "Totals":
+        """The totals of an agent's `sum_subtree` answer (agent_client.SubtreeSummary)."""
+        return cls(total_files=s.total_files, total_dirs=s.total_dirs, size=s.total_size,
+                   allocated=s.total_allocated_size, newest=s.newest_mtime_ns, oldest=s.oldest_mtime_ns,
+                   errors=s.errors, error_codes=dict(s.error_codes), vanished=s.vanished,
+                   skipped_mounts=s.skipped_mounts, hardlink_names=s.hardlink_names or None,
+                   complete=s.complete)
+
+    @classmethod
+    def from_document(cls, doc: dict[str, Any]) -> "Totals":
+        """The totals a stored rollup record holds (a carried-forward store rollup)."""
+        info = (doc.get("probe") or {}).get("rollup") or {}
+        return cls(matched=info.get("matched", 0), total_files=info.get("total_files", 0),
+                   total_dirs=info.get("total_dirs", 0), size=doc.get("size") or 0,
+                   allocated=doc.get("allocated_size"), newest=info.get("newest_mtime_ns", 0),
+                   oldest=info.get("oldest_mtime_ns"), errors=info.get("errors", 0),
+                   error_codes=dict(info.get("error_codes") or {}), vanished=info.get("vanished", 0),
+                   skipped_mounts=info.get("skipped_mounts", 0), hardlink_names=info.get("hardlink_names"))
+
     def to_probe(self, tag: str, rule: str, via: str, policy: str,
                  now: str | None = None) -> dict[str, Any]:
         out: dict[str, Any] = {
@@ -951,15 +972,28 @@ def rollup_path(parent_rel: str, tag: str) -> str:
     return f"{parent_rel}/{tag}" if parent_rel else tag
 
 
+def store_tag(store: Any) -> str:
+    """The tag a store's bulk folders roll up under."""
+    return "[DATABASE]" if getattr(store, "probe_key", "backup") == "database" else "[BACKUP]"
+
+
 def rollup_document(root: str, parent_rel: str, tag: str, totals: Totals, *, rule: str, via: str,
-                    policy: str) -> dict[str, Any]:
+                    policy: str, store: dict[str, Any] | None = None, fp: str | None = None,
+                    migrated: bool = False) -> dict[str, Any]:
     """The record of a rollup: `<parent>/[TAG]`, kind "rollup", the totals,
-    and no name of anything inside."""
+    and no name of anything inside. A store's rollup also says which store
+    (`rollup.store`) and carries its fingerprint (`rollup.fp`)."""
     doc = record.new_document(root, rollup_path(parent_rel, tag), kind="rollup", size=totals.size,
                               mtime_ns=totals.newest, name=tag)
     if totals.allocated is not None:
         doc["allocated_size"] = totals.allocated
     doc["probe"] = {"rollup": totals.to_probe(tag, rule, via, policy)}
+    if store is not None:
+        doc["probe"]["rollup"]["store"] = store
+    if fp is not None:
+        doc["probe"]["rollup"]["fp"] = fp
+    if migrated:
+        doc["probe"]["rollup"]["migrated"] = True
     message = totals.error_message()
     if message:
         record.add_error(doc, "rollup", message)
