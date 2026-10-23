@@ -153,22 +153,34 @@ server keeps store detection, manifest verification, probing and Ollama.
 - Rollup groups (note 01): `[REDACTED]`, `[CACHE]`, `[SYNOLOGY]`,
   `[BACKUP]` synthetic `kind: "rollup"` records that never carry the names
   beneath them; `enrich` never opens them.
-  - [x] Design: [rollups.md](rollups.md). Record model and readers, one
-    ordered rule list (`[[rollups.rule]]`, match path `server/share/rel`,
-    `**`, ASCII case folding, first match, `keep`) that means the same through
-    an agent and over SMB, `[REDACTED]` guarantees on every output channel and
-    the purge of already-cataloged names, store rollups (`[BACKUP]`,
-    `[DATABASE]`) with a migration command, defaults and the old default skips
-    as `[WINDOWS]`, reporting, re-sum and fingerprint change detection,
-    progress/deadline/cancel for long sums, the agent requirements (also in
+  - [x] Design: [rollups.md](rollups.md). Everything opt-in with a mode per
+    type (`automatic`, `manual`, `disabled`; default `manual`, `[REDACTED]`
+    always on), suggestions for built-in rules that are not automatic, record
+    model and readers, one ordered rule list (`[[rollups.rule]]`; agent,
+    share and local path forms converted with `ShareMap`; case-sensitive below
+    the share; `**`; first match; `keep`) that means the same through an agent
+    and over SMB, marker files (`.filecat-redacted`, ...) found when the
+    parent is listed, sticky `[REDACTED]` kept as keyed hashes and `(dev, ino)`
+    with a two-step release, `[REDACTED]` guarantees on every output channel
+    and the purge of already-cataloged names, store rollups (`[BACKUP]`,
+    `[DATABASE]`) with verify levels and a migration command, the old default
+    skips as `[WINDOWS]` only under `windows = "automatic"`, reporting,
+    re-sum and fingerprint change detection, progress/deadline/cancel for long
+    sums, the agent requirements (also in
     [agent-protocol.md](agent-protocol.md)), the Python work plan.
-  - [ ] Python side: `rollup.py` (matcher, `sum_tree`), walker/fsource/agent
-    client, backends and readers, `filecat rollups migrate`, serve and the
-    web inspector card, the privacy test, the extended fake agent.
+  - [ ] Python stage A: `rollup.py` (matcher, path forms, `sum_tree`), modes
+    and config, markers, `redaction.py` and the `redactions` store, walker,
+    `fsource`/`agent_client`, the records and the readers that must skip
+    them, the privacy test, the extended fake agent, and
+    `filecat rollups rules|list|suggest|redacted list|release|approve`.
+  - [ ] Python stage B: backup and database store rollups, verify levels 0
+    and 1 (`--verify-backups[=N]`), `filecat rollups migrate`, summary,
+    roots and treemap reporting, the web tiles and inspector card.
   - [ ] Manifests of backup and database stores read through the agent
     (`StoreFS`), replacing `probe.store_note`.
-  - [ ] Rust agent: rules matcher with the shared vectors, rollups in
-    `list_dir`, `sum_subtree` options, progress/deadline/`cancel`.
+  - [ ] Rust agent: rules matcher with the shared vectors, markers, the
+    `redaction` HMAC and `folded`, rollups and `suggest` in `list_dir`,
+    `sum_subtree` options, progress/deadline/`cancel`.
 - Synology storage topology (note 03): `iscsi_lun.conf` and `@Repository`
   parsing, SAN LUNs, VMM disks and image-library templates, physical usage
   from `st_blocks` (never the 512 GiB `ROD` size).
@@ -209,3 +221,21 @@ server keeps store detection, manifest verification, probing and Ollama.
   version from Office and OpenDocument files (the `metadata` parts listed
   in `compound_formats.toml`), EXIF/XMP from images, and tags from audio
   and video.
+
+## v0.2.x: rollup follow-ups
+
+After the v0.2.0 rollups (stages A and B of [rollups.md](rollups.md)):
+
+- Web viewer: an **audit screen** with the counts of `filecat rollups list`
+  (by tag and parent folder, `[REDACTED]` as counts only).
+- Web viewer: **suggestions**, the folders a built-in rule would match for a
+  type that is not automatic, with "add this rollup" writing the rule.
+- Web viewer: **redaction approval**, the screen behind
+  `filecat rollups redacted release|approve`, showing what becomes visible.
+- Backup verify **level 2** (every file the manifest names exists with its
+  size, through a new agent `check_files` command that returns counts and the
+  few failing manifest ids, no per-file rows) and **level 3** (hashes as the
+  backup application checks them, per-format recipes).
+- A per-store level: `[[rollups.backup_store]] path = '...' verify = 2`.
+- Optional rollup measures: size by extension, age buckets, largest matched
+  children (never for private rules).

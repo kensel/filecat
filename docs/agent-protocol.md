@@ -140,56 +140,83 @@ start without one.
 ```json
 {"cmd": "configure_policy", "policy": {
     "exclude": ["/volume1/@docker", "@eaDir"],
-    "bases": [{"base": "/volume1/project", "mpath": "nas-main/project"}],
     "rules": [
-      {"id": 0, "tag": "[REDACTED]", "match": ["nas-main/project/private-project"],
-       "type": "any", "case": "insensitive", "private": true},
-      {"id": 1, "match": ["**/keep/node_modules"], "keep": true, "type": "any", "case": "insensitive"},
+      {"id": 0, "tag": "[REDACTED]", "match": ["/volume1/project/private-project"],
+       "type": "any", "case": "sensitive", "private": true},
+      {"id": 1, "match": ["**/keep/node_modules"], "keep": true, "type": "any", "case": "sensitive"},
       {"id": 2, "tag": "[CACHE]", "match": ["node_modules", "**/AppData/Local/Temp"],
-       "type": "dir", "case": "insensitive"}]}}
-{"ok": true, "policy_id": "a1b2c3d4e5f6", "rules": 3, "bases": 1}
+       "type": "dir", "case": "insensitive"},
+      {"id": 3, "tag": "[SYNOLOGY]", "match": ["@eaDir"], "type": "dir",
+       "case": "sensitive", "suggest": true}],
+    "markers": [{"name": ".filecat-redacted", "tag": "[REDACTED]", "private": true},
+                {"name": ".filecat-cache", "tag": "[CACHE]"}],
+    "redaction": {"key": "9f2c...64 hex digits...", "roots": [
+      {"root": "r_01hf", "base": "/volume1/homes",
+       "hashes": ["a3c1e0d94b7f5a2e60c8d1b9f4e37a02"], "inodes": [[2049, 913442]]}]}}}
+{"ok": true, "policy_id": "a1b2c3d4e5f6", "rules": 4, "markers": 2}
 ```
 
 Replaces the connection's policy as a whole (all fields optional, default
 empty); a new connection starts with an empty policy. It applies to
 `list_dir` (all fields) and to `sum_subtree` (`exclude` only); `measure` and
-`read_range` act on the path they are given.
+`read_range` act on the path they are given. The client sends rules already
+converted to this host's paths (it knows the share mapping, `ShareMap`);
+the agent matches the **literal host path** of each child and knows nothing
+of shares. Design: [rollups.md](rollups.md).
 
 - `exclude`: absolute paths or bare names, compared for equality with each
   child's path and name. Excluded entries are neither listed nor counted.
   They are not globs. Applied before the rules.
-- `bases`: how the agent finds a child's match path. For a path at or
-  beneath `base` (an absolute path, as in a request), the match path of a child
-  is `mpath` (the client's catalog-side spelling of that root: `server/share`,
-  `C:` and so on, section 2 of rollups.md) followed by the child's path
-  relative to `base`, `/`-separated. The longest base wins. A path under no
-  base has no rules applied (the client sends one base per root it scans).
 - `rules`: an ordered array, tried in order for each child, first match wins.
-  A rule has `match` (patterns, already normalised by the client), `type`
-  (`any`, `dir`, `file`; a link or special counts as `file`), `case`
-  (`insensitive`, ASCII only, the default; `sensitive`), `tag` (a name of the
-  form `[A-Z][A-Z0-9_-]{0,31}` in brackets; absent when `keep`), `keep` (a
-  matching child is listed normally and no later rule is tried), `private`
-  (the tag's contents must stay secret, see below) and `id` (the rule's index,
-  for the client's logs).
-- Patterns: no `/` after normalisation means a **name pattern**, matched
-  against the child's name at any depth; otherwise a **path pattern**, matched
-  against the whole match path, anchored at both ends. `?` is one character
+  A rule has `match` (patterns, already normalised and in agent form),
+  `type` (`any`, `dir`, `file`; a link or special counts as `file`), `case`
+  (`sensitive`, the default; `insensitive` folds ASCII letters in the whole
+  pattern), `tag` (a name of the form `[A-Z][A-Z0-9_-]{0,31}` in brackets;
+  absent when `keep`), `keep` (a matching child is listed normally and no
+  later rule is tried), `private` (the tag's contents must stay secret, see
+  below), `suggest` (count the matches, fold nothing: the `list_dir` reply
+  reports them) and `id` (the rule's index, for the client's logs).
+- Patterns: no separator means a **name pattern**, matched against the
+  child's name at any depth; a pattern starting with `**/` is a **suffix
+  pattern**, matched against the tail of the child's path; otherwise a **path
+  pattern**, matched against the child's whole absolute path
+  (`/volume1/homes/jdoe/vault`), anchored at both ends. `?` is one character
   other than `/`, `*` any run of characters other than `/`, `**` as a whole
   component zero or more components (`a/**/b` matches `a/b`). `x/**` matches
-  what is inside `x`, not `x`. No character classes, no escapes. ASCII
-  letters compare case-insensitively unless the rule says `sensitive`; other
-  characters are compared exactly. The conformance vectors are
+  what is inside `x`, not `x`. No character classes, no escapes. Case-
+  sensitive unless the rule says `insensitive`; non-ASCII characters are always
+  compared exactly. The conformance vectors are
   `tests/data/rollup_match_vectors.json`.
+- `markers`: file names to look for **inside each child directory** the agent
+  is about to return. For every child directory and every marker name the
+  agent `lstat`s `<child>/<name>` before it reads anything else of the child;
+  a child that has one is not returned and not entered, it is folded into the
+  marker's tag exactly as a rule match would be (a marker is a file of the
+  folded folder, counted inside). Cost: one `lstat` per marker name per
+  subdirectory. The agent has no built-in marker names.
+- `redaction`: sticky `[REDACTED]` folders. `key` is a 32-byte HMAC key in hex
+  (kept in memory, never logged, only sent over the authenticated TLS
+  channel). Per `roots` entry: `root` (the catalog's root id), `base` (the
+  root's absolute path on this host), `hashes` and `inodes`. For each child
+  **directory** at or beneath `base`, the agent computes
+  `HMAC-SHA256(key, "filecat-redact-v1 " + root + " " + rel)` where `rel`
+  is the child's path relative to `base`, `/`-separated, no leading or trailing
+  `/`, in the catalog's name form (a byte that is not valid UTF-8 is the
+  character U+F700 + byte, UTF-8 encoded), no case folding and no Unicode
+  normalisation; hex of the first 16 bytes. A child whose hash is in `hashes`,
+  or whose `(dev, ino)` is in `inodes`, is redacted: folded into `[REDACTED]`
+  like a rule match, whatever the rules and markers say. Limits: 10,000
+  hashes and inodes per root. Vectors: the `redaction` table of the same
+  file.
 - `private`: the agent adds nothing to the rollup beyond counters, writes no
   log line, and puts no path or OS error text in any reply, for matches of that
-  rule.
+  rule, of its markers and of the redaction sets.
 - The reply carries `policy_id` (the first 12 hex digits of the SHA-256 of
   the canonical JSON of `rules`: `{"tag","match","type","case","keep",
-  "private"}` per rule in that key order, compact separators, UTF-8; the
-  client computes the same and treats a difference as a failure to scan that
-  root). Limits: 1024 rules, 64 KiB of patterns in all, 4096 bytes in a
-  pattern; more is `bad_request`.
+  "private","suggest"}` per rule in that key order, then the marker names,
+  compact separators, UTF-8; the client computes the same and treats a
+  difference as a failure to scan that root). Limits: 1024 rules, 64 KiB of
+  patterns in all, 4096 bytes in a pattern; more is `bad_request`.
 
 ### `list_dir`
 
@@ -205,7 +232,9 @@ the client needs no second call for a root's record. Entries are sorted by
 name bytes; rollup entries are interleaved by their tag. The reply carries
 `policy_id` when the connection has rules. A `list_dir` that has to sum
 rollups can take minutes: it accepts `progress_ms`, `deadline_ms` and `id`
-([below](#progress-deadline-and-cancellation)).
+([below](#progress-deadline-and-cancellation)). When `suggest` rules matched,
+the reply also carries `suggest: [{"tag": "[CACHE]", "matched": 3}]` for the
+directory (counts, never names).
 
 An entry:
 
@@ -251,6 +280,7 @@ does, and counts in `total_dirs`). **Changed**: new fields, marked below.
 | `newest_mtime_ns`, `oldest_mtime_ns` | over non-directory entries; both left out when `total_files` is 0 (**new**: `oldest`) |
 | `errors`, `error_codes` | entries or directories that could not be read, and the count per protocol `code` (`permission_denied`, `io`). Codes only: no name, path or message (**new**: `error_codes`) |
 | `vanished` | entries that disappeared during the sum; not errors (**new**) |
+| `folded` | `[REDACTED]` entries only: `[{"h": hash, "dev": n, "ino": n}]` for each directory folded in (at most 1000; `folded_truncated: true` past that), so the client can register sticky entries and follow a rename without ever receiving a name (**new**) |
 | `skipped_mounts` | directories on another `dev` than the summed child's, not entered or counted (**new**) |
 | `hardlink_names` | names beyond the first of a hard-linked file, whose size was not added again (**new**; may be left out) |
 | `hardlinks_approx` | present and true when the hard-link set hit its limit (2,000,000 entries) and later links were counted twice (**new**) |
@@ -524,10 +554,17 @@ What the Rust side changes to match this page:
    matched folder. Unreadable directories add to `errors` instead of being
    skipped silently. **Changed by the rollup design** ([rollups.md](rollups.md)):
    - `rollup_groups` (tag to patterns) is replaced by an ordered `rules`
-     array with `type`, `case`, `keep`, `private`, plus `bases`; patterns are
-     matched against a match path the client supplies (`server/share/rel`),
-     with `**` and without `*` crossing `/` (the draft's `*` crossed `/`).
-     `configure_policy` answers with `policy_id`.
+     array with `type`, `case`, `keep`, `private`, `suggest`. Patterns are
+     matched against the **literal host path** (name, suffix and path
+     patterns), converted by the client from the share form the user may have
+     written; `*` does not cross `/` (the draft's did), `**` does; matching is
+     case-sensitive unless a rule says otherwise. The earlier `bases` idea
+     (a client-built match path) is not used. `configure_policy` answers with
+     `policy_id`.
+   - New: `markers` (look inside each child directory for the named files
+     before returning it), `redaction` (HMAC key and per-root `base`,
+     `hashes`, `inodes`: sticky `[REDACTED]` folders; `folded` in the reply),
+     and `suggest` rules with the `suggest` reply field.
    - A rollup reports `oldest_mtime_ns`, `error_codes`, `vanished`,
      `skipped_mounts`, `hardlink_names`, `complete`; a `private` rule gets
      counters only and no logging. A real child named like the tag is folded
