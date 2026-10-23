@@ -29,7 +29,7 @@ from .backends import open_backend
 from .enrich import parse_path_map
 from .hashing import _sha256_full
 from .options import MiB
-from .record import join_root
+from .record import is_file_kind, join_root
 from .summary import _human_bytes
 
 ALIGN = 4096        # interior windows start on a 4 KiB boundary
@@ -76,7 +76,7 @@ def find_duplicates(docs: Iterable[dict[str, Any]], local_path: Callable[[str, s
     by_size: dict[int, list[dict[str, Any]]] = defaultdict(list)
     for d in docs:
         size = d.get("size")
-        if d.get("kind") != "dir" and isinstance(size, int) and size >= min_size:
+        if is_file_kind(d.get("kind")) and isinstance(size, int) and size >= min_size:
             by_size[size].append(d)
     todo = [d for group in by_size.values() if len(group) > 1
             and (include_backups or not all(_in_backup(x) for x in group)) for d in group]

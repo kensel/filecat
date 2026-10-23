@@ -13,7 +13,9 @@ make that percentage meaningless. Shape returned:
         "total_files": int, "total_bytes": int, "unreadable": int,
     }}}
 
-Only file records are summed (`kind != "dir"`; directories are not added
+Only file records are summed (`kind` not in record.NON_FILE_KINDS: neither
+directories nor rollups, which stand for files the catalog does not list;
+directories are not added
 on top of their children, per spec). Design decisions worth writing down:
 
 * A `link` record (symlink/junction -- never followed, so there is nothing
@@ -41,6 +43,8 @@ it as a SQL function and GROUP BY the same key the Python path uses.
 from __future__ import annotations
 
 from typing import Any, Iterable
+
+from .record import NON_FILE_KINDS
 
 
 def dir_key(rel_path: str, depth: int) -> str:
@@ -97,7 +101,7 @@ def build_aggregates(documents: Iterable[dict[str, Any]], depth: int = 2) -> dic
     per_root: dict[str, dict[str, Any]] = {}
 
     for doc in documents:
-        if doc.get("kind") == "dir":
+        if doc.get("kind") in NON_FILE_KINDS:
             continue
         root = doc.get("root", "")
         state = per_root.setdefault(root, _new_root_state())

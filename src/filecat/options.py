@@ -54,6 +54,10 @@ class ScanOptions:
     agent: str | None = None            # --agent NAME: use that agent for the roots it covers
     no_agent: bool = False              # --no-agent: read every root over SMB, whatever agents are configured
     agent_fallback: bool = False        # --agent-fallback: an unreachable agent's roots are read over SMB
+    rollup_config: Any = None           # rollup.RollupConfig: the [rollups] modes and rules (None: all manual)
+    rollup_workers: int = 4             # threads that sum rolled-up folders
+    rollup_timeout: float | None = None  # seconds one rollup may take on an SMB or local scan
+    new_redaction_key: bool = False     # --new-redaction-key: write a key although sticky entries exist
 
     @classmethod
     def from_args(cls, args: Any) -> "ScanOptions":

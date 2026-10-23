@@ -14,6 +14,14 @@ The agent's certificate is self-signed. The client skips chain and host
 name validation and instead compares the SHA-256 of the DER certificate with
 the fingerprint configured for that agent, before the token is sent.
 
+A policy (`configure_policy`: exclude, rollup rules, marker names, the sticky
+redaction sets) is sent when a connection starts and again after a reconnect.
+When it holds rules or markers the agent must answer with the same
+`policy_id` the client computed (rollup.wire_policy_id), or the two matchers
+read the rules differently and the connection is refused. A request may carry
+`progress_ms`; the agent then sends `{"progress": ...}` lines before the
+response, and the read timeout restarts with each.
+
 `ShareMap` maps the agent's POSIX paths to the UNC paths an SMB scan of the
 same share records, and back, so the two kinds of scan give the same roots
 and rel_paths.
@@ -31,8 +39,9 @@ import ssl
 import threading
 import time
 from dataclasses import dataclass, field
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, Callable
 
+from . import rollup
 from .options import HEAD_BYTES, MiB
 
 if TYPE_CHECKING:
@@ -44,6 +53,9 @@ MAX_READ = 4 * MiB                  # largest `len` the agent accepts in one rea
 CONNECT_TIMEOUT = 30.0
 IO_TIMEOUT = 120.0
 SUBTREE_TIMEOUT = 3600.0            # sum_subtree walks a whole tree
+PROGRESS_MS = 5000                  # asked of list_dir and sum_subtree when the agent has rollups to sum
+BUSY_TRIES = 12                     # a `busy` answer is retried, this often
+BUSY_PAUSE = 2.0
 HASH_POLICIES = ("auto", "full", "none")
 REMOTE_BUFFER = 128 * 1024          # BufferedReader size of open_remote: one round trip per fill
 
@@ -53,8 +65,8 @@ _HEX64 = re.compile(r"[0-9a-f]{64}")
 class AgentError(OSError):
     """The agent answered {"ok": false}, or the connection to it cannot be
     trusted. `code` is the protocol's error code (unauthorized, bad_request,
-    not_found, permission_denied, io) or one the client adds (protocol,
-    fingerprint)."""
+    not_found, permission_denied, io, cancelled, busy) or one the client adds
+    (protocol, fingerprint, policy)."""
 
     def __init__(self, code: str, message: str) -> None:
         super().__init__(message)
@@ -126,6 +138,8 @@ class DirListing:
     mtime_ns: int
     ctime_ns: int
     entries: list[DirEntry]
+    suggest: list[dict[str, Any]] = field(default_factory=list)   # {"tag", "matched"} per suggestion rule
+    policy_id: str | None = None
 
 
 @dataclass(frozen=True)
@@ -147,6 +161,13 @@ class SubtreeSummary:
     total_allocated_size: int
     newest_mtime_ns: int
     errors: int
+    oldest_mtime_ns: int | None = None
+    error_codes: dict[str, int] = field(default_factory=dict)
+    vanished: int = 0
+    skipped_mounts: int = 0
+    hardlink_names: int | None = None
+    complete: bool = True
+    path: str | None = None
 
 
 # --- wire helpers ----------------------------------------------------------
@@ -212,7 +233,8 @@ class AgentClient:
 
     def __init__(self, host: str, port: int, cert_sha256: str, token: str, *,
                  timeout: float = CONNECT_TIMEOUT, io_timeout: float = IO_TIMEOUT,
-                 policy: dict[str, Any] | None = None, name: str | None = None) -> None:
+                 policy: dict[str, Any] | None = None, name: str | None = None,
+                 busy_pause: float = BUSY_PAUSE) -> None:
         self.host = host
         self.port = port
         self.expected_fp = normalize_fingerprint(cert_sha256)
@@ -221,15 +243,16 @@ class AgentClient:
         self.io_timeout = io_timeout
         self.name = name or host
         self.info: Hello | None = None          # from the last connect
+        self.busy_pause = busy_pause
         self._policy = policy
         self._lock = threading.Lock()
         self._sock: ssl.SSLSocket | None = None
         self._rfile: Any = None
 
     @classmethod
-    def from_config(cls, agent: "AgentConfig") -> "AgentClient":
+    def from_config(cls, agent: "AgentConfig", policy: dict[str, Any] | None = None) -> "AgentClient":
         return cls(agent.host, agent.port, agent.cert_sha256, agent.resolved_token(),
-                   timeout=agent.timeout, policy=agent.policy() or None, name=agent.name)
+                   timeout=agent.timeout, policy=policy or agent.policy() or None, name=agent.name)
 
     def __enter__(self) -> "AgentClient":
         return self
@@ -284,24 +307,34 @@ class AgentClient:
             self.info = _hello(self._exchange({"cmd": "hello"}))
             self._exchange({"cmd": "auth", "token": self.token})
             if self._policy:
-                self._exchange({"cmd": "configure_policy", "policy": self._policy})
+                self._check_policy(self._policy,
+                                   self._exchange({"cmd": "configure_policy", "policy": self._policy}))
             sock.settimeout(self.io_timeout)
         except BaseException:
             self._drop()
             sock.close()
             raise
 
-    def _exchange(self, payload: dict[str, Any]) -> dict[str, Any]:
-        """Send one request on the open connection and read its response."""
+    def _exchange(self, payload: dict[str, Any],
+                  on_progress: Callable[[dict[str, Any]], None] | None = None) -> dict[str, Any]:
+        """Send one request on the open connection and read its response.
+        `{"progress": ...}` lines before it are passed to `on_progress`; one
+        nobody asked for is not protocol 1."""
         assert self._sock is not None and self._rfile is not None
         self._sock.sendall(json.dumps(payload, ensure_ascii=True).encode("ascii") + b"\n")
-        line = self._rfile.readline()
-        if not line:
-            raise ConnectionError(f"{self.name}: the agent closed the connection")
-        try:
-            resp = json.loads(line)
-        except ValueError:
-            resp = None
+        while True:
+            line = self._rfile.readline()
+            if not line:
+                raise ConnectionError(f"{self.name}: the agent closed the connection")
+            try:
+                resp = json.loads(line)
+            except ValueError:
+                resp = None
+            if (isinstance(resp, dict) and "ok" not in resp and on_progress is not None
+                    and isinstance(resp.get("progress"), dict)):
+                on_progress(resp["progress"])
+                continue
+            break
         if not isinstance(resp, dict) or "ok" not in resp:
             self._drop()
             raise ProtocolError(f"{self.name}: a reply that is not a protocol-1 response")
@@ -310,7 +343,8 @@ class AgentClient:
                              str(resp.get("error") or "the agent reported an error"))
         return resp
 
-    def _call(self, payload: dict[str, Any], timeout: float | None = None) -> dict[str, Any]:
+    def _call(self, payload: dict[str, Any], timeout: float | None = None,
+              on_progress: Callable[[dict[str, Any]], None] | None = None) -> dict[str, Any]:
         with self._lock:
             for attempt in (0, 1):
                 reused = self._sock is not None
@@ -320,7 +354,7 @@ class AgentClient:
                     if timeout is not None:
                         self._sock.settimeout(timeout)
                     try:
-                        return self._exchange(payload)
+                        return self._exchange(payload, on_progress)
                     finally:
                         if timeout is not None and self._sock is not None:
                             self._sock.settimeout(self.io_timeout)
@@ -340,18 +374,71 @@ class AgentClient:
         return _hello(self._call({"cmd": "hello"}))
 
     def configure_policy(self, exclude: list[str] | tuple[str, ...] = (),
-                         rollup_groups: dict[str, list[str]] | None = None) -> None:
-        """Set this connection's exclude list and rollup groups (replaces any
-        earlier policy). Remembered and sent again after a reconnect."""
-        policy = {"exclude": list(exclude), "rollup_groups": dict(rollup_groups or {})}
-        self._call({"cmd": "configure_policy", "policy": policy})
+                         rules: list[dict[str, Any]] | None = None,
+                         markers: list[dict[str, Any]] | None = None,
+                         redaction: dict[str, Any] | None = None) -> dict[str, Any]:
+        """Set this connection's policy (replaces any earlier one): the exclude
+        list, the rollup rules (already in this host's paths), the marker
+        files to look for and the sticky redaction sets. Remembered and sent
+        again after a reconnect. With rules or markers the agent's `policy_id`
+        must be the one rollup.wire_policy_id gives."""
+        policy: dict[str, Any] = {"exclude": list(exclude)}
+        if rules:
+            policy["rules"] = list(rules)
+        if markers:
+            policy["markers"] = list(markers)
+        if redaction:
+            policy["redaction"] = redaction
+        resp = self._call({"cmd": "configure_policy", "policy": policy})
+        self._check_policy(policy, resp)
         self._policy = policy
+        self._policy_id = resp.get("policy_id")
+        return resp
 
-    def list_dir(self, path: str | bytes) -> DirListing:
-        resp = self._call({"cmd": "list_dir", **path_fields(path)})
+    _policy_id: str | None = None
+
+    def _check_policy(self, policy: dict[str, Any], resp: dict[str, Any]) -> None:
+        if policy.get("rules") or policy.get("markers"):
+            want = rollup.wire_policy_id(policy.get("rules", []),
+                                         [m["name"] for m in policy.get("markers", [])])
+            if resp.get("policy_id") != want:
+                self._drop()
+                raise AgentError("policy", f"{self.name}: the agent reads the rollup rules differently "
+                                           "(policy id differs); not scanning through it")
+            self._policy_id = want
+
+    def _long(self, payload: dict[str, Any], timeout: float | None,
+              on_progress: Callable[[dict[str, Any]], None] | None, progress_ms: int | None
+              ) -> dict[str, Any]:
+        """A request that may take minutes: progress lines keep the read
+        alive, and `busy` is retried after a pause."""
+        if progress_ms:
+            payload = {**payload, "progress_ms": progress_ms}
+        for attempt in range(BUSY_TRIES):
+            try:
+                return self._call(payload, timeout, on_progress)
+            except AgentError as exc:
+                if exc.code != "busy" or attempt == BUSY_TRIES - 1:
+                    raise
+                time.sleep(self.busy_pause)
+        raise AssertionError("unreachable")
+
+    def list_dir(self, path: str | bytes, *, progress_ms: int | None = None,
+                 deadline_ms: int | None = None, request_id: str | None = None,
+                 on_progress: Callable[[dict[str, Any]], None] | None = None) -> DirListing:
+        payload: dict[str, Any] = {"cmd": "list_dir", **path_fields(path)}
+        if deadline_ms:
+            payload["deadline_ms"] = deadline_ms
+        if request_id:
+            payload["id"] = request_id
+        resp = self._long(payload, None, on_progress, progress_ms)
+        pid = resp.get("policy_id")
+        if self._policy_id is not None and pid != self._policy_id:
+            raise AgentError("policy", f"{self.name}: the agent's policy id changed under this connection")
         return DirListing(path=_text(resp, "path") or "", dev=resp.get("dev", 0),
                           mtime_ns=resp.get("mtime_ns", 0), ctime_ns=resp.get("ctime_ns", 0),
-                          entries=[_entry(e) for e in resp.get("entries", [])])
+                          entries=[_entry(e) for e in resp.get("entries", [])],
+                          suggest=list(resp.get("suggest") or []), policy_id=pid)
 
     def measure(self, path: str | bytes, hash: str = "auto", head_bytes: int = HEAD_BYTES,
                 timeout: float | None = None) -> Measurement:
@@ -384,11 +471,44 @@ class AgentClient:
                 break
         return b"".join(parts)
 
-    def sum_subtree(self, path: str | bytes, timeout: float | None = SUBTREE_TIMEOUT) -> SubtreeSummary:
-        resp = self._call({"cmd": "sum_subtree", **path_fields(path)}, timeout)
-        return SubtreeSummary(resp["total_files"], resp["total_dirs"], resp["total_size"],
-                              resp["total_allocated_size"], resp["newest_mtime_ns"],
-                              resp.get("errors", 0))
+    def sum_subtree(self, path: str | bytes, timeout: float | None = SUBTREE_TIMEOUT, *,
+                    one_filesystem: bool = True, exclude: list[str] | tuple[str, ...] = (),
+                    private: bool = False, threads: int | None = None,
+                    progress_ms: int | None = None, deadline_ms: int | None = None,
+                    request_id: str | None = None,
+                    on_progress: Callable[[dict[str, Any]], None] | None = None) -> SubtreeSummary:
+        """The totals of one folder (docs/rollups.md): `timeout` bounds each
+        silent stretch, so with `progress_ms` an hours-long sum needs no huge
+        one. `private` asks for counters only (no path in the reply)."""
+        payload: dict[str, Any] = {"cmd": "sum_subtree", **path_fields(path)}
+        if not one_filesystem:
+            payload["one_filesystem"] = False
+        if exclude:
+            payload["exclude"] = list(exclude)
+        if private:
+            payload["private"] = True
+        if threads:
+            payload["threads"] = threads
+        if deadline_ms:
+            payload["deadline_ms"] = deadline_ms
+        if request_id:
+            payload["id"] = request_id
+        resp = self._long(payload, timeout, on_progress, progress_ms)
+        return SubtreeSummary(
+            resp["total_files"], resp["total_dirs"], resp["total_size"], resp["total_allocated_size"],
+            resp["newest_mtime_ns"], resp.get("errors", 0), resp.get("oldest_mtime_ns"),
+            dict(resp.get("error_codes") or {}), resp.get("vanished", 0), resp.get("skipped_mounts", 0),
+            resp.get("hardlink_names"), resp.get("complete", True), _text(resp, "path"))
+
+    def cancel(self, request_id: str) -> bool:
+        """Stop a running request by its `id`, from a connection of its own
+        (this one is busy waiting for it). True when the agent found it."""
+        other = AgentClient(self.host, self.port, self.expected_fp, self.token,
+                            timeout=self.timeout, io_timeout=self.timeout, name=self.name)
+        try:
+            return bool(other._call({"cmd": "cancel", "id": request_id}).get("found"))
+        finally:
+            other.close()
 
     def storage_topology(self) -> list[dict[str, Any]]:
         return self._call({"cmd": "storage_topology"}).get("volumes", [])

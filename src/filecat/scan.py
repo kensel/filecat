@@ -12,8 +12,8 @@ import sys
 import time
 from typing import Any
 
-from . import aliases, fsource, preflight, record, rootcase, rootinfo
-from .agent_client import Measurement
+from . import aliases, fsource, preflight, record, redaction, rollup, rootcase, rootinfo
+from .agent_client import AgentError, Measurement
 from .backends import open_backend
 from .backends.base import Backend
 from .hashing import hash_file
@@ -111,15 +111,17 @@ class _Progress:
 
         ROOT: N files, N bytes | 18.4 files/s, measuring 3.1 files/s 2.1 MB/s (avg 12.0 files/s)
               | 1203 measured, 242252 unchanged, 9120 data listed, 6800 cloud-only,
-              312 dirs resumed, 40 dropped | last: PATH
+              312 dirs resumed, 40 dropped, 6 rollups (1.2 GB) | last: PATH
 
     Rates are over the time since the previous line; "measured" files are
     new or changed ones that were read, and their bytes are what MB/s
     counts; "data listed" files (backup or database data) and "cloud-only"
     files (data not on the device) were recorded from their directory
     entry without being read; "dropped" records
-    vanished from disk and were moved to the dropped store. Only counters
-    are kept, so this costs nothing per file."""
+    vanished from disk and were moved to the dropped store; a rollup is a
+    group of files and folders counted but not listed (docs/rollups.md), shown
+    by its own path (<folder>\\[TAG]), never by what is inside it. Only
+    counters are kept, so this costs nothing per file."""
 
     def __init__(self, root: str, interval: float, stream: Any = None, via: str = "") -> None:
         self.root = root + via      # via: " (filecat-agent NAME)" when read through an agent
@@ -134,6 +136,8 @@ class _Progress:
         self.cloud = 0
         self.resumed_dirs = 0
         self.dropped = 0
+        self.rollups = 0
+        self.rollup_bytes = 0
         self.last_path = ""
         self._started = self._last_print = time.monotonic()
         self._mark = (0, 0, 0)  # files, measured, measured_bytes at the previous line
@@ -141,6 +145,11 @@ class _Progress:
     def __call__(self, path: str, size: int, how: str = "measured") -> None:
         if how == "resumed":
             self.resumed_dirs += 1
+        elif how == "rollup":
+            self.rollups += 1
+            self.rollup_bytes += size
+        elif how == "summing":
+            pass        # a long sum is still going: only the clock and the path move
         elif how == "dropped":
             self.dropped += size  # a count of records, not bytes
         else:
@@ -172,6 +181,7 @@ class _Progress:
         resumed += f", {self.cloud} cloud-only" if self.cloud else ""
         resumed += f", {self.resumed_dirs} dirs resumed" if self.resumed_dirs else ""
         resumed += f", {self.dropped} dropped" if self.dropped else ""
+        resumed += f", {self.rollups} rollups ({self.rollup_bytes} bytes)" if self.rollups else ""
         print(f"{self.root}: {self.files} files, {self.bytes} bytes | {rate:.1f} files/s, "
               f"measuring {m_rate:.1f} files/s {mb_rate:.1f} MB/s (avg {avg:.1f} files/s) | "
               f"{self.measured} measured, {self.unchanged} unchanged{resumed} | last: {self.last_path}",
@@ -223,6 +233,29 @@ def scan_roots(roots: list[str], backend: Backend, options: ScanOptions,
 
 def _scan(paths: list[str], roots: list[str], plans: list[tuple[fsource.AgentSource, str] | None],
           backend: Backend, options: ScanOptions, resume_path: str | None) -> int:
+    # The rules, markers and sticky redactions of each root come first, and an
+    # agent is given its half before anything is listed: not even a preflight
+    # listing may carry the name of a folder that is to be rolled up.
+    try:
+        rollup_plans = [rollup.make_plan(options, root, path, backend,
+                                         source=plans[i][0] if plans[i] else None)
+                        for i, (path, root) in enumerate(zip(paths, roots))]
+    except redaction.RedactionKeyError as exc:
+        print(f"filecat: {exc}", file=sys.stderr)
+        return 2
+    groups: dict[int, tuple[fsource.AgentSource, list]] = {}
+    for i, plan in enumerate(rollup_plans):
+        if plans[i]:
+            groups.setdefault(id(plans[i][0]), (plans[i][0], []))[1].append((plan, plans[i][1]))
+    for source, group in groups.values():
+        try:
+            source.configure_rollups(group)
+        except AgentError as exc:
+            if exc.code == "policy":
+                print(f"filecat: {exc}", file=sys.stderr)
+                return 2
+        except OSError:
+            pass        # unreachable: the preflight below says so, and the walk configures it again
     # Before anything is read: can each root be opened, with which account,
     # and is it the account the last scan used? Warnings only.
     checks = preflight.check(paths, roots, backend, options.timeout_for(paths[0]) if paths else 30.0,
@@ -236,6 +269,15 @@ def _scan(paths: list[str], roots: list[str], plans: list[tuple[fsource.AgentSou
     if options.check_only:
         return 1 if problems else 0
     accounts = {c.path: None if plans[i] else c.account for i, c in enumerate(checks)}
+    for i, c in enumerate(checks):      # an agent root that fell back to SMB is ruled in SMB terms
+        if rollup_plans[i].agent_cfg is not None and plans[i] is None:
+            rollup_plans[i] = rollup.make_plan(options, roots[i], paths[i], backend)
+    announced: set[str] = set()
+    for plan in rollup_plans:
+        for message in plan.messages:
+            if message not in announced:
+                announced.add(message)
+                print(f"filecat: {message}", file=sys.stderr)
 
     if resume_path is None:
         resume_path = resume_path_for(getattr(backend, "name", "backend"),
@@ -279,7 +321,7 @@ def _scan(paths: list[str], roots: list[str], plans: list[tuple[fsource.AgentSou
                     root, options, tracker, identifier, resume, measure_file,
                     unc=unc, progress=progress,
                     extra_root_errors=scan_level_errors if i == 0 else None,
-                    path=path, source=source,
+                    path=path, source=source, rollups=rollup_plans[i],
                 )
             except BaseException as exc:
                 resume.flush()  # keep what finished, for the rerun
@@ -288,7 +330,11 @@ def _scan(paths: list[str], roots: list[str], plans: list[tuple[fsource.AgentSou
                 raise
             progress.flush()
             if attempt is not None:
-                rootinfo.finish(backend, root, attempt, tracker)
+                plan = rollup_plans[i]
+                extra: dict[str, Any] = {"rollup_unresolved": list(plan.unresolved)}
+                if plan.complete:       # a partial scan leaves the suggestions as they were
+                    extra["suggestions"] = {**plan.suggestion_rows(), "at": rootinfo.now()}
+                rootinfo.finish(backend, root, attempt, tracker, extra=extra)
             had_errors = had_errors or root_had_errors
 
         try:
@@ -302,6 +348,8 @@ def _scan(paths: list[str], roots: list[str], plans: list[tuple[fsource.AgentSou
             pass
 
         _purge_dropped(backend, options.keep_dropped)
+        if any(plan.purged for plan in rollup_plans):
+            backend.scrub()     # after the aggregates were rebuilt: they held the purged folder names too
 
         if options.ollama:
             from .ollama import annotate_backend

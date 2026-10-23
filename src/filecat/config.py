@@ -22,6 +22,10 @@ when that value is used, so passwords can stay out of the file.
 docs/agent-protocol.md); load_agents validates them and agent_for picks the
 one that covers a UNC path. `filecat agents` lists and tests them.
 
+`[rollups]` (a mode per built-in type) and `[[rollups.rule]]` say what a scan
+counts without listing (docs/rollups.md); load_rollups validates them, and no
+message or `config show` line repeats a pattern.
+
 `[[storage.hosts]]` (a host with no agent) and `[[storage.links]]` (which disk is made of which
 node on another host) are written by hand; load_storage validates them and
 `filecat storage links` checks them against saved topology snapshots. See
@@ -39,6 +43,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
+from . import rollup
 from .agent_client import DEFAULT_PORT, ShareMap, normalize_fingerprint
 from .backends import BACKENDS, DEFAULT_OUT
 from .topology import ManualLink, Topology, manual_topology, parse_ref
@@ -145,7 +150,7 @@ def mask(dsn: str | None) -> str | None:
 
 # --- [[agents]] ---------------------------------------------------------
 AGENT_KEYS = ("name", "host", "port", "cert_sha256", "token", "alias", "shares", "volume",
-              "exclude", "rollup_groups", "timeout")
+              "exclude", "timeout")
 
 
 @dataclass(frozen=True)
@@ -161,7 +166,6 @@ class AgentConfig:
     shares: dict[str, str] = field(default_factory=dict)    # POSIX prefix -> UNC root
     volume: int = 1                     # the /volumeN whose /<share> folders are \\alias\<share>
     exclude: tuple[str, ...] = ()
-    rollup_groups: dict[str, list[str]] = field(default_factory=dict)
     timeout: float = 30.0
 
     @property
@@ -176,8 +180,6 @@ class AgentConfig:
         policy: dict[str, Any] = {}
         if self.exclude:
             policy["exclude"] = list(self.exclude)
-        if self.rollup_groups:
-            policy["rollup_groups"] = {k: list(v) for k, v in self.rollup_groups.items()}
         return policy
 
     def share_map(self) -> ShareMap:
@@ -194,6 +196,9 @@ def _agent(table: Any, index: int) -> AgentConfig:
     def bad(message: str) -> ConfigError:
         return ConfigError(f"{label}: {message}")
 
+    if "rollup_groups" in table:
+        raise bad("rollup_groups was removed; write [[rollups.rule]] tables with a tag and match "
+                  "patterns instead (docs/rollups.md)")
     unknown = [k for k in table if k not in AGENT_KEYS]
     if unknown:
         raise bad(f"unknown key {unknown[0]!r}; the keys are {', '.join(AGENT_KEYS)}")
@@ -237,17 +242,10 @@ def _agent(table: Any, index: int) -> AgentConfig:
     exclude = table.get("exclude", [])
     if not isinstance(exclude, list) or not all(isinstance(x, str) and x for x in exclude):
         raise bad("exclude wants a list of paths or names")
-    groups = table.get("rollup_groups", {})
-    if (not isinstance(groups, dict)
-            or not all(isinstance(k, str) and k and "/" not in k for k in groups)
-            or not all(isinstance(v, list) and all(isinstance(x, str) and x for x in v)
-                       for v in groups.values())):
-        raise bad('[agents.rollup_groups] wants "[TAG]" = ["pattern", ...] pairs')
     return AgentConfig(
         name=name, host=host, cert_sha256=cert, token=text("token"), alias=smap.alias,
         port=number("port", DEFAULT_PORT, 1, 65535, int), shares=dict(shares), volume=volume,
-        exclude=tuple(exclude), rollup_groups={k: list(v) for k, v in groups.items()},
-        timeout=number("timeout", 30.0, 0.001, None, float))
+        exclude=tuple(exclude), timeout=number("timeout", 30.0, 0.001, None, float))
 
 
 def load_agents(cfg: dict[str, Any]) -> list[AgentConfig]:
@@ -263,6 +261,26 @@ def load_agents(cfg: dict[str, Any]) -> list[AgentConfig]:
         if names.count(name) > 1:
             raise ConfigError(f"[[agents]]: name {name!r} is used twice")
     return agents
+
+
+# --- [rollups] ----------------------------------------------------------
+def load_rollups(cfg: dict[str, Any]) -> rollup.RollupConfig:
+    """The validated [rollups] section (modes, [[rollups.rule]], stores)."""
+    try:
+        return rollup.parse_config(cfg)
+    except ValueError as exc:
+        raise ConfigError(str(exc)) from None
+
+
+def parse_rollup_overrides(items: list[str] | None) -> dict[str, str]:
+    """`--rollup cache=automatic` (repeatable) as {type: mode}."""
+    out: dict[str, str] = {}
+    for item in items or []:
+        key, sep, value = item.partition("=")
+        if not sep:
+            raise ConfigError(f"--rollup wants TYPE=MODE, like cache=automatic, got {item!r}")
+        out[key.strip().lower()] = value.strip().lower()
+    return out
 
 
 # --- [[storage.hosts]] and [[storage.links]] -----------------------------
@@ -402,6 +420,15 @@ def apply(args: Any, cfg: dict[str, Any]) -> None:
             args.aliases = {**table, **aliases.parse(args.alias)}
         except ValueError as exc:
             raise ConfigError(str(exc)) from None
+    if hasattr(args, "rollup"):
+        rollups = load_rollups(cfg)
+        overrides = parse_rollup_overrides(args.rollup)
+        if overrides:
+            try:
+                rollups = rollups.with_modes(overrides)
+            except ValueError as exc:
+                raise ConfigError(str(exc)) from None
+        args.rollup_config = rollups
     if hasattr(args, "no_agent"):
         args.agents = [] if args.no_agent else load_agents(cfg)
         if args.agent and not has_agent(args.agents, args.agent):
@@ -617,6 +644,19 @@ def cmd_show(args: Any, path: Path | None, cfg: dict[str, Any]) -> int:
         print(f"  {'':8} token = {a.token if args.reveal else mask_token(a.token)}{warn}")
         for prefix, unc in a.shares.items():
             print(f"  {'':8} share {prefix} = {unc}")
+    try:
+        rollups = load_rollups(cfg)
+    except ConfigError as exc:
+        print(f"rollups:     invalid: {exc}")
+        return 1
+    modes = ", ".join(f"{t} {m}" for t, m in rollups.modes.items() if m != "manual")
+    if rollups.rules or modes:
+        print(f"rollups:     {len(rollups.rules)} rules" + (f"; {modes}" if modes else "")
+              + "  (filecat rollups rules)")
+    for line in rollups.warnings:
+        print(f"  warning: {line}")
+    for line in rollup.describe_rules(rollups):
+        print(f"  rule {line}")
     try:
         storage = load_storage(cfg)
     except ConfigError as exc:

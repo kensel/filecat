@@ -5,9 +5,11 @@
                       "account": {"user", "source"}, "agent", "heartbeat_at",
                       "progress": {"files", "dirs", "bytes", "errors", "last_path"}},
      "last_scan":    {"started_at", "finished_at", "seconds", "status", "host", "account",
-                      "agent", "files", "dirs", "bytes", "errors"},
+                      "agent", "files", "dirs", "bytes", "errors", "rollups", "rollup_bytes"},
      "last_error":   {"at", "rel_path", "stage", "message"},
-     "newest_file":  {"rel_path", "mtime_ns"}}
+     "newest_file":  {"rel_path", "mtime_ns"},
+     "suggestions":  {"items": [{"tag", "parent", "matched"}], "more", "at"},
+     "rollup_unresolved": ["[[rollups.rule]] #3 ([CACHE])"]}
 
 `last_attempt` is written as status "running" before a root is walked and
 updated when the walk ends. While it runs, the scan rewrites it every
@@ -88,6 +90,7 @@ class ScanTracker:
         self._backend = backend
         self.root = root
         self.files = self.dirs = self.bytes = self.errors = 0
+        self.rollups = self.rollup_bytes = 0    # rollup records are not files (record.NON_FILE_KINDS)
         self.last_error: dict[str, Any] | None = None
         self._links = HardLinks()   # a hard-linked file's bytes are counted once
         self.last_path = ""
@@ -97,8 +100,11 @@ class ScanTracker:
         self._last_beat = time.monotonic()
 
     def progress(self) -> dict[str, Any]:
-        return {"files": self.files, "dirs": self.dirs, "bytes": self.bytes,
-                "errors": self.errors, "last_path": self.last_path}
+        out = {"files": self.files, "dirs": self.dirs, "bytes": self.bytes,
+               "errors": self.errors, "last_path": self.last_path}
+        if self.rollups:
+            out.update(rollups=self.rollups, rollup_bytes=self.rollup_bytes)
+        return out
 
     def beat(self) -> None:
         """Rewrite the running attempt with the progress so far."""
@@ -119,8 +125,12 @@ class ScanTracker:
 
     def _observe(self, doc: Document) -> None:
         self.last_path = doc.get("rel_path", "")
-        if doc.get("kind") == "dir":
+        kind = doc.get("kind")
+        if kind == "dir":
             self.dirs += 1
+        elif kind == "rollup":
+            self.rollups += 1
+            self.rollup_bytes += doc.get("size") or 0
         else:
             self.files += 1
             self.bytes += self._links.counted_doc(doc)
@@ -183,9 +193,10 @@ def newest_file(backend: Backend, root: str) -> dict[str, Any] | None:
 
 
 def finish(backend: Backend, root: str, attempt: dict[str, Any], tracker: ScanTracker,
-           exc: BaseException | None = None) -> Document:
+           exc: BaseException | None = None, extra: dict[str, Any] | None = None) -> Document:
     """Record how the attempt ended. Never raises: the scan's own outcome
-    matters more than its bookkeeping."""
+    matters more than its bookkeeping. `extra` is merged into the entry
+    (the rollup suggestions of a complete scan)."""
     finished = now()
     if exc is not None:
         status = "interrupted" if isinstance(exc, KeyboardInterrupt) else "failed"
@@ -209,6 +220,8 @@ def finish(backend: Backend, root: str, attempt: dict[str, Any], tracker: ScanTr
             "host": attempt["host"], "files": tracker.files, "dirs": tracker.dirs,
             "bytes": tracker.bytes, "errors": tracker.errors,
         }
+        if tracker.rollups:
+            info["last_scan"].update(rollups=tracker.rollups, rollup_bytes=tracker.rollup_bytes)
         if attempt.get("account"):
             info["last_scan"]["account"] = attempt["account"]
         if attempt.get("agent"):
@@ -224,6 +237,8 @@ def finish(backend: Backend, root: str, attempt: dict[str, Any], tracker: ScanTr
         newest = None
     if newest is not None:
         info["newest_file"] = newest
+    if extra:
+        info.update(extra)
     try:
         backend.put_root_info(info)
     except Exception:

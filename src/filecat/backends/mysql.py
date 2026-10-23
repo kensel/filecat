@@ -136,6 +136,15 @@ _SCHEMA = [
     ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
     """,
     """
+    CREATE TABLE IF NOT EXISTS redactions (
+        id VARCHAR(16) PRIMARY KEY,
+        root_id VARCHAR(32) NOT NULL,
+        path_hash CHAR(32) NOT NULL,
+        document JSON NOT NULL,
+        UNIQUE KEY uq_redactions (root_id, path_hash)
+    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
+    """,
+    """
     CREATE TABLE IF NOT EXISTS samples (
         sample_id VARCHAR(64) PRIMARY KEY,
         document JSON NOT NULL
@@ -376,6 +385,19 @@ class MysqlBackend(Backend):
         self.conn.commit()
         self.delete_members(root, rel_path)
 
+    def delete_many(self, root: str, rel_paths: Iterable[str]) -> int:
+        self.flush()
+        rid, n = root_id(root), 0
+        with self.conn.cursor() as cur:
+            for part in chunks([_rel_hash(p) for p in rel_paths]):
+                marks = ",".join(["%s"] * len(part))
+                cur.execute(f"DELETE FROM files WHERE root_id=%s AND rel_hash IN ({marks})", (rid, *part))
+                n += cur.rowcount
+                cur.execute(f"DELETE FROM members WHERE root_id=%s AND archive_hash IN ({marks})",
+                            (rid, *part))
+        self.conn.commit()
+        return n
+
     # --- archive members -------------------------------------------
     def put_members(self, root: str, rel_path: str, members: list) -> None:
         self.flush()
@@ -524,6 +546,40 @@ class MysqlBackend(Backend):
             n = cur.rowcount
         self.conn.commit()
         return n
+
+    def purge_dropped_paths(self, root: str, rel_paths: Iterable[str]) -> int:
+        rid, paths = root_id(root), list(rel_paths)
+        with self.conn.cursor() as cur:
+            cur.execute("SELECT id, rel_path FROM dropped WHERE root_id=%s", (rid,))
+            gone = [i for i, rel in cur.fetchall()
+                    if any(rel == p or rel.startswith(p + "/") for p in paths)]
+            for part in chunks(gone):
+                cur.execute(f"DELETE FROM dropped WHERE id IN ({','.join(['%s'] * len(part))})", part)
+        self.conn.commit()
+        return len(gone)
+
+    # --- sticky redactions ---------------------------------------------
+    def _redaction_rows(self, root: str | None = None) -> list[Document]:
+        with self.conn.cursor() as cur:
+            cur.execute("SELECT document FROM redactions")
+            rows = cur.fetchall()
+        self.conn.commit()
+        return [json.loads(d) if isinstance(d, (str, bytes)) else d for (d,) in rows]
+
+    def _redaction_put(self, entry: Document) -> None:
+        with self.conn.cursor() as cur:
+            cur.execute(
+                "INSERT INTO redactions (id, root_id, path_hash, document) VALUES (%s, %s, %s, %s) "
+                "ON DUPLICATE KEY UPDATE root_id=VALUES(root_id), path_hash=VALUES(path_hash), "
+                "document=VALUES(document)",
+                (entry["id"], entry["root_id"], entry["path_hash"],
+                 json.dumps(entry, ensure_ascii=False)))
+        self.conn.commit()
+
+    def _redaction_remove(self, entry: Document) -> None:
+        with self.conn.cursor() as cur:
+            cur.execute("DELETE FROM redactions WHERE id=%s", (entry["id"],))
+        self.conn.commit()
 
     # --- root index ----------------------------------------------------
     def put_root_info(self, info: Document) -> None:

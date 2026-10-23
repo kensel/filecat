@@ -238,7 +238,7 @@ def test_sum_subtree(agent, tree):
     os.link(base / "a.txt", base / "sub" / "a-link.txt")
     with client_for(agent) as c:
         s = c.sum_subtree("/volume1/Backup")
-    assert (s.total_files, s.total_dirs) == (4, 1)
+    assert (s.total_files, s.total_dirs) == (4, 2)      # the folder itself counts in total_dirs
     assert s.total_size == 1200 + 0 + 10240      # the hard link counted once
     assert s.newest_mtime_ns % 100 == 0 and s.errors == 0
     with client_for(agent) as c:
@@ -260,12 +260,17 @@ def test_policy_exclude_and_rollup(agent, tree):
     (base / "node_modules" / "y.js").write_bytes(b"1234567")
     (base / "skip.tmp").write_bytes(b"x")
     with client_for(agent) as c:
-        c.configure_policy(exclude=["skip.tmp"], rollup_groups={"[CACHE]": ["node_modules"]})
-        entries = {e.name: e for e in c.list_dir("/volume1/Backup").entries}
+        rules = [{"id": 0, "tag": "[CACHE]", "match": ["node_modules"], "type": "dir"}]
+        reply = c.configure_policy(exclude=["skip.tmp"], rules=rules)
+        assert reply["rules"] == 1 and len(reply["policy_id"]) == 12
+        listing = c.list_dir("/volume1/Backup")
+        entries = {e.name: e for e in listing.entries}
         assert "skip.tmp" not in entries and "node_modules" not in entries
         roll = entries["[CACHE]"]
         assert roll.kind == "rollup" and roll.size == 12
         assert roll.rollup["matched"] == 1 and roll.rollup["total_files"] == 2
+        assert roll.rollup["total_dirs"] == 1 and roll.rollup["oldest_mtime_ns"] % 100 == 0
+        assert listing.policy_id == reply["policy_id"]
 
 
 def test_policy_from_the_constructor_and_after_reconnect(agent, tree):
@@ -504,14 +509,13 @@ def test_load_agents_full_table(fixture_dir):
         f'cert_sha256 = "{FP}"\ntoken = "${{FC_T}}"\n'
         "alias = '\\\\NAS-MAIN'\nvolume = 2\nexclude = ['/volume1/@docker']\ntimeout = 12.5\n"
         "[agents.shares]\n'/volume2/Archive' = '\\\\nas-main\\Archive'\n"
-        '[agents.rollup_groups]\n"[CACHE]" = ["*/.cache"]\n'
         "[[agents]]\n"
         f'name = "nas-old"\nhost = "10.0.0.5"\ncert_sha256 = "{FP}"\ntoken = "x"\n',
         encoding="utf-8")
     main, old = config.load_agents(config.load(path))
     assert (main.port, main.alias, main.volume, main.timeout) == (9000, "\\\\NAS-MAIN", 2, 12.5)
     assert main.shares == {"/volume2/Archive": "\\\\nas-main\\Archive"}
-    assert main.policy() == {"exclude": ["/volume1/@docker"], "rollup_groups": {"[CACHE]": ["*/.cache"]}}
+    assert main.policy() == {"exclude": ["/volume1/@docker"]}
     assert old.alias == "\\\\nas-old" and old.token == "x"
     assert config.load_agents({}) == []
 
@@ -546,7 +550,7 @@ def test_token_expands_from_the_environment(monkeypatch):
     ({"shares": ["x"]}, "string pairs"),
     ({"volume": 0}, "volume = 0"),
     ({"exclude": "x"}, "exclude wants"),
-    ({"rollup_groups": {"[X]": "*"}}, "rollup_groups"),
+    ({"rollup_groups": {"[X]": ["*"]}}, r"rollup_groups was removed.*\[\[rollups.rule\]\]"),
     ({"timeout": 0}, "timeout"),
 ])
 def test_load_agents_rejects(table, message):

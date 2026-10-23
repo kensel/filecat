@@ -24,6 +24,7 @@ class MemoryBackend(Backend):
         self.samples: dict[str, Document] = {}
         self.member_sets: dict[str, Document] = {}
         self.set_rows: dict[str, list[Document]] = {}
+        self._redactions: dict[str, Document] = {}
 
     def put(self, document: Document) -> None:
         self.docs[(document["root_id"], document["rel_path"])] = copy.deepcopy(document)
@@ -112,6 +113,23 @@ class MemoryBackend(Backend):
         n = len(self.dropped)
         self.dropped = [d for d in self.dropped if d["dropped_at"] >= before]
         return n - len(self.dropped)
+
+    def purge_dropped_paths(self, root: str, rel_paths: Iterable[str]) -> int:
+        rid, paths = root_id(root), list(rel_paths)
+        keep = [d for d in self.dropped if d.get("root_id") != rid
+                or not any(d["rel_path"] == p or d["rel_path"].startswith(p + "/") for p in paths)]
+        n = len(self.dropped) - len(keep)
+        self.dropped = keep
+        return n
+
+    def _redaction_rows(self, root: str | None = None) -> list[Document]:
+        return [copy.deepcopy(r) for r in self._redactions.values()]
+
+    def _redaction_put(self, entry: Document) -> None:
+        self._redactions[entry["id"]] = copy.deepcopy(entry)
+
+    def _redaction_remove(self, entry: Document) -> None:
+        self._redactions.pop(entry["id"], None)
 
     def put_program(self, record: Document) -> None:
         self.programs[record["program_id"]] = copy.deepcopy(record)

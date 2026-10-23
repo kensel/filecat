@@ -21,8 +21,7 @@ from .agent_client import AgentClient, time_call
 def _describe(agent: config.AgentConfig) -> dict[str, Any]:
     return {"name": agent.name, "host": agent.host, "port": agent.port, "alias": agent.alias,
             "cert_sha256": agent.cert_sha256, "token": config.mask_token(agent.token),
-            "shares": agent.shares, "volume": agent.volume, "exclude": list(agent.exclude),
-            "rollup_groups": agent.rollup_groups}
+            "shares": agent.shares, "volume": agent.volume, "exclude": list(agent.exclude)}
 
 
 def _list(agents: list[config.AgentConfig], as_json: bool) -> int:
@@ -40,10 +39,8 @@ def _list(agents: list[config.AgentConfig], as_json: bool) -> int:
               + (f"   (not set: {', '.join(unset)})" if unset else ""))
         for prefix, unc in a.shares.items():
             print(f"  share       {prefix} = {unc}")
-        extras = [f"{len(a.exclude)} excluded paths" if a.exclude else "",
-                  f"{len(a.rollup_groups)} rollup groups" if a.rollup_groups else ""]
-        if any(extras):
-            print("  policy      " + ", ".join(e for e in extras if e))
+        if a.exclude:
+            print(f"  policy      {len(a.exclude)} excluded paths")
     return 0
 
 

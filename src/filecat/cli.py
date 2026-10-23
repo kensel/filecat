@@ -29,6 +29,7 @@ COMMANDS = {
     "dupes": "filecat.dupes_cmd",
     "scan-everything": "filecat.everything",
     "agents": "filecat.agents_cmd",
+    "rollups": "filecat.rollups_cmd",
     "storage": "filecat.storage_cmd",
 }
 
@@ -118,6 +119,15 @@ def _scan_options(p: argparse.ArgumentParser) -> None:
                    help="read every root over SMB, even when an agent covers it")
     p.add_argument("--agent-fallback", dest="agent_fallback", action="store_true",
                    help="a root whose agent cannot be reached is read over SMB instead of failing")
+    p.add_argument("--rollup", action="append", metavar="TYPE=MODE",
+                   help="override one [rollups] mode for this scan: backup, database, cache, synology, "
+                        "windows or redacted = automatic, manual or disabled (repeatable; redacted "
+                        "cannot be disabled), e.g. --rollup cache=automatic")
+    p.add_argument("--rollup-workers", dest="rollup_workers", type=int, metavar="N",
+                   help="threads that sum rolled-up folders on an SMB or local scan (default 4)")
+    p.add_argument("--new-redaction-key", dest="new_redaction_key", action="store_true",
+                   help="scan although redact.key is missing for the sticky redactions of a root: write a "
+                        "new key and leave the old entries to be matched by inode only")
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -324,6 +334,36 @@ def build_parser() -> argparse.ArgumentParser:
     a.add_argument("--timeout", type=float, default=5.0, help="seconds per connection and request")
     a.add_argument("--json", action="store_true", help="one JSON object per agent")
 
+    p = sub.add_parser("rollups", help="rollup groups: the rules and modes in force, what the catalog "
+                                       "holds, what a scan would suggest, and the sticky redactions")
+    rsub = p.add_subparsers(dest="action", required=True)
+    r = rsub.add_parser("rules", help="the built-in rules with each type's mode, and the user's rules "
+                                      "(counts, never patterns)")
+    r.add_argument("--json", action="store_true", help="one JSON object")
+    r = rsub.add_parser("list", help="the rollup records in the catalog: counts by tag and parent folder")
+    _storage(r)
+    r.add_argument("--root", action="append", help="only these roots (repeatable)")
+    r.add_argument("--json", action="store_true", help="one JSON object per root")
+    r = rsub.add_parser("suggest", help="folders a built-in rule of a type that is not automatic would "
+                                        "match, found by the last complete scan of each root")
+    _storage(r)
+    r.add_argument("--root", action="append", help="only these roots (repeatable)")
+    r.add_argument("--json", action="store_true", help="one JSON object per root")
+    red = rsub.add_parser("redacted", help="sticky redactions: list them, or release one in two steps")
+    dsub = red.add_subparsers(dest="redacted_action", required=True)
+    r = dsub.add_parser("list", help="ids, status, folder they sit in and counts; never names or hashes")
+    _storage(r)
+    r.add_argument("--root", action="append", help="only these roots (repeatable)")
+    r.add_argument("--json", action="store_true", help="one JSON object per entry")
+    r = dsub.add_parser("release", help="step one: mark a redacted folder pending (still redacted)")
+    r.add_argument("path", metavar="PATH", help="the folder, as a UNC, local or agent path")
+    _storage(r)
+    r = dsub.add_parser("approve", help="step two, a separate command: forget a pending redaction, so "
+                                        "the next scan lists the folder unless a marker or rule matches")
+    r.add_argument("ref", metavar="PATH_OR_ID")
+    r.add_argument("--yes", action="store_true", help="do not ask (required without a terminal)")
+    _storage(r)
+
     p = sub.add_parser("storage", help="storage written by hand in filecat.toml: hosts with no agent "
                                        "and the links between hosts")
     ssub = p.add_subparsers(dest="action", required=True)
@@ -387,6 +427,9 @@ def main(argv: list[str] | None = None) -> int:
             return 2
     if getattr(args, "ollama", False) and not getattr(args, "model", None):
         print("filecat: --model is required with --ollama", file=sys.stderr)
+        return 2
+    if "rollup" in (getattr(args, "ollama_kinds", None) or []):
+        print("filecat: --ollama-kinds: a rollup is not a file; there is nothing to summarise", file=sys.stderr)
         return 2
     module = importlib.import_module(COMMANDS[args.command])
     try:

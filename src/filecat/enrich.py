@@ -20,6 +20,9 @@ Database data files (probe.db_data, see dbfiles/) are measured only once
 they are quiet and big enough, checked against the record and again
 against the file just before it is read; --force does not override that.
 
+Rollups (kind "rollup", docs/rollups.md) stand for files the catalog does not
+list: nothing is opened for one, whatever --force, --what or --measure-backups say.
+
 Cloud placeholders (see cloudfiles.py) whose data is not on this device
 are left unread, whatever the record says: their attributes are checked
 without opening the file. --hydrate reads them anyway, which makes the
@@ -41,11 +44,11 @@ from .backends import open_backend
 from .backends.base import Backend
 from .options import ScanOptions
 from .aliases import source_path
-from .record import MEMBERS_KEY, add_error, join_root
+from .record import MEMBERS_KEY, NON_FILE_KINDS, add_error, is_file_kind, join_root
 from .samples import key_of
 
 STAGES = ("names", "hash", "probe", "identify")
-NO_CONTENT_KINDS = ("dir", "link", "empty")
+NO_CONTENT_KINDS = ("dir", "link", "empty", "rollup")
 # Fields from an import that a measurement does not produce and must not drop.
 KEEP_TOP = ("source", "llm")
 KEEP_PROBE = ("attributes", "readonly", "atime_ns", "installed_program", "db_data", "backup_data")
@@ -82,7 +85,7 @@ def needs(doc: dict[str, Any], stages: set[str], options: ScanOptions,
     """(needs_names, needs_measure) for one record."""
     probe = doc.get("probe") or {}
     kind = doc.get("kind")
-    want_names = "names" in stages and (force or "mime_glob" not in probe) and kind != "dir"
+    want_names = "names" in stages and (force or "mime_glob" not in probe) and kind not in NON_FILE_KINDS
     if kind in NO_CONTENT_KINDS or not doc.get("size"):
         return want_names, False
     if probe.get("backup_data") and not options.measure_backups:
@@ -154,7 +157,7 @@ def _candidates(backend: Backend, roots: list[str] | None, kinds: list[str] | No
     for root in roots or [None]:
         for kind in kinds or [None]:
             for doc in backend.list(kind=kind, root=root):
-                if doc.get("kind") != "dir" and (not paths or path_matches(doc["rel_path"], paths)):
+                if is_file_kind(doc.get("kind")) and (not paths or path_matches(doc["rel_path"], paths)):
                     keys.append((doc["root"], doc["rel_path"]))
     keys.sort()
     yield from keys

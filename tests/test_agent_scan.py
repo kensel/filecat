@@ -239,7 +239,8 @@ def test_links_special_files_and_rollups(tree, agent):
     assert docs["shortcut"]["kind"] == "link"
     assert docs["shortcut"]["probe"]["link_target"] == "docs/notes.csv"
     assert docs["queue.fifo"]["probe"]["special_file"] is True
-    assert "[CACHE]" not in docs
+    assert docs["[CACHE]"]["kind"] == "rollup"      # the agent's rollup entry is recorded, not listed
+    assert docs["[CACHE]"]["probe"]["rollup"]["matched"] == 2
     assert docs["denied"]["errors"][0]["stage"] == "stat" and code == 1
     assert not [p for p in measures(agent) if p.endswith(("shortcut", "queue.fifo"))]
     assert docs[""]["probe"]["child_count"] == len(

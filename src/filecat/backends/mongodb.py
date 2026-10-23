@@ -122,6 +122,9 @@ class MongoBackend(Backend):
         self.root_docs.create_index("root_id", unique=True)
         self.dropped = self.db["dropped"]
         self.treemaps = self.db["treemaps"]
+        self.redaction_docs = self.db["redactions"]
+        self.redaction_docs.create_index("id", unique=True)
+        self.redaction_docs.create_index([("root_id", 1), ("path_hash", 1)], unique=True)
         self.dropped.create_index("dropped_at")
         self.dropped.create_index([("root_id", 1), ("rel_path", 1)])
         self.agg_meta.create_index("root_id", unique=True)
@@ -195,7 +198,9 @@ class MongoBackend(Backend):
         pipeline: list[dict[str, Any]] = [{"$match": match}]
         sort: dict[str, int] = {}
         if "parent" in q:  # folders first, like a file manager
-            pipeline.append({"$addFields": {"_notdir": {"$cond": [{"$eq": ["$kind", "dir"]}, 0, 1]}}})
+            pipeline.append({"$addFields": {"_notdir": {"$switch": {"branches": [
+                {"case": {"$eq": ["$kind", "dir"]}, "then": 0},
+                {"case": {"$eq": ["$kind", "rollup"]}, "then": 1}], "default": 2}}}})
             sort["_notdir"] = 1
         sort[q["sort"]] = -1 if q["desc"] else 1
         if q["sort"] != "rel_path":
@@ -211,7 +216,7 @@ class MongoBackend(Backend):
         size: dict[str, int] = {"$gt": above}
         if up_to is not None:
             size["$lte"] = up_to
-        query: dict[str, Any] = {"kind": {"$ne": "dir"}, "size": size}
+        query: dict[str, Any] = {"kind": {"$nin": ["dir", "rollup"]}, "size": size}
         if root is not None:
             query["root_id"] = root_id(root)
         yield from self.files.find(
@@ -229,9 +234,9 @@ class MongoBackend(Backend):
         if "kind" in q:
             and_.append({"kind": q["kind"]})
         if q.get("files_only"):
-            and_ += [{"kind": {"$ne": "dir"}}, {"$nor": [unreadable]}]
+            and_ += [{"kind": {"$nin": ["dir", "rollup"]}}, {"$nor": [unreadable]}]
         if q.get("unreadable"):
-            and_ += [{"kind": {"$ne": "dir"}}, unreadable]
+            and_ += [{"kind": {"$nin": ["dir", "rollup"]}}, unreadable]
         if q.get("errors"):
             and_.append(has_errors)
         if "suffix" in q:
@@ -301,6 +306,14 @@ class MongoBackend(Backend):
         self.flush()
         self.files.delete_one({"root_id": root_id(root), "rel_path": rel_path})
         self.delete_members(root, rel_path)
+
+    def delete_many(self, root: str, rel_paths: Iterable[str]) -> int:
+        self.flush()
+        rid, n = root_id(root), 0
+        for part in chunks(list(rel_paths)):
+            n += self.files.delete_many({"root_id": rid, "rel_path": {"$in": part}}).deleted_count
+            self.members.delete_many({"root_id": rid, "archive_rel_path": {"$in": part}})
+        return n
 
     # --- archive members -------------------------------------------
     def put_members(self, root: str, rel_path: str, members: list) -> None:
@@ -384,6 +397,25 @@ class MongoBackend(Backend):
 
     def purge_dropped(self, before: str) -> int:
         return self.dropped.delete_many({"dropped_at": {"$lt": before}}).deleted_count
+
+    def purge_dropped_paths(self, root: str, rel_paths: Iterable[str]) -> int:
+        import re
+        rid, paths = root_id(root), list(rel_paths)
+        if not paths:
+            return 0
+        pattern = "^(" + "|".join(re.escape(p) for p in paths) + ")(/|$)"
+        return self.dropped.delete_many(
+            {"root_id": rid, "rel_path": {"$regex": pattern}}).deleted_count
+
+    # --- sticky redactions ---------------------------------------------
+    def _redaction_rows(self, root: str | None = None) -> list[Document]:
+        return list(self.redaction_docs.find({}, {"_id": 0}))
+
+    def _redaction_put(self, entry: Document) -> None:
+        self.redaction_docs.replace_one({"id": entry["id"]}, _bson_safe(dict(entry)), upsert=True)
+
+    def _redaction_remove(self, entry: Document) -> None:
+        self.redaction_docs.delete_one({"id": entry["id"]})
 
     # --- root index ----------------------------------------------------
     def put_root_info(self, info: Document) -> None:

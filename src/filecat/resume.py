@@ -141,5 +141,18 @@ class ResumeState:
             self._dirty = True
             self.flush()
 
+    def forget_beneath(self, root: str, rel_path: str) -> None:
+        """Drop the markers at or beneath `rel_path` (a folder that is now
+        rolled up: nothing about it may be kept)."""
+        markers = self.roots.get(root)
+        if not markers:
+            return
+        prefix = rel_path + "/"
+        gone = [k for k in markers if k == rel_path or k.startswith(prefix)]
+        for k in gone:
+            del markers[k]
+        if gone:
+            self._dirty = True
+
     def done_count(self, root: str) -> int:
         return len(self.roots.get(root, {}))

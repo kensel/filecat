@@ -46,3 +46,9 @@ def fixture_dir(request) -> Path:
 def _no_user_config(monkeypatch):
     """A filecat.toml in the repo or the user profile must not steer the tests."""
     monkeypatch.setenv("FILECAT_CONFIG", "none")
+
+
+@pytest.fixture(autouse=True)
+def _redaction_key(monkeypatch, tmp_path):
+    """The sticky-redaction key of a test is its own file, never the user's."""
+    monkeypatch.setenv("FILECAT_REDACT_KEY_FILE", str(tmp_path / "redact.key"))

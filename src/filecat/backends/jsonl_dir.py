@@ -10,6 +10,7 @@ the single-file layout of jsonl.py. Inside DIR:
     <slug>.<root_id>.roots.json      its root-index entry (scan history)
     <slug>.<root_id>.dropped.jsonl   its dropped records (files that vanished)
     <slug>.<root_id>.treemaps.json   its Graph view snapshots (filecat serve)
+    <slug>.<root_id>.redactions.json its sticky redactions (no names)
     programs.jsonl                   installed-programs records
 
 Each root's three files are exactly a single-file jsonl catalog holding
@@ -112,6 +113,10 @@ class JsonlDirBackend(Backend):
         if part:
             part.delete(root, rel_path)
 
+    def delete_many(self, root: str, rel_paths: Iterable[str]) -> int:
+        part = self._part(root, create=False)
+        return part.delete_many(root, rel_paths) if part else 0
+
     def roots(self) -> list[str]:
         roots = set()
         for part in self._all_parts():
@@ -179,6 +184,10 @@ class JsonlDirBackend(Backend):
     def purge_dropped(self, before: str) -> int:
         return sum(p.purge_dropped(before) for p in self._all_parts())
 
+    def purge_dropped_paths(self, root: str, rel_paths: Iterable[str]) -> int:
+        part = self._part(root, create=False)
+        return part.purge_dropped_paths(root, rel_paths) if part else 0
+
     # --- root index ------------------------------------------------
     def put_root_info(self, info: Document) -> None:
         self._part(info["root"], create=True).put_root_info(info)
@@ -213,6 +222,21 @@ class JsonlDirBackend(Backend):
     def delete_treemap(self, treemap_id: str) -> None:
         for part in self._all_parts():
             part.delete_treemap(treemap_id)
+
+    # --- sticky redactions ---------------------------------------------
+    def _redaction_rows(self, root: str | None = None) -> list[Document]:
+        if root is not None:
+            part = self._part(root, create=False)
+            return part._redaction_rows() if part else []
+        return [r for p in self._all_parts() for r in p._redaction_rows()]
+
+    def _redaction_put(self, entry: Document) -> None:
+        self._part(entry["root"], create=True)._redaction_put(entry)
+
+    def _redaction_remove(self, entry: Document) -> None:
+        part = self._part(entry["root"], create=False)
+        if part:
+            part._redaction_remove(entry)
 
     # --- installed programs -------------------------------------------
     def put_program(self, record: Document) -> None:

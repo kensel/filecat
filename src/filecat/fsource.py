@@ -34,7 +34,16 @@ with a stat error.
 Connections. An AgentClient serialises its calls, so each thread that reads
 (the walker, the LIST_THREADS listing threads, the measuring workers) gets
 a client of its own, made on first use: about LIST_THREADS + workers + 1
-connections to the agent, each authenticated and given the exclude policy.
+connections to the agent, each authenticated and given the policy.
+
+Rollups. The agent does the work of docs/rollups.md for an agent scan: it
+matches the rules against literal host paths, looks for marker files in each
+child folder, recognises sticky redacted folders by keyed hash or (dev, ino),
+and lists a `kind: "rollup"` entry (totals, no names) in place of what it
+folded in. configure_rollups() sends it the plans' rules (converted to its
+paths with the share map), the marker names and the redaction sets, once per
+scan and again on every new connection; the walker takes the rollup entries
+from the listing as AgentEntry.rollup.
 """
 from __future__ import annotations
 
@@ -44,10 +53,12 @@ import logging
 import os
 import re
 import threading
-from typing import TYPE_CHECKING, Any
+import uuid
+from typing import TYPE_CHECKING, Any, Callable
 
-from . import record
-from .agent_client import AgentClient, AgentError, DirEntry, Measurement, open_remote
+from . import record, rollup
+from .agent_client import (PROGRESS_MS, AgentClient, AgentError, DirEntry, Measurement,
+                           SubtreeSummary, open_remote)
 from .options import HEAD_BYTES
 
 if TYPE_CHECKING:
@@ -106,16 +117,18 @@ def apply_stat_extras(doc: dict[str, Any], st: Any) -> None:
 
 
 class AgentEntry:
-    """A list_dir entry that quacks like os.DirEntry for the walker."""
-    __slots__ = ("name", "kind", "link_target", "_stat", "_error")
+    """A list_dir entry that quacks like os.DirEntry for the walker. A
+    `rollup` entry (kind "rollup") carries the agent's totals in `rollup`."""
+    __slots__ = ("name", "kind", "link_target", "_stat", "_error", "rollup")
 
     def __init__(self, name: str, kind: str, stat: AgentStat | None, error: OSError | None,
-                 link_target: str | None = None) -> None:
+                 link_target: str | None = None, rollup: dict[str, Any] | None = None) -> None:
         self.name = name
         self.kind = kind
         self.link_target = link_target
         self._stat = stat
         self._error = error
+        self.rollup = rollup
 
     def stat(self, follow_symlinks: bool = True) -> AgentStat:
         if self._error is not None:
@@ -136,6 +149,12 @@ class AgentEntry:
     def special(self) -> bool:
         """A FIFO, socket or device: recorded, never opened."""
         return self.kind == "other"
+
+
+class AgentListing(list):
+    """A folder's entries, plus what the agent said about the folder itself:
+    `suggest`, the counts of suggestion rules that matched (never names)."""
+    suggest: list[dict[str, Any]] = []
 
 
 _ERRORS = {"not_found": (FileNotFoundError, errno.ENOENT),
@@ -211,11 +230,15 @@ class AgentSource:
         self.config = config
         self.name = config.name
         self.map = config.share_map()
-        self._factory = client_factory or (lambda: AgentClient.from_config(config))
+        self._factory = client_factory or (lambda: AgentClient.from_config(config, self._policy))
         self._local = threading.local()
         self._clients: list[AgentClient] = []
         self._lock = threading.Lock()
         self._root_listings: dict[str, tuple[AgentStat, list[AgentEntry]]] = {}
+        self._policy: dict[str, Any] | None = None      # sent to every connection, once set
+        self._progress_ms: int | None = None
+        self._canonical: dict[tuple[str, str], str] = {}
+        self.configured = False         # configure_rollups() has been sent
 
     # --- connections ---
     def client(self) -> AgentClient:
@@ -226,6 +249,60 @@ class AgentSource:
             with self._lock:
                 self._clients.append(client)
         return client
+
+    def configure_rollups(self, plans: list[tuple[Any, str]]) -> None:
+        """Send the agent what it needs to roll up: `plans` are the
+        (rollup.RollupPlan, the UNC path the agent knows the root by) of the
+        roots read through it. One policy covers them all (their rules are the
+        same; each root has its own sticky set, found by its base path). Every
+        connection made so far is reconfigured and new ones start with it. A
+        policy id that differs from the one computed here raises AgentError."""
+        first = plans[0][0]
+        wire = first.wire_policy(self._share_to_agent)
+        policy: dict[str, Any] = {"exclude": list(self.config.exclude)}
+        if wire["rules"]:
+            policy["rules"] = wire["rules"]
+        if wire["markers"]:
+            policy["markers"] = wire["markers"]
+        roots = []
+        key = None
+        for plan, unc in plans:
+            if plan.sticky is not None:
+                sticky = plan.sticky.wire()
+                key = sticky["key"]
+                roots.append({**sticky["roots"][0], "base": self.posix(unc)})
+        if key is not None:
+            policy["redaction"] = {"key": key, "roots": roots}
+        for plan, _ in plans:
+            plan.wire_sources = wire["sources"]
+        with self._lock:
+            self._policy = policy
+            clients = list(self._clients)
+        self._progress_ms = PROGRESS_MS if (wire["rules"] or wire["markers"] or roots) else None
+        try:
+            for client in clients:
+                client.configure_policy(**policy)
+            self.client().configure_policy(**policy)
+        except OSError as e:
+            raise self._wrap(e) from None
+        self.configured = True
+
+    def _share_to_agent(self, pat: "rollup.Pattern") -> str | None:
+        """The agent-form text of a share-form pattern, or None when this
+        agent's share map does not cover it (it is not sent)."""
+        comps = pat.comps
+        if len(comps) < 2 or any("*" in c or "?" in c for c in comps[:2]):
+            return None
+        try:
+            server_share = "\\\\" + "\\".join(comps[:2])
+            spelled = self._canonical.get((comps[0].lower(), comps[1].lower()))
+            if spelled is None:
+                spelled = self._canonical[(comps[0].lower(), comps[1].lower())] = self.canonical_unc(
+                    server_share)
+            rest = "\\" + "\\".join(comps[2:]) if len(comps) > 2 else ""
+            return self.map.to_posix_path(spelled + rest)
+        except ValueError:
+            return None
 
     def close(self) -> None:
         with self._lock:
@@ -258,26 +335,26 @@ class AgentSource:
         return RemotePath(unc, self, self.posix(unc), size)
 
     # --- what the walker asks ---
-    def _list(self, unc: str) -> tuple[AgentStat, list[AgentEntry]]:
+    def _list(self, unc: str) -> tuple[AgentStat, AgentListing]:
         try:
-            listing = self.client().list_dir(self.posix(unc))
+            listing = self.client().list_dir(self.posix(unc), progress_ms=self._progress_ms)
         except ValueError as e:         # the path has no POSIX form on this agent
             raise OSError(f"{self.description}: {e}") from None
         except OSError as e:
             raise self._wrap(e) from None
-        entries = [x for x in map(self._entry, listing.entries) if x is not None]
+        entries = AgentListing(x for x in map(self._entry, listing.entries) if x is not None)
         entries.sort(key=lambda e: e.name)
+        entries.suggest = listing.suggest
         return AgentStat(0, listing.mtime_ns, listing.ctime_ns, dev=listing.dev), entries
 
     def _entry(self, e: DirEntry) -> AgentEntry | None:
-        if e.kind == "rollup":
-            # rollup groups are not used by scans yet; the folded children
-            # are not in the catalog
-            log.debug("%s: skipping rollup entry %r", self.description, e.name)
-            return None
         name = to_storage(e.name)
         error = None
         stat = None
+        if e.kind == "rollup":
+            return AgentEntry(name, "rollup",
+                              AgentStat(e.size, e.mtime_ns, e.ctime_ns, e.ino, e.dev, e.nlink,
+                                        e.allocated_size), None, None, e.rollup or {})
         if e.error:
             error = _entry_error(e.error.get("code", "io"), e.error.get("message", "cannot stat"))
         elif "\\" in name:
@@ -309,6 +386,28 @@ class AgentSource:
             return self.map.canonical(unc, names)
         except (OSError, ValueError):
             return unc
+
+    def sum_subtree(self, unc: str, *, private: bool = False, exclude: tuple[str, ...] = (),
+                    on_progress: Callable[[dict[str, Any]], None] | None = None,
+                    deadline_s: float | None = None) -> SubtreeSummary:
+        """The totals of one folder, summed by the agent (`sum_subtree`), with
+        progress lines, a deadline, and a cancel from another connection when
+        this call is interrupted."""
+        request_id = uuid.uuid4().hex[:16]
+        client = self.client()
+        try:
+            return client.sum_subtree(
+                self.posix(unc), private=private, exclude=exclude, progress_ms=PROGRESS_MS,
+                deadline_ms=int(deadline_s * 1000) if deadline_s else None, request_id=request_id,
+                on_progress=on_progress or (lambda _: None))
+        except ValueError as e:
+            raise OSError(f"{self.description}: {e}") from None
+        except BaseException:
+            try:
+                client.cancel(request_id)
+            except Exception:
+                pass
+            raise
 
     def check(self, unc: str) -> None:
         """Can the root be listed through the agent (preflight)?"""

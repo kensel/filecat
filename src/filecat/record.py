@@ -10,8 +10,12 @@ from typing import Any
 
 KINDS = (
     "dir", "link", "empty", "exe", "archive", "image", "texture", "mesh",
-    "audio", "video", "document", "text", "data", "save", "disk", "unknown",
+    "audio", "video", "document", "text", "data", "save", "disk", "unknown", "rollup",
 )
+# Records that are not files: a directory, and a rollup (docs/rollups.md), which
+# stands for files and folders the catalog counts but does not list. Wherever
+# a reader means "a file" it means kind NOT IN NON_FILE_KINDS.
+NON_FILE_KINDS = ("dir", "rollup")
 CONTAINERS = ("plain", "gzip", "gzip_xored", "zip", "pe", "bzip2", "xz", "7z", "unknown")
 
 # Fields stored as indexed columns by the SQL backends and the Mongo index.
@@ -23,6 +27,10 @@ ROOT_REL = ""
 # Transient key carrying an archive's member list from the probe to
 # Backend.store(); never written into a stored document.
 MEMBERS_KEY = "_members"
+
+
+def is_file_kind(kind: str | None) -> bool:
+    return kind not in NON_FILE_KINDS
 
 
 def root_id(root: str) -> str:

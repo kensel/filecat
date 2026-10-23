@@ -133,6 +133,14 @@ CREATE TABLE IF NOT EXISTS set_members (
 );
 CREATE INDEX IF NOT EXISTS idx_set_members_role ON set_members(role);
 CREATE INDEX IF NOT EXISTS idx_set_members_path ON set_members(path);
+
+CREATE TABLE IF NOT EXISTS redactions (
+    id TEXT PRIMARY KEY,
+    root_id TEXT NOT NULL,
+    path_hash TEXT NOT NULL,
+    document JSONB NOT NULL,
+    UNIQUE (root_id, path_hash)
+);
 """
 
 _UPSERT_SQL = """
@@ -295,6 +303,18 @@ class PostgresBackend(Backend):
         self.conn.commit()
         self.delete_members(root, rel_path)
 
+    def delete_many(self, root: str, rel_paths: Iterable[str]) -> int:
+        self.flush()
+        rid, n = root_id(root), 0
+        with self.conn.cursor() as cur:
+            for part in chunks(list(rel_paths)):
+                cur.execute("DELETE FROM files WHERE root_id=%s AND rel_path = ANY(%s)", (rid, part))
+                n += cur.rowcount
+                cur.execute("DELETE FROM members WHERE root_id=%s AND archive_rel_path = ANY(%s)",
+                            (rid, part))
+        self.conn.commit()
+        return n
+
     # --- archive members -------------------------------------------
     def put_members(self, root: str, rel_path: str, members: list) -> None:
         self.flush()
@@ -435,6 +455,40 @@ class PostgresBackend(Backend):
             n = cur.rowcount
         self.conn.commit()
         return n
+
+    def purge_dropped_paths(self, root: str, rel_paths: Iterable[str]) -> int:
+        rid, paths = root_id(root), list(rel_paths)
+        with self.conn.cursor() as cur:
+            cur.execute("SELECT id, rel_path FROM dropped WHERE root_id=%s", (rid,))
+            gone = [i for i, rel in cur.fetchall()
+                    if any(rel == p or rel.startswith(p + "/") for p in paths)]
+            for part in chunks(gone):
+                cur.execute("DELETE FROM dropped WHERE id = ANY(%s)", (part,))
+        self.conn.commit()
+        return len(gone)
+
+    # --- sticky redactions ---------------------------------------------
+    def _redaction_rows(self, root: str | None = None) -> list[Document]:
+        with self.conn.cursor() as cur:
+            cur.execute("SELECT document FROM redactions")
+            rows = cur.fetchall()
+        self.conn.commit()
+        return [d if isinstance(d, dict) else json.loads(d) for (d,) in rows]
+
+    def _redaction_put(self, entry: Document) -> None:
+        with self.conn.cursor() as cur:
+            cur.execute(
+                "INSERT INTO redactions (id, root_id, path_hash, document) VALUES (%s, %s, %s, %s::jsonb) "
+                "ON CONFLICT (id) DO UPDATE SET root_id=excluded.root_id, "
+                "path_hash=excluded.path_hash, document=excluded.document",
+                (entry["id"], entry["root_id"], entry["path_hash"],
+                 json.dumps(entry, ensure_ascii=False)))
+        self.conn.commit()
+
+    def _redaction_remove(self, entry: Document) -> None:
+        with self.conn.cursor() as cur:
+            cur.execute("DELETE FROM redactions WHERE id=%s", (entry["id"],))
+        self.conn.commit()
 
     # --- root index ----------------------------------------------------
     def put_root_info(self, info: Document) -> None:

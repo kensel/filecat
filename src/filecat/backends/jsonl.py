@@ -28,7 +28,8 @@ Aggregates are stored in `<stem>.summary.json` beside the jsonl file (for
 in `<stem>.programs.jsonl`, both per the spec. Records moved out by
 `drop()` (their file vanished) are appended to `<stem>.dropped.jsonl`.
 Treemap snapshots of the web viewer's Graph view are kept in
-`<stem>.treemaps.json`, rewritten whole like the root index.
+`<stem>.treemaps.json`, rewritten whole like the root index, and the sticky
+redactions (a few small entries, no names) in `<stem>.redactions.json`.
 """
 from __future__ import annotations
 
@@ -103,6 +104,7 @@ class JsonlBackend(Backend):
         self.roots_path = self.path.with_name(self.path.stem + ".roots.json")
         self.dropped_path = self.path.with_name(self.path.stem + ".dropped.jsonl")
         self.treemaps_path = self.path.with_name(self.path.stem + ".treemaps.json")
+        self.redactions_path = self.path.with_name(self.path.stem + ".redactions.json")
         self._member_keys: set[tuple[str, str]] | None = None
         self._buffer: list[Document] = []
         self._last_flush = time.monotonic()
@@ -238,6 +240,22 @@ class JsonlBackend(Backend):
                         if (d["root_id"], d["rel_path"]) != key]
         self._merge({}, delete_keys={key})
         self.delete_members(root, rel_path)
+
+    def delete_many(self, root: str, rel_paths: Iterable[str]) -> int:
+        """One rewrite of the catalog for the whole batch, not one per record."""
+        rid = root_id(root)
+        wanted = {(rid, p) for p in rel_paths}
+        if not wanted:
+            return 0
+        self.flush()
+        present = set()
+        self._ensure_index()
+        present = {k for k in wanted if k in (self._index or {})}
+        if present:
+            self._merge({}, delete_keys=present)
+            for _, rel_path in present:
+                self.delete_members(root, rel_path)
+        return len(present)
 
     def roots(self) -> list[str]:
         return sorted({d["root"] for d in self.list()})
@@ -419,6 +437,30 @@ class JsonlBackend(Backend):
                     except json.JSONDecodeError:
                         continue
 
+    def purge_dropped_paths(self, root: str, rel_paths: Iterable[str]) -> int:
+        if not self.dropped_path.exists():
+            return 0
+        rid, paths = root_id(root), list(rel_paths)
+        removed = 0
+        tmp_path = self.dropped_path.parent / (self.dropped_path.name + f".tmp{os.getpid()}")
+        try:
+            with open(tmp_path, "w", encoding="utf-8", newline="\n") as out:
+                for doc in self._read_dropped():
+                    rel = doc.get("rel_path") or ""
+                    if doc.get("root_id") == rid and any(rel == p or rel.startswith(p + "/") for p in paths):
+                        removed += 1
+                    else:
+                        out.write(json.dumps(doc, ensure_ascii=False) + "\n")
+            if removed:
+                _replace(tmp_path, self.dropped_path)
+        finally:
+            if tmp_path.exists():
+                try:
+                    tmp_path.unlink()
+                except OSError:
+                    pass
+        return removed
+
     def list_dropped(self, root: str | None = None) -> Iterator[Document]:
         rid = root_id(root) if root is not None else None
         rows = [d for d in self._read_dropped() if rid is None or d.get("root_id") == rid]
@@ -537,6 +579,45 @@ class JsonlBackend(Backend):
         entries = self._read_treemaps()
         if entries.pop(treemap_id, None) is not None:
             self._write_treemaps(entries)
+
+    # --- sticky redactions ---------------------------------------------
+    # <stem>.redactions.json: {id: entry}, rewritten whole (a few entries).
+    def _read_redactions(self) -> dict[str, Document]:
+        try:
+            with open(self.redactions_path, "r", encoding="utf-8") as f:
+                return json.load(f)
+        except (OSError, json.JSONDecodeError):
+            return {}
+
+    def _write_redactions(self, entries: dict[str, Document]) -> None:
+        if not entries:
+            if self.redactions_path.exists():
+                self.redactions_path.unlink()
+            return
+        tmp_path = self.redactions_path.parent / (self.redactions_path.name + f".tmp{os.getpid()}")
+        try:
+            with open(tmp_path, "w", encoding="utf-8") as f:
+                json.dump(entries, f, ensure_ascii=False, indent=2)
+            _replace(tmp_path, self.redactions_path)
+        finally:
+            if tmp_path.exists():
+                try:
+                    tmp_path.unlink()
+                except OSError:
+                    pass
+
+    def _redaction_rows(self, root: str | None = None) -> list[Document]:
+        return list(self._read_redactions().values())
+
+    def _redaction_put(self, entry: Document) -> None:
+        entries = self._read_redactions()
+        entries[entry["id"]] = entry
+        self._write_redactions(entries)
+
+    def _redaction_remove(self, entry: Document) -> None:
+        entries = self._read_redactions()
+        if entries.pop(entry["id"], None) is not None:
+            self._write_redactions(entries)
 
     # --- installed programs -------------------------------------------
     def put_program(self, record: Document) -> None:

@@ -11,7 +11,8 @@ summary row lists exactly the records that row counted:
              (the folder browser; dirs included)
 * kind    -- record kind
 * q       -- case-insensitive substring of rel_path
-* files_only -- what the aggregates sum: kind != "dir" and not unreadable
+* files_only -- what the aggregates sum: kind not a folder or a rollup
+                (record.NON_FILE_KINDS) and not unreadable
 * unreadable -- only the entries summary counts as unreadable
 * errors  -- only records that carry an `errors` entry (dirs included)
 
@@ -32,6 +33,7 @@ from __future__ import annotations
 from typing import Any, Callable, Iterable, Iterator
 
 from .aggregate import dir_key
+from .record import NON_FILE_KINDS
 
 FILTERS = ("root", "kind", "suffix", "mime", "dir", "parent", "q", "files_only", "unreadable", "errors")
 SORTS = ("size", "name", "rel_path", "mtime_ns", "kind", "suffix")
@@ -76,9 +78,9 @@ def matches(doc: dict[str, Any], q: Query) -> bool:
     rel = doc.get("rel_path") or ""
     if "kind" in q and doc.get("kind") != q["kind"]:
         return False
-    if q.get("files_only") and (doc.get("kind") == "dir" or is_unreadable(doc)):
+    if q.get("files_only") and (doc.get("kind") in NON_FILE_KINDS or is_unreadable(doc)):
         return False
-    if q.get("unreadable") and (doc.get("kind") == "dir" or not is_unreadable(doc)):
+    if q.get("unreadable") and (doc.get("kind") in NON_FILE_KINDS or not is_unreadable(doc)):
         return False
     if q.get("errors") and not doc.get("errors"):
         return False
@@ -106,8 +108,8 @@ def query_documents(documents: Iterable[dict[str, Any]], q: Query) -> dict[str, 
     hits = [d for d in documents if matches(d, q)]
     hits.sort(key=lambda d: d.get("rel_path") or "")
     hits.sort(key=_sort_key(q["sort"]), reverse=q["desc"])
-    if "parent" in q:  # folders first, like a file manager
-        hits.sort(key=lambda d: d.get("kind") != "dir")
+    if "parent" in q:  # folders first, like a file manager; rollups after them
+        hits.sort(key=lambda d: {"dir": 0, "rollup": 1}.get(d.get("kind"), 2))
     page = hits[q["offset"]:q["offset"] + q["limit"]]
     return {"total": len(hits), "bytes": sum(d.get("size") or 0 for d in hits), "rows": page}
 
@@ -119,7 +121,7 @@ def subtree_documents(documents: Iterable[dict[str, Any]], parent: str) -> list[
     counts: dict[str, list[int]] = {}
     for doc in documents:
         rel = doc.get("rel_path") or ""
-        if doc.get("kind") == "dir" or is_unreadable(doc) or not rel.startswith(prefix):
+        if doc.get("kind") in NON_FILE_KINDS or is_unreadable(doc) or not rel.startswith(prefix):
             continue
         rest = rel[len(prefix):]
         if "/" not in rest:
@@ -138,7 +140,7 @@ def size_rows(documents: Iterable[dict[str, Any]], prefix: str) -> Iterator[tupl
     start = prefix + "/" if prefix else ""
     for doc in documents:
         rel = doc.get("rel_path") or ""
-        if not rel or doc.get("kind") == "dir" or is_unreadable(doc) or not rel.startswith(start):
+        if not rel or doc.get("kind") in NON_FILE_KINDS or is_unreadable(doc) or not rel.startswith(start):
             continue
         yield (rel, doc.get("size") or 0, doc.get("suffix") or "",
                doc.get("mime") or doc.get("kind") or "unknown")
@@ -216,9 +218,9 @@ def sql_where(q: Query, d: Dialect, root_id_value: str | None) -> tuple[str, lis
     if "kind" in q:
         add(f"kind = {ph}", q["kind"])
     if q.get("files_only"):
-        add(f"kind <> 'dir' AND NOT {unreadable}")
+        add(f"kind NOT IN ('dir', 'rollup') AND NOT {unreadable}")
     if q.get("unreadable"):
-        add(f"kind <> 'dir' AND {unreadable}")
+        add(f"kind NOT IN ('dir', 'rollup') AND {unreadable}")
     if q.get("errors"):
         add(d.has_errors)
     if "suffix" in q:
@@ -292,5 +294,5 @@ def sql_order(q: Query, d: Dialect = SQLITE) -> str:
     if col != "rel_path":  # SQL Server rejects a column listed twice
         parts.append(f"rel_path{d.collate} ASC")
     if "parent" in q:
-        parts.insert(0, "CASE WHEN kind = 'dir' THEN 0 ELSE 1 END")
+        parts.insert(0, "CASE WHEN kind = 'dir' THEN 0 WHEN kind = 'rollup' THEN 1 ELSE 2 END")
     return ", ".join(parts)
