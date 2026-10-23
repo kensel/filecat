@@ -22,6 +22,11 @@ or `match` identifiers (`naa:`, `uuid:`, `serial:`, `volid:`, ...) from which
 chaining through any number of hops. `physical_summary` counts the bytes behind a
 backed disk once, on the host that owns the real disk.
 
+A host with no agent, and a link no automatic rule can find, are written by hand in
+filecat.toml (`[[storage.hosts]]`, `[[storage.links]]`): `manual_topology` builds the
+host's snapshot (`source: "manual"`), `ManualLink` is a link, and `resolve` puts both
+over the automatic matches, reporting where they disagree.
+
 `validate` checks a response and returns every problem; `parse` raises
 TopologyError(problems) instead. Unknown fields are kept in `Node.extra` so a
 newer agent's output survives a round trip. `share_entries` derives what
@@ -54,6 +59,8 @@ ROLES = ("data", "parity", "spare", "log", "cache", "special", "dedup", "boot")
 HEALTH = ("ok", "warning", "degraded", "failed", "unknown")
 PROTOCOLS = ("smb", "nfs")
 HOST_KINDS = ("host", "cluster")
+SOURCES = ("agent", "manual")
+ORIGINS = ("config", "catalog")
 _MATCH_RE = re.compile(r"^[a-z][a-z0-9_]*:\S")
 
 _INT_FIELDS = ("size_bytes", "used_bytes", "free_bytes", "allocated_bytes", "raw_bytes")
@@ -110,7 +117,7 @@ class Node:
     vm: dict[str, Any] | None = None    # vdisk: {"id", "name"} of the VM it is attached to (a vm node's id)
     attached: bool | None = None        # vdisk: False for an image-library template
     target: str | None = None           # lun: the iSCSI target it is exported through
-    initiators: list[str] = field(default_factory=list)  # lun: initiator names or IQNs allowed (ACL)
+    initiators: list[dict[str, Any]] = field(default_factory=list)  # lun ACL: {"iqn", "authority"?, "default"?}
     backing: dict[str, str] | None = None  # disk/lun/vdisk: {"host", "id"} of the node elsewhere that provides it
     match: list[str] = field(default_factory=list)  # "kind:value" identifiers that link nodes of different hosts
     virtual: bool | None = None         # disk/lun/vdisk: provided by something else, so a provider is expected
@@ -128,6 +135,8 @@ class Node:
         for k in ("members", "protocols", "initiators", "match"):
             if kwargs.get(k) is None:
                 kwargs.pop(k, None)
+        if "initiators" in kwargs:   # a bare IQN is an entry with no authority
+            kwargs["initiators"] = [{"iqn": i} if isinstance(i, str) else i for i in kwargs["initiators"]]
         if kwargs.get("platform") is None:
             kwargs.pop("platform", None)
         return cls(extra={k: v for k, v in d.items() if k not in known}, **kwargs)
@@ -152,6 +161,8 @@ class Topology:
     nodes: dict[str, Node]
     collected_at: str | None = None
     version: int = VERSION
+    source: str = "agent"             # "agent" (reported by filecat-agent) or "manual" (written by hand)
+    origin: str | None = None         # a manual host: "config" (filecat.toml) or "catalog" (the web viewer)
     extra: dict[str, Any] = field(default_factory=dict)
 
     @property
@@ -229,6 +240,10 @@ class Topology:
         out: dict[str, Any] = {"version": self.version, "platform": self.platform, "host": self.host}
         if self.collected_at:
             out["collected_at"] = self.collected_at
+        if self.source != "agent":
+            out["source"] = self.source
+        if self.origin:
+            out["origin"] = self.origin
         out["nodes"] = [n.to_dict() for n in self.nodes.values()]
         out.update(self.extra)
         return out
@@ -236,6 +251,14 @@ class Topology:
 
 def _is_int(v: Any) -> bool:
     return isinstance(v, int) and not isinstance(v, bool)
+
+
+def _is_initiator(x: Any) -> bool:
+    if isinstance(x, str):
+        return bool(x)
+    return (isinstance(x, dict) and isinstance(x.get("iqn"), str) and bool(x["iqn"])
+            and (x.get("authority") is None or _is_int(x["authority"]))
+            and (x.get("default") is None or isinstance(x["default"], bool)))
 
 
 def validate(doc: Any) -> list[str]:
@@ -247,6 +270,10 @@ def validate(doc: Any) -> list[str]:
         problems.append(f"version is {doc.get('version')!r}, expected {VERSION}")
     if not isinstance(doc.get("platform"), str) or not doc["platform"]:
         problems.append("platform must be a non-empty string")
+    if doc.get("source", "agent") not in SOURCES:
+        problems.append(f"source {doc['source']!r} is not one of {', '.join(SOURCES)}")
+    if doc.get("origin") is not None and doc["origin"] not in ORIGINS:
+        problems.append(f"origin {doc['origin']!r} is not one of {', '.join(ORIGINS)}")
     host = doc.get("host")
     if not isinstance(host, dict) or not isinstance(host.get("name"), str) or not host["name"]:
         problems.append("host.name must be a non-empty string")
@@ -309,10 +336,12 @@ def validate(doc: Any) -> list[str]:
                 problems.append(f"{nid}: protocols must be a list of {', '.join(PROTOCOLS)}")
         if n.get("vm") is not None and not isinstance(n["vm"], dict):
             problems.append(f"{nid}: vm must be an object")
-        for k in ("initiators", "match"):
-            v = n.get(k)
-            if v is not None and (not isinstance(v, list) or not all(isinstance(x, str) and x for x in v)):
-                problems.append(f"{nid}: {k} must be a list of non-empty strings")
+        v = n.get("match")
+        if v is not None and (not isinstance(v, list) or not all(isinstance(x, str) and x for x in v)):
+            problems.append(f"{nid}: match must be a list of non-empty strings")
+        v = n.get("initiators")
+        if v is not None and (not isinstance(v, list) or not all(_is_initiator(x) for x in v)):
+            problems.append(f"{nid}: initiators must be a list of {{iqn, authority}} objects")
         if isinstance(n.get("match"), list):
             for m in n["match"]:
                 if isinstance(m, str) and m and not _MATCH_RE.match(m):
@@ -385,9 +414,11 @@ def parse(doc: Any) -> Topology:
     if problems:
         raise TopologyError(problems)
     nodes = {n["id"]: Node.from_dict(n) for n in doc["nodes"]}
-    extra = {k: v for k, v in doc.items() if k not in ("version", "platform", "host", "collected_at", "nodes")}
+    extra = {k: v for k, v in doc.items()
+             if k not in ("version", "platform", "host", "collected_at", "nodes", "source", "origin")}
     return Topology(platform=doc["platform"], host=dict(doc["host"]), nodes=nodes,
-                    collected_at=doc.get("collected_at"), version=doc["version"], extra=extra)
+                    collected_at=doc.get("collected_at"), version=doc["version"],
+                    source=doc.get("source", "agent"), origin=doc.get("origin"), extra=extra)
 
 
 def from_response(resp: dict[str, Any]) -> Topology:
@@ -500,14 +531,16 @@ Key = tuple[str, str]   # (lowercased host name, node id): the global key of a n
 @dataclass(frozen=True)
 class Link:
     """`consumer` is a disk, lun or vdisk that is made of `provider`, a node on another host.
-    via: "backing" (the node says so), "config" (an override) or "<consumer kind>~<provider
-    kind>" (an automatic match); key is the matched identifier. initiator_ok: when the
-    provider is a lun with an ACL, whether the consumer's host (name or IQN) is on it."""
+    via: "backing" (the node says so), "config" or "catalog" (a manual link, which wins) or
+    "<consumer kind>~<provider kind>" (an automatic match); key is the matched identifier.
+    initiator_ok: when the provider is a lun with an ACL naming initiators, whether the
+    consumer's host (name or IQN) is on it. note: the manual link's note."""
     consumer: Key
     provider: Key
     via: str
     key: str | None = None
     initiator_ok: bool | None = None
+    note: str | None = None
 
 
 @dataclass(frozen=True)
@@ -522,20 +555,34 @@ def _hex(s: str) -> str:
     return re.sub(r"[^0-9a-f]", "", s.lower())
 
 
+NAA_PREFIX = "6001405"   # NAA type 6 and the LIO OUI 001405, which Synology's iSCSI target uses
+
+
+def naa_from_unit_serial(serial: str) -> str:
+    """The NAA id an initiator sees for a LIO LUN (a Synology iSCSI LUN), from its
+    `vpd_unit_serial` in `iscsi_lun.conf` (equal to the LUN's uuid).
+
+    `6001405` plus the first 25 characters of the serial, where a character that is not
+    a hex digit becomes the hex digit of its low four bits (`ord(c) & 0xF`), so the hyphen
+    of a uuid, 0x2d, becomes `d`. Hex digits are kept, lowercase. Confirmed on nas3:
+    f48f1514-6072-4193-989e-9e7bfbe6d0e1 is seen as scsi-36001405f48f1514d6072d4193d989ed9
+    (the leading 3 of `scsi-3` is the id's type, not part of this result).
+    """
+    if len(serial) < 25:
+        raise ValueError(f"vpd_unit_serial {serial!r} is shorter than 25 characters")
+    digits = "0123456789abcdef"
+    return NAA_PREFIX + "".join(c if c in digits else format(ord(c) & 0xF, "x")
+                                for c in serial[:25].lower())
+
+
 def _naa(s: str) -> str:
     """Hex of an NAA id as written in `naa.6001...`, `scsi-36001...` or bare."""
     h = _hex(s.lower().removeprefix("naa.").removeprefix("scsi-"))
     return h[1:] if len(h) == 33 and h.startswith("3") else h
 
 
-def _naa_uuid(naa: str, uuid: str) -> bool:
-    """A Synology (LIO) NAA id is `6`, the OUI `001405`, then 25 hex digits that start the
-    LUN UUID. Tolerant: a prefix match of at least 16 digits either way, so a shortened or
-    differently formatted id still links."""
-    n, u = _naa(naa), _hex(uuid)
-    if n.startswith("6001405"):
-        n = n[7:]
-    return min(len(n), len(u)) >= 16 and (u.startswith(n) or n.startswith(u))
+def _same_naa(a: str, b: str) -> bool:
+    return _naa(a) == _naa(b)
 
 
 def _same(a: str, b: str) -> bool:
@@ -548,7 +595,7 @@ def _same_ci(a: str, b: str) -> bool:
 
 # (consumer kind, provider kind, equal?, consumer types, provider types)
 _RULES = (
-    ("naa", "uuid", _naa_uuid, LINK_TYPES, ("lun",)),         # initiator or cluster disk -> Synology LUN
+    ("naa", "naa", _same_naa, LINK_TYPES, ("lun",)),          # initiator or cluster disk -> Synology LUN
     ("serial", "vmserial", _same_ci, ("disk",), ("vdisk",)),  # guest disk -> hypervisor vdisk
     ("volid", "volid", _same, ("vdisk",), ("disk", "lun")),   # VM disk -> cluster storage volume
     ("vmmdisk", "vmmdisk", _same, ("disk",), ("vdisk",)),     # Virtual DSM disk -> VMM vdisk
@@ -560,6 +607,21 @@ def _keys(node: Node) -> list[tuple[str, str]]:
     return [tuple(m.split(":", 1)) for m in node.match if ":" in m]  # type: ignore[misc]
 
 
+def _provider_keys(node: Node) -> list[tuple[str, str]]:
+    """The node's `match` keys, plus for a LUN without a `naa:` key the one derived from its
+    `vpd_unit_serial` (platform.synology) or else its `uuid:` key, which is the same string."""
+    keys = _keys(node)
+    if node.type == "lun" and not any(k == "naa" for k, _ in keys):
+        serial = (node.platform.get("synology") or {}).get("vpd_unit_serial") \
+            or next((v for k, v in keys if k == "uuid"), None)
+        if isinstance(serial, str):
+            try:
+                keys.append(("naa", naa_from_unit_serial(serial)))
+            except ValueError:
+                pass
+    return keys
+
+
 def _expects_provider(node: Node) -> bool:
     if node.virtual:
         return True
@@ -567,51 +629,137 @@ def _expects_provider(node: Node) -> bool:
             and any(k in _CONSUMER_KINDS for k, _ in _keys(node)))
 
 
-def _parse_ref(ref: str) -> Key:
-    host, sep, nid = ref.partition("/")
-    if not sep or not host or not nid:
-        raise ValueError(f"link {ref!r} must look like host/node-id")
-    return host.lower(), nid
+@dataclass(frozen=True)
+class ManualLink:
+    """A link written by hand: `from_ref` (a disk, lun or vdisk; see `resolve`) is made of
+    `to_ref`. Each is `host/ref`, ref being a node id (`lun:f48f1514-...`) or `type:name`
+    (`lun:LUN-3`, matched on the node's name, case-insensitively, when exactly one node of
+    that type has it). source: "config" (filecat.toml, read-only in the viewer) or
+    "catalog" (stored in the catalog, edited in the viewer)."""
+    from_ref: str
+    to_ref: str
+    note: str | None = None
+    source: str = "config"
+
+    def to_dict(self) -> dict[str, Any]:
+        out: dict[str, Any] = {"from": self.from_ref, "to": self.to_ref, "source": self.source}
+        if self.note:
+            out["note"] = self.note
+        return out
 
 
-def resolve_links(snapshots: Iterable[Topology],
-                  overrides: dict[str, str] | None = None) -> tuple[list[Link], list[Unresolved]]:
+def parse_ref(ref: str) -> Key:
+    """`host/ref` as (lowercased host, ref). The ref is `type:...` with a node type: either a
+    node id (`lun:f48f...`, `disk:naa.6001...`) or `type:name`. Raises ValueError."""
+    host, sep, rest = ref.strip().partition("/")
+    if not sep or not host or not rest:
+        raise ValueError(f"link {ref!r} must look like host/node-id (or host/type:name)")
+    kind = rest.split(":", 1)[0]
+    if ":" not in rest or kind not in TYPES or not rest.split(":", 1)[1]:
+        raise ValueError(f"link {ref!r}: {rest!r} must be a node id or type:name, "
+                         f"type being one of {', '.join(TYPES)}")
+    return host.lower(), rest
+
+
+def _find(topos: dict[str, Topology], key: Key) -> tuple[Node | None, str | None]:
+    """The node a ref names: an exact id first, then `type:name` by name. (node, problem)."""
+    topo = topos.get(key[0])
+    if topo is None:
+        return None, f"no snapshot for host {key[0]}"
+    node = topo.nodes.get(key[1])
+    if node is not None:
+        return node, None
+    kind, _, name = key[1].partition(":")
+    named = [n for n in topo.nodes.values() if n.type == kind and n.name.casefold() == name.casefold()]
+    if len(named) == 1:
+        return named[0], None
+    if named:
+        return None, f"ambiguous: {key[0]} has {len(named)} {kind} nodes named {name!r} ({', '.join(n.id for n in named)})"
+    return None, f"{key[0]} has no node {key[1]}"
+
+
+@dataclass(frozen=True)
+class Conflict:
+    """A manual link that names a different provider than the automatic match (or backing)
+    found for the same consumer. The manual link wins and is in `Resolution.links`."""
+    consumer: Key
+    manual: Link
+    automatic: Link
+
+
+@dataclass(frozen=True)
+class ManualResult:
+    """What became of one `ManualLink`. status: "resolved", "unresolved" (reason says why) or
+    "conflict" (it won against `automatic`). consumer is the disk the link starts from, which
+    differs from the named node when a pool or a share was named."""
+    link: ManualLink
+    status: str
+    consumer: Key | None = None
+    provider: Key | None = None
+    reason: str | None = None
+    automatic: Link | None = None
+
+
+@dataclass
+class Resolution:
+    links: list[Link]
+    unresolved: list[Unresolved]
+    conflicts: list[Conflict] = field(default_factory=list)
+    manual: list[ManualResult] = field(default_factory=list)
+
+
+def resolve_links(snapshots: Iterable[Topology], overrides: dict[str, str] | None = None,
+                  manual: Iterable[ManualLink] = ()) -> tuple[list[Link], list[Unresolved]]:
+    """`resolve(...)` without the conflicts and the per-link results."""
+    res = resolve(snapshots, overrides, manual)
+    return res.links, res.unresolved
+
+
+def resolve(snapshots: Iterable[Topology], overrides: dict[str, str] | None = None,
+            manual: Iterable[ManualLink] = ()) -> Resolution:
     """Link the disks, luns and vdisks of many hosts' snapshots (a later snapshot replaces an
-    earlier one of the same host). For each consumer, in this order:
+    earlier one of the same host). For each consumer:
 
-    1. `overrides` (the `[storage.links]` table, `"host/id" = "host/id"`, consumer to provider);
+    1. a manual link (`manual`; `overrides` is the same as a `{"host/ref": "host/ref"}` dict
+       of config links), which wins over everything below;
     2. its own `backing`;
-    3. an automatic match on its `match` identifiers: NAA id to LUN uuid (prefix, tolerant),
-       disk serial to a hypervisor vdisk's `vmserial`, Proxmox volume id to the cluster
-       storage's disk, VMM vdisk uuid to a Virtual DSM disk.
+    3. an automatic match on its `match` identifiers: NAA id to the NAA id of a Synology LUN
+       (its `naa:` key, else derived from `vpd_unit_serial` or the uuid), disk serial to a
+       hypervisor vdisk's `vmserial`, Proxmox volume id to the cluster storage's disk, VMM
+       vdisk uuid to a Virtual DSM disk.
 
-    A link is always to a different host. A named target that is missing, or an automatic
-    match that is ambiguous, is `Unresolved`; so is a node that expects a provider (virtual,
-    or a cluster-scope vdisk with a volume id) and finds none.
+    A manual link starts at a disk, lun or vdisk. Naming a pool, group, volume or share
+    starts it at the one disk beneath it (several disks: unresolved, name one). Its target
+    may be any node of another host. A link is always to a different host. When the automatic
+    result for that consumer is a different provider the link is also reported in
+    `conflicts`; an unknown host, node or an ambiguous name is `Unresolved`, never an error.
+    A named backing that is missing, or an automatic match that is ambiguous, is `Unresolved`
+    too; so is a node that expects a provider (virtual, or a cluster-scope vdisk with a
+    volume id) and finds none.
     """
     topos = {t.key: t for t in snapshots}
-    over = {_parse_ref(k): _parse_ref(v) for k, v in (overrides or {}).items()}
+    wanted = [ManualLink(k, v) for k, v in (overrides or {}).items()] + list(manual)
+    refs = [(parse_ref(m.from_ref), parse_ref(m.to_ref)) for m in wanted]
     providers: dict[str, list[tuple[Key, Node, str]]] = {}
     for host, topo in topos.items():
         for node in topo.nodes.values():
-            for kind, value in _keys(node):
+            for kind, value in _provider_keys(node):
                 providers.setdefault(kind, []).append(((host, node.id), node, value))
 
-    links: list[Link] = []
-    unresolved: list[Unresolved] = []
+    links: dict[Key, Link] = {}
+    unresolved: dict[Key, Unresolved] = {}
     for host, topo in topos.items():
         for node in topo.nodes.values():
             if node.type not in LINK_TYPES:
                 continue
             me = (host, node.id)
-            via = "config" if me in over else "backing" if node.backing else None
-            if via:
-                target = over[me] if me in over else (node.backing["host"].lower(), node.backing["id"])
+            if node.backing:
+                target = (node.backing["host"].lower(), node.backing["id"])
                 problem = _target_problem(topos, me, target)
                 if problem:
-                    unresolved.append(Unresolved(me, problem, f"{target[0]}/{target[1]}"))
+                    unresolved[me] = Unresolved(me, problem, f"{target[0]}/{target[1]}")
                 else:
-                    links.append(Link(me, target, via))
+                    links[me] = Link(me, target, "backing")
                 continue
             found: dict[Key, tuple[str, str]] = {}
             for ckind, pkind, same, ctypes, ptypes in _RULES:
@@ -625,14 +773,61 @@ def resolve_links(snapshots: Iterable[Topology],
                             found.setdefault(pkey, (f"{ckind}~{pkind}", f"{kind}:{value}"))
             if len(found) == 1:
                 (pkey, (how, key)), = found.items()
-                links.append(Link(me, pkey, how, key, _initiator_ok(topo, topos[pkey[0]].nodes[pkey[1]])))
+                links[me] = Link(me, pkey, how, key, _initiator_ok(topo, topos[pkey[0]].nodes[pkey[1]]))
             elif found:
                 names = ", ".join(f"{h}/{i}" for h, i in found)
-                unresolved.append(Unresolved(me, f"ambiguous: matches {names}"))
+                unresolved[me] = Unresolved(me, f"ambiguous: matches {names}")
             elif _expects_provider(node):
-                wanted = next((f"{k}:{v}" for k, v in _keys(node) if k in _CONSUMER_KINDS), None)
-                unresolved.append(Unresolved(me, "no provider found", wanted))
-    return links, unresolved
+                want = next((f"{k}:{v}" for k, v in _keys(node) if k in _CONSUMER_KINDS), None)
+                unresolved[me] = Unresolved(me, "no provider found", want)
+
+    conflicts: list[Conflict] = []
+    results: list[ManualResult] = []
+    for ml, (fref, tref) in zip(wanted, refs):
+        target = f"{tref[0]}/{tref[1]}"
+
+        fnode, problem = _find(topos, fref)
+        if problem is None:
+            consumer, problem = _consumer_of(topos[fref[0]], fnode)
+        if problem:
+            unresolved[fref] = Unresolved(fref, problem, target)
+            results.append(ManualResult(ml, "unresolved", None, None, problem))
+            continue
+        me = (fref[0], consumer.id)
+        unresolved.pop(me, None)
+        tnode, problem = _find(topos, tref)
+        if problem is None and tref[0] == fref[0]:
+            problem = "a link joins different hosts"
+        if problem:
+            links.pop(me, None)
+            unresolved[me] = Unresolved(me, problem, target)
+            results.append(ManualResult(ml, "unresolved", me, None, problem))
+            continue
+        provider = (tref[0], tnode.id)
+        link = Link(me, provider, ml.source, None, _initiator_ok(topos[fref[0]], tnode), ml.note)
+        auto = links.get(me)
+        links[me] = link
+        if auto is not None and auto.provider != provider:
+            conflicts.append(Conflict(me, link, auto))
+            results.append(ManualResult(ml, "conflict", me, provider, None, auto))
+        else:
+            results.append(ManualResult(ml, "resolved", me, provider))
+    return Resolution(list(links.values()), list(unresolved.values()), conflicts, results)
+
+
+def _consumer_of(topo: Topology, node: Node) -> tuple[Node | None, str | None]:
+    """The disk, lun or vdisk a manual link starts from: the node itself, or for a group,
+    pool, volume or share the one disk under it. (node, problem)"""
+    if node.type in LINK_TYPES:
+        return node, None
+    if node.type == "vm":
+        return None, f"{node.id} is a vm; link one of its disks"
+    disks = sorted(_disks_behind(topo, node))
+    if len(disks) == 1:
+        return topo.nodes[disks[0]], None
+    if not disks:
+        return None, f"{node.id} has no disk beneath it; link a disk, lun or vdisk"
+    return None, f"{node.id} sits on {len(disks)} disks ({', '.join(disks)}); link one of them"
 
 
 def _target_problem(topos: dict[str, Topology], me: Key, target: Key) -> str | None:
@@ -650,11 +845,15 @@ def _target_problem(topos: dict[str, Topology], me: Key, target: Key) -> str | N
 
 
 def _initiator_ok(consumer: Topology, provider: Node) -> bool | None:
-    if provider.type != "lun" or not provider.initiators:
+    """Is the consumer's host (name or IQN) on the provider LUN's ACL? None: not a LUN, or the
+    ACL lists no initiator by name (only the default entry). The `authority` is not used:
+    what its values mean is not verified."""
+    named = [str(i.get("iqn")).lower() for i in provider.initiators if not i.get("default")]
+    if provider.type != "lun" or not named:
         return None
     mine = {consumer.key, str(consumer.host.get("iqn") or "").lower(),
             *(str(q).lower() for q in consumer.host.get("iqns") or ())}
-    return any(i.lower() in mine for i in provider.initiators)
+    return any(i in mine for i in named)
 
 
 def chain(links: Iterable[Link], start: Key) -> list[Key]:
@@ -748,3 +947,123 @@ def physical_summary(snapshots: Iterable[Topology], links: Iterable[Link],
                 out["volume_free_bytes"] += n.free_bytes or 0
                 out["by_host"][host] = out["by_host"].get(host, 0) + (n.used_bytes or 0)
     return out
+
+
+# --- hosts written by hand -----------------------------------------------------------------
+
+MANUAL_TYPES = ("disk", "group", "pool", "volume", "share", "lun", "vdisk")
+MANUAL_KEYS = ("type", "name", "id", "parent", "disks", "size", "used", "free", "unc", "path",
+               "virtual", "serial", "model", "media", "kind", "health", "detail", "protocols", "match")
+_SIZE_RE = re.compile(r"^\s*(\d+(?:\.\d+)?)\s*(?:([KMGTP])(i?)B)?\s*$", re.IGNORECASE)
+
+
+def parse_size(value: Any) -> int:
+    """Bytes from an integer or a string such as `"10.74 TiB"`, `"500GB"` or `"1024"`.
+    KB, MB, ... are powers of 1000, KiB, MiB, ... of 1024. Raises ValueError."""
+    if isinstance(value, bool) or not isinstance(value, (int, str)):
+        raise ValueError(f"{value!r} is not a size")
+    if isinstance(value, int):
+        if value < 0:
+            raise ValueError(f"{value!r} is not a size")
+        return value
+    m = _SIZE_RE.match(value)
+    if not m:
+        raise ValueError(f"{value!r} is not a size (want bytes, or a number with KB, MiB, TB, TiB ...)")
+    unit = m.group(2)
+    base = 1024 if m.group(3) else 1000
+    return int(float(m.group(1)) * (base ** ("KMGTP".index(unit.upper()) + 1) if unit else 1))
+
+
+def manual_topology(name: str, nodes: list[dict[str, Any]], *, unc_server: str | None = None,
+                    platform: str = "manual", origin: str = "config") -> Topology:
+    """The snapshot of a host with no agent, from a terse node list (`[[storage.hosts]]`).
+
+    Each node is a dict with `type` (disk group pool volume share lun vdisk) and `name`; the
+    rest is optional. `id` defaults to `type:name` (shares: lowercased). `parent` and `disks`
+    name nodes of this host by id, by `type:name` or by a name only one node has. A volume
+    with no parent goes in the host's only pool, a share with none in its only volume.
+    `disks` (pool, group, volume) become `members`. `size`, `used`, `free` take bytes or
+    "10.74 TiB". A share's `unc` defaults to `<unc_server>\\<name>` and its `protocols` to smb.
+    The other keys are node fields of the same name. Raises ValueError (a TopologyError when
+    the result breaks the contract); the snapshot has `source: "manual"`.
+    """
+    if not isinstance(name, str) or not name.strip():
+        raise ValueError("a host needs a name")
+    specs: list[dict[str, Any]] = []
+    ids: set[str] = set()
+    for i, spec in enumerate(nodes, 1):
+        label = f"nodes[{i}]"
+        if not isinstance(spec, dict):
+            raise ValueError(f"{label} wants a table with type and name")
+        unknown = [k for k in spec if k not in MANUAL_KEYS]
+        if unknown:
+            raise ValueError(f"{label}: unknown key {unknown[0]!r}; the keys are {', '.join(MANUAL_KEYS)}")
+        kind, nname = spec.get("type"), spec.get("name")
+        if kind not in MANUAL_TYPES:
+            raise ValueError(f"{label}: type = {kind!r}; choose from {', '.join(MANUAL_TYPES)}")
+        if not isinstance(nname, str) or not nname.strip():
+            raise ValueError(f"{label} ({kind}): name is required")
+        nid = spec.get("id") or f"{kind}:{nname.lower() if kind == 'share' else nname}"
+        if not isinstance(nid, str):
+            raise ValueError(f"{label}: id wants a string")
+        if nid in ids:
+            raise ValueError(f"{label}: id {nid!r} is used twice (give one of the nodes an id)")
+        ids.add(nid)
+        specs.append({**spec, "id": nid, "_label": f"{label} ({nid})"})
+
+    def local(ref: Any, what: str, label: str) -> str:
+        if not isinstance(ref, str) or not ref:
+            raise ValueError(f"{label}: {what} wants a node id, type:name or name")
+        if ref in ids:
+            return ref
+        kind, _, nm = ref.partition(":")
+        named = [s["id"] for s in specs if s["type"] == kind and s["name"].casefold() == nm.casefold()]
+        if not named:
+            named = [s["id"] for s in specs if s["name"].casefold() == ref.casefold()]
+        if len(named) == 1:
+            return named[0]
+        raise ValueError(f"{label}: {what} {ref!r} " + (
+            f"is ambiguous ({', '.join(named)}); write type:name or the id" if named
+            else "names no node of this host"))
+
+    def only(kind: str) -> str | None:
+        found = [s["id"] for s in specs if s["type"] == kind]
+        return found[0] if len(found) == 1 else None
+
+    out: list[dict[str, Any]] = []
+    for spec in specs:
+        label, kind = spec["_label"], spec["type"]
+        n: dict[str, Any] = {"id": spec["id"], "type": kind, "name": spec["name"], "parent": None}
+        if spec.get("parent") is not None:
+            n["parent"] = local(spec["parent"], "parent", label)
+        elif kind == "volume":
+            n["parent"] = only("pool")
+        elif kind == "share":
+            n["parent"] = only("volume")
+            if n["parent"] is None:
+                raise ValueError(f"{label}: a share needs parent = \"<volume>\" "
+                                 "(the host has no volume, or more than one)")
+        if "disks" in spec:
+            if not isinstance(spec["disks"], list):
+                raise ValueError(f"{label}: disks wants a list of disk names")
+            n["members"] = [{"disk": local(d, "disks", label), "role": "data"} for d in spec["disks"]]
+        for key, field_name in (("size", "size_bytes"), ("used", "used_bytes"), ("free", "free_bytes")):
+            if key in spec:
+                try:
+                    n[field_name] = parse_size(spec[key])
+                except ValueError as exc:
+                    raise ValueError(f"{label}: {key}: {exc}") from None
+        for key in ("unc", "path", "virtual", "serial", "model", "media", "kind", "health", "detail",
+                    "protocols", "match"):
+            if key in spec:
+                n[key] = spec[key]
+        if kind == "share":
+            n.setdefault("protocols", ["smb"])
+            if not n.get("unc") and unc_server:
+                n["unc"] = f"{unc_server}\\{spec['name']}"
+        out.append(n)
+    host: dict[str, Any] = {"name": name.strip()}
+    if unc_server:
+        host["unc_server"] = unc_server
+    return parse({"version": VERSION, "platform": platform or "manual", "host": host,
+                  "source": "manual", "origin": origin, "nodes": out})

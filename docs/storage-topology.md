@@ -82,7 +82,7 @@ platforms that name parity disks (ZFS and md do not, so their members are
 | `protocols` | share | `smb`, `nfs` |
 | `vm` | vdisk | `{"id", "name"}` of the VM it is attached to: the id of a `vm` node (absent for a template) |
 | `attached` | vdisk | false for an image-library template or an orphaned disk |
-| `target`, `initiators` | lun | the iSCSI target name; the initiator names or IQNs its ACL allows |
+| `target`, `initiators` | lun | the iSCSI target name; the LUN's ACL, `[{"iqn", "authority", "default"?}]` (section 3, Synology) |
 | `backing` | disk, lun, vdisk | `{"host", "id"}` of the node on another host that provides this one (section 5) |
 | `match` | disk, lun, vdisk | `kind:value` identifiers to link nodes across hosts: `naa`, `uuid`, `serial`, `vmserial`, `volid`, `vmmdisk` |
 | `virtual` | disk, lun, vdisk | something else provides it; a missing provider is then reported |
@@ -157,7 +157,41 @@ a device before the agent relies on them.
 | lun | `iscsi_lun.conf` stanzas, `devtype` 5 (BLUN, thin) and 11 (BLUN_THICK) | `kind: iscsi`; `thin` = devtype 5; `size_bytes` = `bytes=`; `allocated_bytes` = sum of `st_blocks * 512` in the UUID directory (never `st_size`: the 512 GiB `ROD` sparse file); `path` = `@iSCSI/LUN/BLUN[_THICK]/<uuid>` |
 | vdisk | `devtype` 7 (VDISK_BLUN); `name=vdisk.<vm>.<vdisk>.<bus>.<unit>` attached, `name=image.<image>.<vol>...` template | attached: `vm` from `@Repository/<vm_uuid>/vguest.conf`, `attached: true`; image: `attached: false`, no `vm`; vCPU, RAM, `is_meta_disk`, `is_general_vm` go in `platform.synology` |
 | vm | `@Repository/<vm_uuid>/vguest.conf` | `vm:<uuid>`, name, vCPU and RAM in `platform.synology`; Virtual DSM has `is_general_vm: false` |
-| links | LUN: `target`, the target's ACL (initiator IQNs/names), `match: ["uuid:<lun uuid>"]`; vdisk: `match: ["uuid:<uuid>", "vmmdisk:<uuid>"]` and `vm` | a LUN's initiators come from the SAN Manager target config (*verify* the file); the NAA/WWN an initiator sees derives from the LUN uuid (section 5, *verify on nas3*) |
+| links | LUN: `target`, `initiators` from the LUN ACL, `match: ["uuid:<uuid>", "naa:<derived>"]` and `platform.synology.vpd_unit_serial`; vdisk: `match: ["uuid:<uuid>", "vmmdisk:<uuid>"]` and `vm` | the NAA id derives from `vpd_unit_serial` by the rule below (verified on nas3); the ACL is `iscsi_lun_acl.conf` (found, `authority` still to verify) |
+
+**The LUN files** (both in `/volume1/@iSCSI/LUN/`, found on nas3):
+
+```ini
+# iscsi_lun.conf, one stanza per LUN
+[LUN_f48f1514-6072-4193-989e-9e7bfbe6d0e1]
+uuid=f48f1514-6072-4193-989e-9e7bfbe6d0e1
+vpd_unit_serial=f48f1514-6072-4193-989e-9e7bfbe6d0e1
+
+# iscsi_lun_acl.conf, one stanza per (LUN, initiator)
+[iSCSI_ACL_79494475-cb0a-4937-886c-ceeb8f894547_iqn.2000-01.com.synology:default.acl]
+initiator=iqn.2000-01.com.synology:default.acl
+lun_uuid=79494475-cb0a-4937-886c-ceeb8f894547
+authority=0
+```
+
+- **NAA id.** What an initiator sees (Proxmox `scsi-36001405f48f1514d6072d4193d989ed9`) is
+  LIO's NAA-6 id, derived from `vpd_unit_serial`: `6001405` plus the first 25
+  characters of the serial, each character that is not a hex digit replaced by the hex
+  digit of `ord(c) & 0xF` (a uuid's `-`, 0x2d, becomes `d`), hex digits kept, lowercase.
+  `f48f1514-6072-4193-989e-9e7bfbe6d0e1` gives `6001405f48f1514d6072d4193d989ed9`
+  (`topology.naa_from_unit_serial`, tested on exactly this pair). It is not the uuid
+  with the hyphens stripped, which is what this page first guessed. `vpd_unit_serial`
+  equals the uuid on every LUN seen, but the agent reads it and does not assume it.
+  The agent records the serial in `platform.synology.vpd_unit_serial` and the result as
+  a `naa:` match; a LUN reported without one is still matched, by deriving the id from
+  its `vpd_unit_serial` or else its `uuid:` key.
+- **ACL.** `initiators` is one entry per ACL stanza: `{"iqn": <initiator>, "authority":
+  <integer as written>}`; the stanza for `iqn.2000-01.com.synology:default.acl` is the
+  default for initiators not listed and is recorded with `"default": true`. `authority`
+  is kept raw: 0 and 3 are the values seen. *Verify:* the guess is 0 = no access and 3 =
+  read/write. Nothing relies on it: `initiator_ok` on a link only asks whether the
+  consumer's host is named by an entry that is not the default, and is `None` when the
+  ACL names no one.
 
 NAS-MAIN is the fixture `tests/data/synology_nas_main.json`: five disks in
 one `md2` RAID 5 group (SHR) of one pool; `volume1` (btrfs) and `volume2`
@@ -170,9 +204,10 @@ instead: `lab_nas3.json` (Synology SAN Manager: Volume 1, seven LUNs with
 targets and initiators, thin and thick, and NAS01's VMM vdisks),
 `lab_pvec.json` (the Proxmox cluster, PVEC), `lab_pve2.json` (VM 155 with its
 four disks, local-btrfs), `lab_truenas2.json`, `lab_nas01.json` (Virtual
-DSM) and `lab_lkensel_g5_5090.json` (a Windows initiator, sketched). Their
-uuids, serials and nas3's pool layout are invented; the sizes, names and
-targets are the lab's.
+DSM) and `lab_lkensel_g5_5090.json` (a Windows initiator, sketched). LUN-3's uuid
+and NAA id are the real ones; the other LUN uuids, the serials and nas3's pool
+layout are invented, with every LUN's NAA id derived from its uuid by the rule
+above. The sizes, names and targets are the lab's.
 
 ### TrueNAS (fixture `tests/data/truenas_tank.json`)
 
@@ -270,26 +305,25 @@ through any number of hops.
 - `virtual: true` marks a disk, lun or vdisk that something else provides
   (a QEMU disk, an iSCSI disk, a Virtual DSM disk). It says "a provider is
   expected", so a missing one is reported.
-- A `lun` lists `initiators` (names or IQNs from its target's ACL) and its
+- A `lun` lists `initiators` (`{iqn, authority}` entries from its ACL) and its
   `target`; a `vdisk` names its `vm` (`{"id": <vm node id>, "name"}`).
-- `topology.resolve_links(snapshots, overrides=None) -> (links, unresolved)`
+- `topology.resolve_links(snapshots, overrides=None, manual=()) -> (links, unresolved)`
   works over any number of hosts' snapshots. The global key of a node is
   `(host, id)`, the host lowercased. A link always joins two hosts.
   `chain(links, key)` follows a node down to the real storage.
 
-Order of resolution for each consumer: the `[storage.links]` config table
-(`"truenas2/disk:TRUENASDISK002" = "pve2/vdisk:155:scsi1"`), then its own
-`backing`, then the automatic keys:
+Order of resolution for each consumer: a manual link (`[[storage.links]]`, below),
+then its own `backing`, then the automatic keys:
 
 | Consumer `match` | Provider `match` | Used for |
 |---|---|---|
-| `naa:<NAA id>` on a disk, lun or vdisk | `uuid:<LUN uuid>` on a Synology `lun` | an initiator's or cluster's iSCSI disk -> the NAS LUN. Prefix match on normalized hex (`naa.`, `scsi-3` and case ignored), at least 16 digits |
+| `naa:<NAA id>` on a disk, lun or vdisk | `naa:<NAA id>` on a Synology `lun` (else derived from its `vpd_unit_serial` or `uuid:`) | an initiator's or cluster's iSCSI disk -> the NAS LUN. Exact match on the hex (`naa.`, `scsi-3` and case ignored), no prefix matching |
 | `serial:<serial>` on a `disk` | `vmserial:<serial=>` on a hypervisor `vdisk` | a guest's disk -> the Proxmox vdisk whose `serial=` the VM config set (case-insensitive) |
 | `volid:<storage:volume>` on a `vdisk` | `volid:<same>` on the cluster storage's `disk` or `lun` | a VM's raw iSCSI volume -> the storage that is attached cluster-wide |
 | `vmmdisk:<vdisk uuid>` on a `disk` | `vmmdisk:<uuid>` on a Synology `vdisk` | a Virtual DSM disk -> its VMM vdisk, when the guest can see the uuid |
 
 A match must be exactly one provider on another host. Two candidates are
-`ambiguous`, none is "no provider found". Overrides win over everything, so a
+`ambiguous`, none is "no provider found". Manual links win over everything, so a
 wrong guess is fixed in the config, not in the code.
 
 **Unresolved is a report, not an error.** `resolve_links` returns
@@ -356,27 +390,101 @@ truenas2   disk:TRUENASDISK002   match serial:TRUENASDISK002          (virtual)
 pve2       vdisk:155:scsi1       match vmserial:TRUENASDISK002, volid:PVEC:0.0.1.scsi-36001405f48f...
    |  volid ~ volid: the storage volume of the cluster-wide iSCSI storage PVEC
 pvec       disk:naa.6001405f48f1514d6072d4193d989ed9   match naa:6001405f48f1..., volid:...
-   |  naa ~ uuid: 6001405 + the first 25 hex digits of the LUN uuid
-nas3       lun:f48f1514-d607-2d41-93d9-89ed9a7c4e10    (LUN-3, target PVEC, match uuid:...)
+   |  naa ~ naa: the LUN's NAA id, 6001405 + its vpd_unit_serial by the rule in section 3
+nas3       lun:f48f1514-6072-4193-989e-9e7bfbe6d0e1    (LUN-3, target PVEC, match naa:6001405f48f1514d6072d4193d989ed9)
 ```
 
 The boot disk, `TRUENASDISK001`, stops one hop earlier, at pve2's
-`vdisk:155:scsi0` on local-btrfs. The hop from the cluster to the LUN rests
-on a hypothesis to verify on nas3: the SCSI id `36001405f48f1514...` is NAA
-type 6, OUI `001405` (LIO, which Synology uses), and the 25 digits after it
-are the start of the LUN's UUID in `iscsi_lun.conf` (`f48f1514-d607-...`). If
-a real LUN's id does not start that way, set it by hand
-(`[storage.links]`) or have the agent also record the LUN's actual
-`vpd_unit_serial`/`wwn` as a `naa:` match on the lun (a `naa`-to-`naa`
-rule is one line in `_RULES`).
+`vdisk:155:scsi0` on local-btrfs. The hop from the cluster to the LUN is the
+NAA rule of section 3, verified on nas3. Before any agent reports Proxmox, the
+same relationship is one line of config: truenas2's disk linked to
+`nas3/lun:LUN-3` (section 5, "Written by hand").
 
 NAS01 is the same on a different axis: `nas3` has `vm:<guid>` NAS01 whose two
 vdisks carry `vmmdisk:<vdisk uuid>`; NAS01's own snapshot has two virtual
 disks carrying the same uuid, **if** Virtual DSM can see it (open question
-4); otherwise a `[storage.links]` line per disk. LUN-4..7 (target
+4); otherwise a `[[storage.links]]` entry per disk. LUN-4..7 (target
 `lkensel-g5-5090`, initiator its IQN) match the workstation's four iSCSI
 disks by `naa`; the workstation's IQN being in the LUN's `initiators` is
 reported on the link as `initiator_ok`, a hint and not a requirement.
+
+### Written by hand: hosts and links in filecat.toml
+
+Nothing here needs an agent. A host no agent reports (truenas2 until a TrueNAS reader
+exists), and a link no rule can find, are written in `filecat.toml`:
+
+```toml
+[[storage.hosts]]
+name = "truenas2"
+unc_server = '\\truenas2'
+platform = "truenas"               # free text
+nodes = [
+  { type = "disk",   name = "tank-disk", virtual = true, size = "10.74 TiB" },
+  { type = "pool",   name = "tank", disks = ["tank-disk"] },
+  { type = "volume", name = "tank" },
+  { type = "share",  name = "Share1" },    # placeholder names; \\truenas2\Share1
+  { type = "share",  name = "Share2" },
+]
+
+[[storage.links]]
+from = "truenas2/disk:tank-disk"
+to   = "nas3/lun:LUN-3"
+note = "tank is one iSCSI LUN on nas3, through Proxmox"     # optional
+```
+
+**Refs.** `from` and `to` are `host/ref`. The host is everything before the first `/`
+(case-insensitive). The ref is `type:...` with a node type, read two ways, in this order:
+a node id (`lun:f48f1514-6072-4193-989e-9e7bfbe6d0e1`, `disk:naa.6001...`), and when no
+node has that id, `type:name`: the node of that type whose `name` is that, compared
+case-insensitively (`lun:LUN-3`). The name must be unique: two nodes named alike make the link
+`unresolved` with both ids in the reason, and the fix is the id. A ref with no type
+(`nas3/LUN-3`) is a config error, as is a link inside one host or a disk linked twice.
+Whether the host or node exists is not checked at load time: `resolve_links` reports
+an unknown target as `unresolved` (the other host's agent may simply not have run yet).
+
+**Where a link starts.** At the `disk`, `lun` or `vdisk`, and that is also what is
+recorded: `physical_summary` counts bytes per disk, "a disk with a resolved link is not
+physical on its own host", so the disk is the node that has to carry the link for the
+pool above it to be left out. Naming a `pool`, `group`, `volume` or `share` is accepted
+as a shortcut for the one disk beneath it; if there are several disks the link is
+`unresolved` and says so, because linking one of them would leave the others counted
+and linking all of them to one LUN would be false. The end (`to`) may be any node of
+another host, though a lun, vdisk or disk is what chains and `guest_servers` expect.
+
+**Hosts.** `nodes` are `type` (`disk group pool volume share lun vdisk`) and `name`, with
+optional `id` (default `type:name`, shares lowercased), `parent`, `disks` (pool, group
+and volume: the disks beneath, becoming `members`), `size`/`used`/`free` (bytes, or
+`"10.74 TiB"`, `"500 GB"`; KiB is 1024, KB 1000), `unc`, `path`, `virtual`, `serial`,
+`model`, `media`, `kind`, `health`, `detail`, `protocols`, `match`. `parent` and `disks`
+name nodes of the same host by id, `type:name`, or a name only one node has. A volume
+without `parent` goes in the host's only pool, a share in its only volume (a share with
+neither is an error). A share's `unc` defaults to `<unc_server>\<name>` and its `protocols`
+to `smb`. The result is an ordinary snapshot, `source: "manual"`, validated like an
+agent's. If an agent later reports the same host name, its snapshot replaces the
+manual one (agents are loaded after).
+
+**Precedence.** A manual link beats `backing` and the automatic keys. If the automatic
+result for that disk is a different provider, the result lists a `Conflict` and the manual
+link is what is used; if it agrees, it is just marked `config`. A manual link whose
+target is missing leaves its disk `unresolved` rather than falling back behind the
+config's back. `topology.resolve(snapshots, overrides, manual)` returns links,
+unresolved, conflicts and one `ManualResult` per link; `resolve_links` returns just the
+first two.
+
+**Checking.** `filecat config show` lists the hosts and links. `filecat storage links
+[--snapshot FILE ...] [--json]` resolves them over the manual hosts plus any saved
+`storage_topology` replies (or bare topologies) and prints each link as resolved,
+unresolved or conflict, the other disks still expecting a provider, and the
+`physical_summary` totals; exit status 1 when a link is unresolved or in conflict.
+Truenas2 and nas3's snapshot are enough for the LUN-3 chain, no Proxmox needed.
+
+**Later: the catalog, and the web viewer.** These records are shaped to move. `ManualLink`
+and the manual snapshot (`Topology.source == "manual"`, `Topology.origin`) are the in-memory
+form; the config loader fills them with `source`/`origin` `"config"`. A catalog store edited
+in the web viewer would fill the same records with `"catalog"`, and `resolve` takes both
+(a link's `via` says which won). Config entries stay read-only in the viewer (shown with
+their origin, not editable), so a hand-edited file and the viewer never write the same
+record. Neither the store nor the editor exists yet.
 
 ## 6. Totals
 
@@ -456,19 +564,22 @@ into their own store, since they are already keyed by root.
 
 ## 8. Open questions
 
-1. To verify on the real hosts: (a) Synology's NAA id for a LUN starts with
-   `6001405` followed by the first 25 hex digits of the `iscsi_lun.conf`
-   UUID (fall back: read the LUN's serial/`wwn` from the target config and
-   record it as `naa:`); (b) where DSM keeps the target/initiator ACL, and
-   whether it lists IQNs only; (c) the `serial=` a Proxmox VM sets is what
-   the guest reports (TrueNAS shows it as the disk serial: expected, check).
+1. Confirmed on nas3: (a) a LUN's NAA id is `6001405` plus the first 25 characters
+   of `vpd_unit_serial` with non-hex characters mapped to `ord(c) & 0xF`
+   (section 3); (b) the ACL is `iscsi_lun_acl.conf`, one stanza per LUN and
+   initiator, with a `default.acl` entry. Still to verify: what `authority`
+   means (0 and 3 seen; guess 0 = no access, 3 = read/write), whether the
+   target-to-LUN mapping lives in the same file, and (c) that the `serial=` a
+   Proxmox VM sets is what the guest reports (TrueNAS shows it as the disk
+   serial: expected, check).
 2. Disks as an inventory with `members` edges (this design) versus disks as
    the top of the tree. The inventory handles SHR and shared spares; the cost
    is that "disk -> pool" is a join the viewer does.
-3. `[storage.links]` is a config table `"host/id" = "host/id"`; the loader
-   is not written yet (`resolve_links` takes the dict). Where the central side
-   keeps the latest snapshot of each host for resolving, and how stale a
-   snapshot may be before its links are called unresolved.
+3. The `[[storage.links]]` and `[[storage.hosts]]` loader exists (section 5);
+   the dict form of `resolve_links(overrides=...)` stays for code. Where the
+   central side keeps the latest snapshot of each host for resolving, how
+   stale a snapshot may be before its links are called unresolved, and the
+   catalog store that would hold links and hosts edited in the viewer.
 4. Can Virtual DSM see its VMM vdisk uuid? Unknown: the guest's disk model is
    "Virtual disk" and its serial may be generated. If not, link by config, or
    by size and boot order (not implemented, too weak to guess).

@@ -21,6 +21,11 @@ when that value is used, so passwords can stay out of the file.
 `[[agents]]` tables name the NAS hosts running filecat-agent (see
 docs/agent-protocol.md); load_agents validates them and agent_for picks the
 one that covers a UNC path. `filecat agents` lists and tests them.
+
+`[[storage.hosts]]` (a host with no agent) and `[[storage.links]]` (which disk is made of which
+node on another host) are written by hand; load_storage validates them and
+`filecat storage links` checks them against saved topology snapshots. See
+docs/storage-topology.md.
 """
 from __future__ import annotations
 
@@ -36,6 +41,7 @@ from typing import Any
 
 from .agent_client import DEFAULT_PORT, ShareMap, normalize_fingerprint
 from .backends import BACKENDS, DEFAULT_OUT
+from .topology import ManualLink, Topology, manual_topology, parse_ref
 
 FILE_NAME = "filecat.toml"
 FILE_BACKENDS = ("jsonl", "sqlite")
@@ -259,6 +265,107 @@ def load_agents(cfg: dict[str, Any]) -> list[AgentConfig]:
     return agents
 
 
+# --- [[storage.hosts]] and [[storage.links]] -----------------------------
+STORAGE_KEYS = ("hosts", "links")
+HOST_KEYS = ("name", "unc_server", "platform", "nodes")
+LINK_KEYS = ("from", "to", "note")
+
+
+@dataclass(frozen=True)
+class StorageConfig:
+    """What the file says about storage. `links` are ManualLinks with source "config" and
+    `hosts` snapshots with source "manual", origin "config": the same records a catalog store
+    would hold with source "catalog" (read-only in the viewer when they come from here)."""
+    links: list[ManualLink] = field(default_factory=list)
+    hosts: list[Topology] = field(default_factory=list)
+
+
+def _storage_host(table: Any, index: int) -> Topology:
+    label = f"[[storage.hosts]] #{index}"
+    if not isinstance(table, dict):
+        raise ConfigError(f"{label}: wants a table with name, unc_server, platform and nodes")
+    if isinstance(table.get("name"), str) and table["name"]:
+        label += f" ({table['name']})"
+    unknown = [k for k in table if k not in HOST_KEYS]
+    if unknown:
+        raise ConfigError(f"{label}: unknown key {unknown[0]!r}; the keys are {', '.join(HOST_KEYS)}")
+
+    def text(key: str, default: str | None = None) -> str | None:
+        value = table.get(key, default)
+        if value is not None and (not isinstance(value, str) or not value.strip()):
+            raise ConfigError(f"{label}: {key} wants a non-empty string")
+        return value.strip() if value else None
+
+    name = text("name")
+    if not name:
+        raise ConfigError(f"{label}: name is required")
+    if "/" in name or any(c.isspace() for c in name):
+        raise ConfigError(f"{label}: name must not contain spaces or '/'")
+    nodes = table.get("nodes", [])
+    if not isinstance(nodes, list):
+        raise ConfigError(f"{label}: nodes wants a list of {{ type = ..., name = ... }} tables")
+    try:
+        return manual_topology(name, nodes, unc_server=text("unc_server"),
+                               platform=text("platform", "manual") or "manual", origin="config")
+    except ValueError as exc:
+        raise ConfigError(f"{label}: {exc}") from None
+
+
+def _storage_link(table: Any, index: int) -> ManualLink:
+    label = f"[[storage.links]] #{index}"
+    if not isinstance(table, dict):
+        raise ConfigError(f"{label}: wants a table with from and to")
+    unknown = [k for k in table if k not in LINK_KEYS]
+    if unknown:
+        raise ConfigError(f"{label}: unknown key {unknown[0]!r}; the keys are {', '.join(LINK_KEYS)}")
+    refs = {}
+    for key in ("from", "to"):
+        value = table.get(key)
+        if not isinstance(value, str) or not value.strip():
+            raise ConfigError(f"{label}: {key} is required, as host/node-id or host/type:name")
+        try:
+            refs[key] = parse_ref(value)
+        except ValueError as exc:
+            raise ConfigError(f"{label}: {key}: {exc}") from None
+    if refs["from"][0] == refs["to"][0]:
+        raise ConfigError(f"{label}: from and to are both on {refs['from'][0]} (a link joins different hosts)")
+    note = table.get("note")
+    if note is not None and not isinstance(note, str):
+        raise ConfigError(f"{label}: note wants a string")
+    return ManualLink(table["from"].strip(), table["to"].strip(), note or None, "config")
+
+
+def load_storage(cfg: dict[str, Any]) -> StorageConfig:
+    """The validated [[storage.hosts]] and [[storage.links]], in file order. Refs are checked
+    for their syntax only; whether a host or node exists is for resolve_links to report."""
+    section = cfg.get("storage")
+    if section is None:
+        return StorageConfig()
+    if not isinstance(section, dict):
+        raise ConfigError("storage: write [[storage.hosts]] and [[storage.links]] tables")
+    unknown = [k for k in section if k not in STORAGE_KEYS]
+    if unknown:
+        raise ConfigError(f"storage: unknown key {unknown[0]!r}; use [[storage.hosts]] and [[storage.links]]")
+    tables = {key: section.get(key, []) for key in STORAGE_KEYS}
+    for key, value in tables.items():
+        if not isinstance(value, list):
+            raise ConfigError(f"storage.{key}: write one [[storage.{key}]] table per entry (double brackets)")
+    hosts = [_storage_host(t, i) for i, t in enumerate(tables["hosts"], 1)]
+    seen: set[str] = set()
+    for host in hosts:
+        if host.key in seen:
+            raise ConfigError(f"[[storage.hosts]]: name {host.name!r} is used twice")
+        seen.add(host.key)
+    links = [_storage_link(t, i) for i, t in enumerate(tables["links"], 1)]
+    starts: set[tuple[str, str]] = set()
+    for link in links:
+        start = parse_ref(link.from_ref)
+        if start in starts:
+            raise ConfigError(f"[[storage.links]]: {link.from_ref!r} is linked twice (a disk is made of one thing)")
+        starts.add(start)
+    return StorageConfig(links, hosts)
+
+
 def agent_for(agents: list[AgentConfig], unc_path: str) -> AgentConfig | None:
     """The agent that covers a UNC path: the one with the longest matching
     alias or share root (components, case-insensitively); the first listed
@@ -360,6 +467,33 @@ def server_default(name: str) -> str:
     return dsn % _odbc_driver() if name == "mssql" else dsn
 
 
+# A host with no agent, and the link no automatic rule can make: truenas2 is a TrueNAS VM whose
+# pool is one raw iSCSI LUN of nas3. `config init` writes these lines as they are.
+STORAGE_EXAMPLE = [
+    "# Storage written by hand (docs/storage-topology.md; check it with: filecat storage links).",
+    "# A host with no agent: pool tank on one virtual disk. Sizes are optional; the share names",
+    "# here are placeholders, and a share's UNC root defaults to <unc_server>\\<name>.",
+    "# [[storage.hosts]]",
+    '# name = "truenas2"',
+    "# unc_server = '\\\\truenas2'",
+    '# platform = "truenas"',
+    "# nodes = [",
+    '#   { type = "disk",   name = "tank-disk", virtual = true, size = "10.74 TiB" },',
+    '#   { type = "pool",   name = "tank", disks = ["tank-disk"] },',
+    '#   { type = "volume", name = "tank" },',
+    '#   { type = "share",  name = "Share1" },',
+    '#   { type = "share",  name = "Share2" },',
+    "# ]",
+    "#",
+    "# Which disk is made of which node on another host: host/node-id or host/type:name.",
+    "# Start at the disk, lun or vdisk; a name is matched when only one node of that type has it.",
+    "# [[storage.links]]",
+    '# from = "truenas2/disk:tank-disk"',
+    '# to = "nas3/lun:LUN-3"',
+    '# note = "tank is one iSCSI LUN on nas3, through Proxmox"',
+]
+
+
 def render(*, backend: str = "sqlite", dsns: dict[str, str] | None = None,
            outs: dict[str, str] | None = None, model: str = DEFAULT_MODEL,
            ollama_url: str = DEFAULT_OLLAMA_URL, notes: dict[str, str] | None = None) -> str:
@@ -404,6 +538,8 @@ def render(*, backend: str = "sqlite", dsns: dict[str, str] | None = None,
         "# alias = '\\\\nas-main'      # the server SMB scans record it under (default \\\\NAME)",
         "# [agents.shares]           # folders that are not /volume1/<share>",
         "# '/volume2/Archive' = '\\\\nas-main\\Archive'",
+        "",
+        *STORAGE_EXAMPLE,
         "",
     ]
     return "\n".join(lines)
@@ -481,6 +617,18 @@ def cmd_show(args: Any, path: Path | None, cfg: dict[str, Any]) -> int:
         print(f"  {'':8} token = {a.token if args.reveal else mask_token(a.token)}{warn}")
         for prefix, unc in a.shares.items():
             print(f"  {'':8} share {prefix} = {unc}")
+    try:
+        storage = load_storage(cfg)
+    except ConfigError as exc:
+        print(f"storage:     invalid: {exc}")
+        return 1
+    if storage.hosts or storage.links:
+        print(f"storage:     {len(storage.hosts)} manual hosts, {len(storage.links)} links "
+              "(filecat storage links; read-only in the viewer)")
+    for h in storage.hosts:
+        print(f"  host {h.name:8} {h.unc_server}  {h.platform}, {len(h.nodes)} nodes")
+    for link in storage.links:
+        print(f"  link {link.from_ref} -> {link.to_ref}" + (f"   ({link.note})" if link.note else ""))
     return 0
 
 

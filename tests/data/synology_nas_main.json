@@ -275,9 +275,13 @@
       "lid": 3,
       "kind": "BLUN",
       "extent_files": 2,
-      "consumer": "pve-node-2 (ZFS over iSCSI)"
+      "consumer": "pve-node-2 (ZFS over iSCSI)",
+      "vpd_unit_serial": "f48f1514-6072-4193-989e-9e7bfbe6d0e1"
      }
-    }
+    },
+    "match": [
+     "naa:6001405f48f1514d6072d4193d989ed9"
+    ]
    },
    {
     "id": "lun:47f5d7a8-5444-4932-93e3-c712f6aa0130",
@@ -294,9 +298,13 @@
       "devtype": 11,
       "lid": 2,
       "kind": "BLUN_THICK",
-      "extent_files": 2
+      "extent_files": 2,
+      "vpd_unit_serial": "47f5d7a8-5444-4932-93e3-c712f6aa0130"
      }
-    }
+    },
+    "match": [
+     "naa:600140547f5d7a8d5444d4932d93e3dc"
+    ]
    },
    {
     "id": "lun:bd85bc23-c5d3-459e-8801-39d17f096c57",
@@ -313,9 +321,13 @@
       "devtype": 5,
       "lid": 7,
       "kind": "BLUN",
-      "extent_files": 2
+      "extent_files": 2,
+      "vpd_unit_serial": "bd85bc23-c5d3-459e-8801-39d17f096c57"
      }
-    }
+    },
+    "match": [
+     "naa:6001405bd85bc23dc5d3d459ed8801d3"
+    ]
    },
    {
     "id": "vdisk:ff8a106f-f063-439f-85e9-e21abb402ae1",

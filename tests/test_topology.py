@@ -309,7 +309,7 @@ def test_config_wins_over_derived(main):
 
 # --- the lab: links between hosts ---------------------------------------------------------
 
-LUN3 = ("nas3", "lun:f48f1514-d607-2d41-93d9-89ed9a7c4e10")
+LUN3 = ("nas3", "lun:f48f1514-6072-4193-989e-9e7bfbe6d0e1")
 PVEC_DISK = ("pvec", "disk:naa.6001405f48f1514d6072d4193d989ed9")
 SCSI1 = ("pve2", "vdisk:155:scsi1")
 SCSI0 = ("pve2", "vdisk:155:scsi0")
@@ -364,7 +364,7 @@ def test_truenas2_chain_resolves_hop_by_hop():
     assert topology.chain(links.values(), POOL_DISK) == [POOL_DISK, SCSI1, PVEC_DISK, LUN3]
     assert links[POOL_DISK].via == "serial~vmserial" and links[POOL_DISK].key == "serial:TRUENASDISK002"
     assert links[SCSI1].via == "volid~volid"
-    assert links[PVEC_DISK].via == "naa~uuid" and links[PVEC_DISK].initiator_ok is True
+    assert links[PVEC_DISK].via == "naa~naa" and links[PVEC_DISK].initiator_ok is True
     # the boot disk goes to the local vdisk and stops there
     assert topology.chain(links.values(), BOOT_DISK) == [BOOT_DISK, SCSI0]
 
@@ -410,19 +410,77 @@ def test_virtual_dsm_disk_without_an_id_needs_a_config_link():
     assert links[NAS01_META].provider == ("nas3", "vdisk:0b10c7a2-58de-4b3f-a641-9d02f7e8c5b1")
 
 
-def test_naa_match_is_a_tolerant_prefix_of_the_lun_uuid():
-    for spelled in ("naa.6001405F48F1514D6072D4193D989ED9", "36001405f48f1514d6072d4193d989ed9",
-                    "6001405f48f1514d6072d419"):   # 17 hex digits of the uuid are enough
+def test_naa_rule_on_the_real_lun():
+    # nas3's LUN-3: iscsi_lun.conf says f48f1514-..., Proxmox sees scsi-36001405f48f1514d6072d4193d989ed9
+    serial = "f48f1514-6072-4193-989e-9e7bfbe6d0e1"
+    assert topology.naa_from_unit_serial(serial) == "6001405f48f1514d6072d4193d989ed9"
+    assert topology.naa_from_unit_serial(serial.upper()) == "6001405f48f1514d6072d4193d989ed9"
+    # only the first 25 characters count
+    assert topology.naa_from_unit_serial(serial + "ffff") == topology.naa_from_unit_serial(serial)
+    # a character that is not a hex digit becomes the hex digit of ord(c) & 0xF: '-' 0x2d -> d,
+    # '_' 0x5f -> f, 'g' 0x67 -> 7, ' ' 0x20 -> 0
+    assert topology.naa_from_unit_serial("ab_dg 12-" + "0" * 16) == "6001405abfd70" + "1" + "2" + "d" + "0" * 16
+    with pytest.raises(ValueError, match="25 characters"):
+        topology.naa_from_unit_serial("f48f1514-6072")
+
+
+def test_lab_luns_carry_their_unit_serial_and_naa():
+    nas3 = topology.parse(lab_docs()["nas3"])
+    for lun in nas3.of_type("lun"):
+        serial = lun.platform["synology"]["vpd_unit_serial"]
+        assert lun.id == f"lun:{serial}"
+        assert f"naa:{topology.naa_from_unit_serial(serial)}" in lun.match
+    lun3 = nas3.nodes[LUN3[1]]
+    assert "naa:6001405f48f1514d6072d4193d989ed9" in lun3.match
+    # the Windows workstation's disks are LUN-4..7 under the same rule
+    ws = topology.parse(lab_docs()["lkensel-g5-5090"])
+    assert {m for d in ws.of_type("disk") for m in d.match} == \
+        {m for n in nas3.of_type("lun") if n.target == "lkensel-g5-5090" for m in n.match if m.startswith("naa:")}
+
+
+def test_lun_acl_shape():
+    nas3 = topology.parse(lab_docs()["nas3"])
+    lun3 = nas3.nodes[LUN3[1]]
+    assert lun3.initiators == [
+        {"iqn": "iqn.1993-08.org.debian:01:pve1", "authority": 3},
+        {"iqn": "iqn.1993-08.org.debian:01:pve2", "authority": 3},
+        {"iqn": "iqn.2000-01.com.synology:default.acl", "authority": 0, "default": True}]
+    # every LUN has the default.acl entry; nothing but the raw authority is recorded
+    assert all(any(i.get("default") for i in n.initiators) for n in nas3.of_type("lun"))
+    # a bare IQN (an older agent) is read as an entry with no authority, and the round trip is stable
+    doc = lab_docs()["nas3"]
+    node(doc, LUN3[1])["initiators"] = ["iqn.1993-08.org.debian:01:pve2"]
+    assert topology.parse(doc).nodes[LUN3[1]].initiators == [{"iqn": "iqn.1993-08.org.debian:01:pve2"}]
+
+
+def test_naa_match_is_exact_and_ignores_spelling():
+    for spelled in ("naa.6001405F48F1514D6072D4193D989ED9", "36001405f48f1514d6072d4193d989ed9"):
         def edit(docs, spelled=spelled):
             node(docs["pvec"], PVEC_DISK[1])["match"] = [f"naa:{spelled}"]
         links, _ = resolved(lab(edit=edit))
         assert links[PVEC_DISK].provider == LUN3, spelled
-    # a different LUN, or a prefix too short to mean anything, does not link
-    for spelled in ("6001405f48f1514d6072d4193d989ed9".replace("f48f", "f48e"), "6001405f48f15"):
+    # the old hyphen-stripped guess, a different LUN, or a prefix does not link
+    for spelled in ("6001405f48f151460724193989e9e7bf", "6001405f48f1514d6072d4193d989ed8",
+                    "6001405f48f1514d6072d419"):
         def edit(docs, spelled=spelled):
             node(docs["pvec"], PVEC_DISK[1])["match"] = [f"naa:{spelled}"]
         links, unresolved = resolved(lab(edit=edit))
-        assert PVEC_DISK not in links and unresolved[0].node == PVEC_DISK
+        assert PVEC_DISK not in links and unresolved[0].node == PVEC_DISK, spelled
+
+
+def test_a_lun_without_a_naa_key_is_matched_through_its_serial_or_uuid():
+    def strip(docs):
+        n = node(docs["nas3"], LUN3[1])
+        n["match"] = [m for m in n["match"] if not m.startswith("naa:")]
+    links, _ = resolved(lab(edit=strip))               # vpd_unit_serial is still there
+    assert links[PVEC_DISK].provider == LUN3
+
+    def strip_more(docs):
+        strip(docs)
+        del node(docs["nas3"], LUN3[1])["platform"]["synology"]["vpd_unit_serial"]
+        node(docs["nas3"], LUN3[1])["match"].append("uuid:" + LUN3[1].split(":", 1)[1])
+    links, _ = resolved(lab(edit=strip_more))          # only the uuid: the serial equals it
+    assert links[PVEC_DISK].provider == LUN3
 
 
 def test_config_link_overrides_a_match_and_backing():
@@ -595,6 +653,8 @@ def test_link_fields_validate():
     check("pvec", "pool:PVEC", lambda n: n.update(virtual=True), "can be virtual")
     check("nas3", "vol:5e2c8d41-90ab-4c17-a3f6-7b1d0e94c258", lambda n: n.update(initiators=["x"]), "only a lun has initiators")
     check("nas3", LUN3[1], lambda n: n.update(initiators=[""]), "initiators must be a list")
+    check("nas3", LUN3[1], lambda n: n.update(initiators=[{"iqn": "x", "authority": "3"}]),
+          "initiators must be a list")
     check("nas3", "vdisk:ff8a106f-f063-439f-85e9-e21abb402ae1", lambda n: n.update(vm={"id": "vm:nope"}),
           "is not a vm node")
     check("nas3", "vm:dead21af-c947-4f6a-9b25-1535ccd2dd75", lambda n: n.update(parent=LUN3[1]), "cannot sit under")

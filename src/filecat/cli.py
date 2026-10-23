@@ -29,6 +29,7 @@ COMMANDS = {
     "dupes": "filecat.dupes_cmd",
     "scan-everything": "filecat.everything",
     "agents": "filecat.agents_cmd",
+    "storage": "filecat.storage_cmd",
 }
 
 
@@ -322,6 +323,16 @@ def build_parser() -> argparse.ArgumentParser:
     a.add_argument("names", nargs="*", metavar="NAME", help="agents to test (default: all)")
     a.add_argument("--timeout", type=float, default=5.0, help="seconds per connection and request")
     a.add_argument("--json", action="store_true", help="one JSON object per agent")
+
+    p = sub.add_parser("storage", help="storage written by hand in filecat.toml: hosts with no agent "
+                                       "and the links between hosts")
+    ssub = p.add_subparsers(dest="action", required=True)
+    s = ssub.add_parser("links", help="the [[storage.hosts]] and [[storage.links]]; with --snapshot, "
+                                      "resolve them and report each link; exit 1 if one is unresolved "
+                                      "or in conflict")
+    s.add_argument("--snapshot", action="append", metavar="FILE",
+                   help="a saved storage_topology reply (or bare topology); repeat for each host")
+    s.add_argument("--json", action="store_true", help="one JSON object")
 
     p = sub.add_parser("serve", help="web viewer: browse the summary and drill into the records")
     _storage(p)

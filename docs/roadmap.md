@@ -168,9 +168,18 @@ server keeps store detection, manifest verification, probing and Ollama.
     Synology LUN; Virtual DSM -> VMM vdisk), `vm` nodes and Proxmox cluster
     scope, a physical total that counts each backed disk once
     (`resolve_links`, `physical_summary`, the `lab_*` fixtures).
-  - [ ] Verify on the real hosts: the NAA id to LUN uuid mapping on nas3, the
-    LUN ACL file, and whether Virtual DSM sees its VMM vdisk uuid; then the
-    `[storage.links]` config loader.
+  - [x] Verified on nas3: a LUN's NAA id derives from `vpd_unit_serial`
+    (`topology.naa_from_unit_serial`), matched exactly; the LUN ACL is
+    `iscsi_lun_acl.conf` (`initiators: [{iqn, authority}]`, `default.acl` as the
+    default).
+  - [x] Storage written by hand: `[[storage.hosts]]` (hosts with no agent, e.g.
+    truenas2) and `[[storage.links]]` (`host/node-id` or `host/type:name`) in
+    filecat.toml, which win over automatic matches and report conflicts;
+    `filecat storage links [--snapshot FILE ...]` checks them. Shaped for a
+    later catalog store edited in the web viewer (config entries read-only).
+  - [ ] Still to verify: what the ACL `authority` values mean (0 and 3 seen),
+    and whether Virtual DSM sees its VMM vdisk uuid. Then Proxmox and TrueNAS
+    readers, so truenas2's hand-written entry can go.
   - [ ] Review the design (open questions at the end of the page), then:
     `synology_storage.rs` brought into line, `AgentClient.storage_topology`
     returning `Topology`, derived entries merged into `ShareMap` (config

@@ -311,9 +311,11 @@ timeout.
      "path": "/volume1/Backup", "unc": "\\\\nas-main\\Backup", "protocols": ["smb"]},
     {"id": "lun:f48f1514-...", "type": "lun", "parent": "vol:5b0e9c77-...", "kind": "iscsi",
      "thin": true, "size_bytes": 11811160064000, "allocated_bytes": 12094627905536,
-     "target": "PVEC", "initiators": ["iqn.1993-08.org.debian:01:pve2"],
-     "match": ["uuid:f48f1514-d607-2d41-93d9-89ed9a7c4e10"],
-     "platform": {"synology": {"devtype": 5}}}
+     "target": "PVEC",
+     "initiators": [{"iqn": "iqn.1993-08.org.debian:01:pve2", "authority": 3},
+                    {"iqn": "iqn.2000-01.com.synology:default.acl", "authority": 0, "default": true}],
+     "match": ["uuid:f48f1514-6072-4193-989e-9e7bfbe6d0e1", "naa:6001405f48f1514d6072d4193d989ed9"],
+     "platform": {"synology": {"devtype": 5, "vpd_unit_serial": "f48f1514-6072-4193-989e-9e7bfbe6d0e1"}}}
   ]}}
 ```
 
@@ -346,7 +348,7 @@ validator is `filecat.topology`. In short:
   - `virtual: true` on a disk the host knows is provided by something else
     (model `QEMU HARDDISK`, `Virtual disk`, an iSCSI disk).
   - `backing: {host, id}` only when the agent really knows the other node.
-  - A `lun` reports its `target` and `initiators` (the target's ACL); a
+  - A `lun` reports its `target` and `initiators` (the LUN's ACL as `{iqn, authority}`); a
     `vdisk` its `vm`, the id of a `vm` node. A hypervisor reports `vm` nodes
     (Proxmox `vm:<vmid>`, Synology VMM `vm:<guest uuid>`).
   - A Proxmox node adds `host.cluster` and may return the cluster's own
@@ -460,15 +462,26 @@ What the Rust side changes to match this page:
    derives `used` from `bavail`, which counts the reserve as used.
 7. Deterministic order (disks by slot, then pools, groups, volumes, shares,
    luns, vdisks, each by id) so a rescan diffs cleanly; sizes as JSON integers.
-8. Links: for each LUN, `match: ["uuid:<uuid>"]`, `target` (the iSCSI target
-   name) and `initiators` (the initiator names/IQNs in the target's ACL, read
-   from the SAN Manager target config: verify the file); for each VMM vdisk,
+8. Links: for each LUN, `target` (the iSCSI target name) and
+   `match: ["uuid:<uuid>", "naa:<derived>"]`. Read `vpd_unit_serial` from the
+   LUN's stanza in `/volume1/@iSCSI/LUN/iscsi_lun.conf`, keep it in
+   `platform.synology.vpd_unit_serial` and derive the NAA id from it: `6001405`
+   plus the first 25 characters of the serial, every character that is not a
+   hex digit replaced by the hex digit of `ord(c) & 0xF` (`-` becomes `d`),
+   lowercase. `f48f1514-6072-4193-989e-9e7bfbe6d0e1` gives
+   `6001405f48f1514d6072d4193d989ed9`, which Proxmox shows as
+   `scsi-36001405f48f1514d6072d4193d989ed9` (confirmed on nas3;
+   `topology.naa_from_unit_serial` is the reference). Parse
+   `/volume1/@iSCSI/LUN/iscsi_lun_acl.conf` into each LUN's `initiators`: one
+   stanza per (LUN, initiator), keyed by `lun_uuid`, each giving
+   `{"iqn": <initiator>, "authority": <integer, as written>}`; the stanza whose
+   initiator is `iqn.2000-01.com.synology:default.acl` is the default for
+   initiators not listed, recorded as an entry with `"default": true`. Do not
+   interpret `authority` (0 and 3 are seen; 0 = no access and 3 = read/write is
+   a guess to verify). For each VMM vdisk,
    `match: ["uuid:<uuid>", "vmmdisk:<uuid>"]` and `vm` pointing at a new `vm`
    node per `@Repository/<vm_uuid>` (`vm:<uuid>`, name, `is_general_vm`, vCPU,
-   RAM). Record the NAA/WWN the LUN is exported with, if the target config
-   has it, as a second `naa:` match; the central side otherwise derives it
-   from the uuid (OUI `001405` plus the first 25 hex digits, to verify on
-   nas3). When the agent runs inside a Virtual DSM, mark its disks
+   RAM). When the agent runs inside a Virtual DSM, mark its disks
    `virtual: true` and report the VMM vdisk uuid as `vmmdisk:` if it can
    see one. Leave `backing` empty. A host that is not a Synology answers
    with `nodes: []` and `platform: "linux"` until a reader for it exists.
