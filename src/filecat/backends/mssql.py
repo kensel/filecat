@@ -545,6 +545,11 @@ class MssqlBackend(Backend):
         row = cur.fetchone()
         return json.loads(row[0]) if row else None
 
+    def delete_root_info(self, root: str) -> None:
+        cur = self.conn.cursor()
+        cur.execute("DELETE FROM roots WHERE root_id=?", (root_id(root),))
+        self.conn.commit()
+
     # --- stored treemaps ---------------------------------------------
     def put_treemap(self, meta: Document, data: Document | None = None) -> None:
         cur = self.conn.cursor()

@@ -2,10 +2,10 @@
 
     {"root_id", "root", "updated_at",
      "last_attempt": {"started_at", "finished_at", "status", "host", "pid", "path", "error",
-                      "account": {"user", "source"}, "heartbeat_at",
+                      "account": {"user", "source"}, "agent", "heartbeat_at",
                       "progress": {"files", "dirs", "bytes", "errors", "last_path"}},
      "last_scan":    {"started_at", "finished_at", "seconds", "status", "host", "account",
-                      "files", "dirs", "bytes", "errors"},
+                      "agent", "files", "dirs", "bytes", "errors"},
      "last_error":   {"at", "rel_path", "stage", "message"},
      "newest_file":  {"rel_path", "mtime_ns"}}
 
@@ -22,8 +22,10 @@ tells the two apart (in_progress vs stalled). Statuses:
     failed       any other exception escaped the walk (message in "error")
 
 `path` is present when the root was read through an alias (aliases.py).
-`account` is the account the root was read with (netaccount.py) when it
-could be told; preflight.py warns when it differs from the last scan's.
+`agent` is the name of the filecat-agent the root was read through, absent
+for an SMB or local scan; rootcase.py takes the spelling of a root scanned
+through an agent to be the NAS's. `account` is the account the root was read
+with (netaccount.py) when it could be told; preflight.py warns when it differs from the last scan's.
 `last_scan` is the last attempt that finished walking (ok / errors /
 unreachable). Its counts are of the records this scan wrote; files a
 rescan skipped as unchanged are not counted. `last_error` is the last
@@ -149,7 +151,8 @@ def _load(backend: Backend, root: str) -> Document:
 
 
 def begin(backend: Backend, root: str, tracker: ScanTracker | None = None,
-          path: str | None = None, account: dict[str, str] | None = None) -> dict[str, Any]:
+          path: str | None = None, account: dict[str, str] | None = None,
+          agent: str | None = None) -> dict[str, Any]:
     """Record that a scan of `root` is starting; returns the attempt. With a
     tracker, the tracker heartbeats this attempt while the walk runs. `path`
     is where it is read from, when an alias makes that differ from `root`."""
@@ -160,6 +163,8 @@ def begin(backend: Backend, root: str, tracker: ScanTracker | None = None,
         attempt["path"] = path
     if account:
         attempt["account"] = account
+    if agent:
+        attempt["agent"] = agent
     if tracker is not None:
         tracker.attempt = attempt
     info = _load(backend, root)
@@ -206,6 +211,8 @@ def finish(backend: Backend, root: str, attempt: dict[str, Any], tracker: ScanTr
         }
         if attempt.get("account"):
             info["last_scan"]["account"] = attempt["account"]
+        if attempt.get("agent"):
+            info["last_scan"]["agent"] = attempt["agent"]
     if tracker.last_error is not None:
         info["last_error"] = tracker.last_error
     elif exc is not None:

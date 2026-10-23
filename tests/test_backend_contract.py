@@ -345,6 +345,12 @@ def test_root_info_contract(backend, backend_name):
     listed = {i["root_id"]: i for i in backend.list_root_info()}
     assert listed[root_id(roots[0])] == done and listed[root_id(roots[1])] == infos[1]
     assert backend.get_root_info("C:\never-scanned") is None
+    backend.delete_root_info(roots[0])
+    backend.delete_root_info(roots[0])      # absent: no error
+    assert backend.get_root_info(roots[0]) is None
+    assert backend.get_root_info(roots[1]) == infos[1]
+    assert root_id(roots[0]) not in {i["root_id"] for i in backend.list_root_info()}
+    backend.delete_root_info(roots[1])
 
 
 def test_treemap_contract(backend, backend_name):

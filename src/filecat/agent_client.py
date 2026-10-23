@@ -565,6 +565,49 @@ class ShareMap:
                 return "/" + "/".join([self._volume_dir] + rest)
         raise ValueError(f"{unc_path!r} is not under a share of {self.alias}")
 
+    def explicit_spelling(self, unc_path: str) -> str | None:
+        """`unc_path` with the share spelled as `shares` spells it, when an
+        explicit share root covers it; None when none does. The config is
+        the NAS's own spelling of that share."""
+        try:
+            parts = _unc_parts(unc_path)
+        except ValueError:
+            return None
+        low = [p.lower() for p in parts]
+        for _, uparts, ulow in self._explicit:
+            if low[:len(ulow)] == list(ulow):
+                return "\\".join(("\\\\" + uparts[0],) + uparts[1:] + tuple(parts[len(uparts):]))
+        return None
+
+    def canonical(self, unc_path: str, list_names: Any = None) -> str:
+        """`unc_path` with its server and share spelled as the agent's host
+        spells them, so a scan records the NAS's name for the share whatever
+        case it was typed in (Windows and SMB do not care, Linux does).
+        An explicit share root gives its configured spelling. Under the
+        Synology layout `list_names(posix_folder)`, when given, lists the
+        entries of the volume folder and the one that equals the typed share
+        ignoring case is used (the typed one when it is exact or the match is
+        ambiguous). The server is spelled as `alias` has it. Everything below
+        the share is left as given: names there are case-sensitive on both
+        sides. A path this map does not cover comes back unchanged."""
+        spelled = self.explicit_spelling(unc_path)
+        if spelled is not None:
+            return spelled
+        try:
+            parts = _unc_parts(unc_path)
+        except ValueError:
+            return unc_path
+        if parts[0].lower() != self._server or len(parts) < 2 or parts[1].lower() == self.ROOT:
+            return unc_path
+        share = parts[1]
+        if list_names is not None:
+            names = list(list_names("/" + self._volume_dir))
+            if share not in names:
+                same = [n for n in names if n.lower() == share.lower()]
+                if len(same) == 1:
+                    share = same[0]
+        return "\\".join([self.alias, share] + parts[2:])
+
     def covers(self, unc_path: str) -> int:
         """How many leading UNC components of `unc_path` this map owns: the
         server for the alias, more for an explicit root. 0 when none."""

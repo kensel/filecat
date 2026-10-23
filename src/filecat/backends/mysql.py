@@ -553,6 +553,11 @@ class MysqlBackend(Backend):
         doc = row[0]
         return json.loads(doc) if isinstance(doc, (str, bytes)) else doc
 
+    def delete_root_info(self, root: str) -> None:
+        with self.conn.cursor() as cur:
+            cur.execute("DELETE FROM roots WHERE root_id=%s", (root_id(root),))
+        self.conn.commit()
+
     # --- stored treemaps ---------------------------------------------
     def put_treemap(self, meta: Document, data: Document | None = None) -> None:
         with self.conn.cursor() as cur:

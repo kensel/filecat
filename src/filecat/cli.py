@@ -239,8 +239,23 @@ def build_parser() -> argparse.ArgumentParser:
             p.add_argument("--expand-compound", dest="expand_compound", action="store_true",
                            help="keep every entry of compound documents listed before v0.1.1")
 
-    p = sub.add_parser("roots", help="root index: last scan, scan in progress, newest file, last error")
+    p = sub.add_parser("roots", help="root index: last scan, scan in progress, newest file, last error; "
+                                     "case-check / case-merge for one share recorded as two roots")
+    p.add_argument("action", nargs="?", choices=("list", "case-check", "case-merge"), default="list",
+                   help="list (default); case-check: find roots that differ only in the case of "
+                        "server\\share and verify a sample of files; case-merge [OLD NEW]: move OLD "
+                        "into NEW (NEW's spelling is kept; with no names, every pair whose NAS "
+                        "spelling is known)")
+    p.add_argument("names", nargs="*", metavar="OLD NEW", help="case-merge: the roots to merge")
     _storage(p)
+    p.add_argument("--sample", type=int, default=500, metavar="N",
+                   help="case-check / case-merge: files compared to confirm one share, 200..1000 "
+                        "(default 500)")
+    p.add_argument("--force", action="store_true",
+                   help="case-merge: merge although verification fails, a scan is running, or NEW "
+                        "is not the NAS's spelling")
+    p.add_argument("--dry-run", dest="dry_run", action="store_true",
+                   help="case-merge: verify and report, move nothing")
     p.add_argument("--root", action="append", help="only these roots (repeatable)")
     p.add_argument("--json", action="store_true", help="one JSON object per root")
 

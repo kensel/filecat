@@ -300,6 +300,16 @@ class AgentSource:
         kept = self._root_listings.pop(unc, None)
         return kept[1] if kept is not None else self._list(unc)[1]
 
+    def canonical_unc(self, unc: str) -> str:
+        """`unc` with the server and share as the NAS spells them (see
+        ShareMap.canonical); `unc` itself when the agent cannot be asked."""
+        def names(folder: str) -> list[str]:
+            return [to_storage(e.name) for e in self.client().list_dir(folder).entries]
+        try:
+            return self.map.canonical(unc, names)
+        except (OSError, ValueError):
+            return unc
+
     def check(self, unc: str) -> None:
         """Can the root be listed through the agent (preflight)?"""
         self._list(unc)

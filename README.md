@@ -93,6 +93,7 @@ filecat summary --out catalog.sqlite [--by extension|mime|dir] [--depth 2] [--ro
 filecat summary --disagree                                # name says one type, bytes another
 filecat show "sub/dir/file.txt" --root D:\Games
 filecat roots                                             # last scan, in progress, newest file, last error
+filecat roots case-check                                  # one share recorded as two roots (server\share case)?
 filecat dropped                                           # records of files that vanished (kept 90 days)
 filecat backups [--versions]                              # backup stores: machines, versions, problems, copies
 filecat databases                                         # database data folders: engine, version, databases, quiet?

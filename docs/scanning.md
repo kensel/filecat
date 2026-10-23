@@ -190,6 +190,73 @@ is detected, its data files are listed only, and its record carries
 `probe.store_note` instead of `probe.backup` / `probe.database`; `enrich`;
 the sibling-file probes other than X3's `.cat`/`.dat`.
 
+### One share, two spellings
+
+Roots are stored as spelled. Windows and SMB ignore the case of a server and
+share name; a Linux NAS does not, and an agent reports the NAS's own spelling.
+`\\nas-main\backup` scanned over SMB and `\\nas-main\Backup` scanned through
+the agent are one share but two roots. Only `server\share` is case-insensitive
+here; everything below it (`rel_path` and folders in a root such as
+`\\nas-main\Backup\sub`) stays case-sensitive, as the NAS's file system is.
+
+New scans avoid the split (`rootcase.reconcile`):
+
+- through an agent, the root is recorded under the NAS's spelling: the share as
+  `[agents.shares]` spells it, else the matching entry of the volume folder
+  (`/volume1`) the agent lists, whatever was typed (a Synology share is not found
+  under another case, so the typed spelling could not be read anyway);
+- over SMB, a root whose `server\share` matches a root already in the catalog
+  ignoring case is recorded under that spelling and the start line says so
+  (`recorded as ..., the spelling the catalog already holds`). With several
+  spellings the agent-scanned one wins, else the most recently scanned;
+- when the catalog still holds the share under a spelling that was not used, one
+  line points at `filecat roots case-check`.
+
+For a catalog that is already split:
+
+```
+filecat roots case-check [--sample N] [--json]     # exit 1 when there are pairs
+filecat roots case-merge [OLD NEW] [--sample N] [--force] [--dry-run]
+```
+
+`case-check` lists each group of roots that differ only in the case of
+`server\share`, names the canonical (NAS) spelling when it is known, and
+verifies that the roots are one share by comparing files:
+
+- the sample is the N files (default 500; 200 to 1000) with the smallest SHA-1
+  of their `rel_path` across both roots, so a rerun checks the same files; each
+  is looked up in both roots;
+- kind, size, `mtime_ns` (within 100 ns, the agent's resolution) and the
+  `sha256` / `sha256_partial` that both records have must agree; otherwise the
+  file is a mismatch with its reasons, and a file only one root has is missing
+  on the other side;
+- a file modified at or after the start of the older of the two scans (looking at
+  the records on both sides) is left out and counted as changed since, because
+  two scans taken at different times legitimately differ there; without scan
+  times in the root index nothing is left out;
+- the roots are the same share when at least 95% of the files judged match and at
+  least 10 (or all, when the sample has fewer) were judged. The 5% covers files
+  deleted or replaced without a newer `mtime`; two different shares under one
+  name match almost nothing.
+
+The canonical spelling is the one `[agents.shares]` gives, else the one root that
+was scanned through an agent (`agent` in the root index). When neither is known
+`case-merge OLD NEW` names it: NEW's spelling is kept, and the NAS's spelling
+needs `--force` to be overruled. `case-merge` with no names merges every pair
+whose canonical spelling is known.
+
+`case-merge` verifies first (`--force` skips the verdict, `--dry-run` stops after
+it) and refuses while a scan of either root is running (`--force`, as with
+`samples prune`). It moves the records of OLD to NEW in batches, writing a batch
+before deleting it from OLD, with their archive members. A path both roots have
+keeps the record of the root scanned later (the canonical root on a tie). Then it
+removes OLD's root-index entry, stored aggregates, treemaps and resume state and
+rebuilds NEW's aggregates. A marker on NEW's root-index entry records the merge
+in progress, so a merge that was killed is finished by running the command again
+(without verifying again, since half-moved roots no longer compare), and a
+finished merge run twice moves nothing. Dropped-record entries of OLD are left to
+expire (`--keep-dropped`).
+
 ## Backup data and `enrich`
 
 `filecat enrich` leaves backup data as the scan left it: a record with

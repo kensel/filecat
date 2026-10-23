@@ -77,11 +77,11 @@ def options(fake: FakeAgent | None = None, **kwargs) -> ScanOptions:
     return ScanOptions(**kwargs)
 
 
-def scan_into(root: str, opts: ScanOptions,
-              backend: MemoryBackend | None = None) -> tuple[MemoryBackend, dict[str, dict], int]:
+def scan_into(root: str, opts: ScanOptions, backend: MemoryBackend | None = None,
+              recorded: str | None = None) -> tuple[MemoryBackend, dict[str, dict], int]:
     backend = backend or MemoryBackend()
     code = scan.scan_roots([root], backend, opts, resume_path=_resume_path())
-    return backend, {d["rel_path"]: d for d in backend.list(root=root)}, code
+    return backend, {d["rel_path"]: d for d in backend.list(root=recorded or root)}, code
 
 
 def measures(agent: FakeAgent) -> list[str]:
@@ -387,3 +387,33 @@ def test_cli_scan_end_to_end(fixture_dir, agent, capsys):
     assert "scanning through filecat-agent nas-main" in capsys.readouterr().err
     assert measures(agent)
 
+
+# --- the NAS's spelling of server\\share -------------------------------------
+def test_agent_scan_records_the_share_as_the_nas_spells_it(tree, agent, capsys):
+    typed = "\\\\NAS-MAIN\\backup"
+    backend, docs, code = scan_into(typed, options(agent), recorded=UNC)
+    assert code == 0 and len(docs) > 8
+    assert backend.roots() == [UNC]                     # not the typed spelling
+    assert backend.get_root_info(UNC)["last_scan"]["agent"] == "nas-main"
+    assert "case-check" not in capsys.readouterr().err
+
+
+def test_agent_scan_hints_when_the_catalog_holds_another_spelling(tree, agent, capsys):
+    other = "\\\\nas-main\\BACKUP"
+    backend = MemoryBackend()
+    backend.put(record.new_document(other, "", kind="dir"))
+    backend, docs, _ = scan_into(other, options(agent), backend, recorded=UNC)
+    err = capsys.readouterr().err
+    assert backend.roots() == sorted([other, UNC]) and len(docs) > 8
+    assert f"{UNC}: the catalog also holds this share as {other}; see: filecat roots case-check" in err
+
+
+def test_smb_scan_takes_the_spelling_of_the_agent_scanned_root(tree, agent, capsys):
+    backend, _, _ = scan_into(UNC, options(agent))
+    local = str(tree / "volume1" / "Backup")
+    other = "\\\\nas-main\\backup"
+    capsys.readouterr()
+    # SMB would read the typed path; here the read is by an alias onto the local copy
+    scan.scan_roots([local], backend, options(aliases={local: other}), resume_path=_resume_path())
+    assert backend.roots() == [UNC]
+    assert "recorded as " + UNC in capsys.readouterr().err

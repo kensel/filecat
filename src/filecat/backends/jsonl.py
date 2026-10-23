@@ -474,6 +474,22 @@ class JsonlBackend(Backend):
     def list_root_info(self) -> Iterator[Document]:
         yield from self._read_root_info().values()
 
+    def delete_root_info(self, root: str) -> None:
+        infos = self._read_root_info()
+        if infos.pop(root_id(root), None) is None:
+            return
+        tmp_path = self.roots_path.parent / (self.roots_path.name + f".tmp{os.getpid()}")
+        try:
+            with open(tmp_path, "w", encoding="utf-8") as f:
+                json.dump(infos, f, ensure_ascii=False, indent=2)
+            _replace(tmp_path, self.roots_path)
+        finally:
+            if tmp_path.exists():
+                try:
+                    tmp_path.unlink()
+                except OSError:
+                    pass
+
     # --- stored treemaps ---------------------------------------------
     # <stem>.treemaps.json: {id: {"meta": ..., "data": ...}}, rewritten whole.
     def _read_treemaps(self) -> dict[str, Document]:

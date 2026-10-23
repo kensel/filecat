@@ -3,6 +3,7 @@ a scan is in progress, the newest file and the last error. See rootinfo.py."""
 from __future__ import annotations
 
 import json
+import sys
 from datetime import datetime
 from typing import Any
 
@@ -80,6 +81,12 @@ def _print_root(row: dict[str, Any]) -> None:
 
 
 def run(args: Any) -> int:
+    if args.action in ("case-check", "case-merge"):
+        from . import rootcase
+        if not rootcase.SAMPLE_MIN <= args.sample <= rootcase.SAMPLE_MAX:
+            print(f"filecat: --sample must be {rootcase.SAMPLE_MIN}..{rootcase.SAMPLE_MAX}", file=sys.stderr)
+            return 2
+        return (rootcase.run_check if args.action == "case-check" else rootcase.run_merge)(args)
     backend = open_backend(args.backend, args.out, args.dsn)
     try:
         rows = rootinfo.index(backend)

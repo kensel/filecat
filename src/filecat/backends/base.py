@@ -271,6 +271,11 @@ class Backend(ABC):
         rid = root_id(root)
         return next((i for i in self.list_root_info() if i.get("root_id") == rid), None)
 
+    def delete_root_info(self, root: str) -> None:
+        """Remove a root's index entry; no error when absent. Its file
+        records are not touched (roots_case moves them first)."""
+        raise NotImplementedError(f"{self.name} backend does not store a root index yet")
+
     # --- stored treemaps ------------------------------------------------
     # Snapshots of treemap.build() for the Graph view of `filecat serve`
     # (policy in filecat.treemap): a small meta document {"id", "root_id",

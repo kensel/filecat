@@ -137,6 +137,12 @@ server keeps store detection, manifest verification, probing and Ollama.
     are totalled once per scan. Still to do: backup-store and database
     manifests (and `sum_subtree` rollups) through the agent, rollup groups,
     `enrich` through the agent, hard-link dedup in the stored aggregates.
+  - [x] One share, two spellings: roots that differ only in the case of
+    `server\share` (an SMB scan typed in lower case, the NAS's own spelling
+    from an agent) are found, checked on a 200 to 1000 file sample, and merged
+    under the NAS's spelling (`filecat roots case-check` / `case-merge`); new
+    scans record the NAS spelling through an agent and reuse the catalog's over
+    SMB ([scanning.md](scanning.md#one-share-two-spellings)).
   - [ ] `filecat-agent` itself changed to match the protocol page.
 - RPCs: list a directory (lstat, inode, `st_blocks`), measure (hash plus
   the 8 KiB head), read a range, sum a subtree. The agent records

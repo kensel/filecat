@@ -80,6 +80,9 @@ class MemoryBackend(Backend):
     def list_root_info(self) -> Iterator[Document]:
         yield from (copy.deepcopy(i) for i in list(self.root_info.values()))
 
+    def delete_root_info(self, root: str) -> None:
+        self.root_info.pop(root_id(root), None)
+
     def put_treemap(self, meta: Document, data: Document | None = None) -> None:
         if data is None:
             if meta["id"] in self.treemaps:

@@ -190,6 +190,11 @@ class JsonlDirBackend(Backend):
         part = self._part(root, create=False)
         return next(iter(part.list_root_info()), None) if part else None
 
+    def delete_root_info(self, root: str) -> None:
+        part = self._part(root, create=False)
+        if part:
+            part.delete_root_info(root)
+
     # --- stored treemaps ---------------------------------------------
     def put_treemap(self, meta: Document, data: Document | None = None) -> None:
         part = self._part(meta["root"], create=data is not None)

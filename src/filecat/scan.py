@@ -12,7 +12,7 @@ import sys
 import time
 from typing import Any
 
-from . import aliases, fsource, preflight, record, rootinfo
+from . import aliases, fsource, preflight, record, rootcase, rootinfo
 from .agent_client import Measurement
 from .backends import open_backend
 from .backends.base import Backend
@@ -214,6 +214,7 @@ def scan_roots(roots: list[str], backend: Backend, options: ScanOptions,
         config, unc = picked
         plans.append((agent_sources.setdefault(config.name, fsource.AgentSource(config)), unc))
     try:
+        rootcase.reconcile(roots, plans, backend, options.agents)
         return _scan(paths, roots, plans, backend, options, resume_path)
     finally:
         for src in agent_sources.values():
@@ -269,7 +270,8 @@ def _scan(paths: list[str], roots: list[str], plans: list[tuple[fsource.AgentSou
             tracker = rootinfo.ScanTracker(backend, root)
             try:
                 attempt = rootinfo.begin(backend, root, tracker, path=path,
-                                         account=accounts.get(path))
+                                         account=accounts.get(path),
+                                         agent=source.name if source else None)
             except NotImplementedError:
                 attempt = None
             try:

@@ -463,6 +463,11 @@ class PostgresBackend(Backend):
             return None
         return row[0] if isinstance(row[0], dict) else json.loads(row[0])
 
+    def delete_root_info(self, root: str) -> None:
+        with self.conn.cursor() as cur:
+            cur.execute("DELETE FROM roots WHERE root_id=%s", (root_id(root),))
+        self.conn.commit()
+
     # --- stored treemaps ---------------------------------------------
     def put_treemap(self, meta: Document, data: Document | None = None) -> None:
         with self.conn.cursor() as cur:

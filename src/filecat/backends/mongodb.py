@@ -396,6 +396,9 @@ class MongoBackend(Backend):
     def get_root_info(self, root: str) -> Document | None:
         return self.root_docs.find_one({"root_id": root_id(root)}, {"_id": 0})
 
+    def delete_root_info(self, root: str) -> None:
+        self.root_docs.delete_one({"root_id": root_id(root)})
+
     # --- stored treemaps ---------------------------------------------
     # {_id: id, root_id, meta, data}; the data is kept as JSON text so its
     # size and keys never meet BSON's limits on numbers or field names.
