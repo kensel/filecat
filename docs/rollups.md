@@ -590,17 +590,31 @@ agent scan sent over the wire. So:
   subdirectory, and returns a marked child only as part of a rollup. The
   agent does not have the list built in: it checks what the policy lists, so
   a `disabled` type's marker name is simply not sent.
-- **Python on SMB or local**: the same check runs before the child is listed,
-  read ahead (`_will_enter`), recorded, or handed to a store detector. The
-  walker `lstat`s `<child>\<marker>` for each marker name and treats a hit
-  like a rule match (`rollup.rule` = `marker:<tag>`).
-- **Cost**: a fixed small number of extra `lstat`s per directory: with every
-  type not disabled, 6 plus one per user tag per subdirectory. Local and
-  agent lookups are dentry-cache hits for a missing name and add little to a
-  listing; over SMB each is a round trip (a negative open, about a millisecond
-  on a LAN), run in the read-ahead threads, so 100,000 folders cost minutes
-  and the walker works through them in parallel (open question 1). A type that
-  is `disabled` is not looked for, which is the way to lower the cost.
+- **Python on SMB or local** (decided after the first draft, which `lstat`ed
+  each marker name in each child: a network round trip apiece over SMB): the
+  marker is looked for in the child's **own listing**, which the walk reads
+  anyway, read-ahead included. `walker._list_dir(path, markers)` is the only
+  way such a listing reaches the walk: it reads the names, checks them against
+  the marker names (ASCII case ignored) **before** sorting, stat-ing or
+  returning anything, and when one is there it returns `rollup.Marked`
+  instead of the entries. The read-ahead then queues nothing from it, and the
+  walk rolls the child up (`rollup.rule` = `marker:<tag>`), summing it with
+  `sum_tree`. The names of a marked folder exist only in that function's
+  local variables. Rules and the sticky store decide from the name alone,
+  before the child is listed, so a ruled or sticky folder is never listed.
+- **Cost**: Python: one pass over a listing's names that is already in memory
+  (a lookup per dotted name), no extra I/O. Agent: one `lstat` per marker name
+  per subdirectory, free on a local file system.
+  A type that is `disabled` is not looked for.
+- A marker found in a child's listing is found only when the walk reaches the
+  child, so a folder whose child has one is unchanged only if, once all its
+  children are known, it holds as many entries and the same tags as its stored
+  record (`probe.child_count`, `probe.rollup_tags`); a newly marked child
+  forces the stale pass for its parent. Rank: a marker is found after the
+  rules (it needs the listing), so a folder that a rule or the sticky store
+  rolls up never shows its marker. That differs from the list of section 2 only
+  when a `[CACHE]`-like rule and a `.filecat-redacted` marker meet on one
+  folder, and both hold no names.
 - A `disabled` type's markers are ignored, and the scan says so once, except
   `redacted`, which cannot be disabled.
 - A marker in the folder being scanned as a root: that root is not listed;
@@ -1153,6 +1167,11 @@ This is the list the Rust agent is rewritten from. The wire forms are in
 
 ## 9. Python work plan
 
+Stage A is implemented (see the notes at the end of this section for where it
+differs from the text). The sticky hash input is `"filecat-redact-v1\0" +
+root + "\0" + rel_path` (NUL bytes; the first draft of the protocol page used
+spaces), and the wire policy id is defined in agent-protocol.md.
+
 The next step, in two stages. Changes by file, then commands, then tests.
 Stage A is complete for the opt-in model and everything `[REDACTED]`: rules,
 modes, markers, redaction, the sticky store, records, the walker for local,
@@ -1284,6 +1303,36 @@ group, same-`dev` rule, `sum_subtree` options, `progress_ms` lines,
 line for the privacy test, and a way to make a child unreadable, to rename a
 folder keeping its inode, and to inject names with bytes that are not UTF-8.
 
+**Differences in the implementation of A**
+
+- Markers on local and SMB scans come from the child's listing, not `lstat`s
+  (section 3.6).
+- A rollup entry from an agent may carry an optional `rule` field (the id of the
+  first rule that folded something in, `"marker"` or `"sticky"`); without it
+  `rollup.rule` is `agent`.
+- `hardlink_names` is stored only when the agent reports more than 0.
+- Python sums are `sum_tree`, one thread-pool task per folded child
+  (`--rollup-workers`); a `rollup_timeout` option exists but has no flag.
+- One `configure_policy` serves every root of an agent in a scan: the rules and
+  markers are the same, and each root has its own `redaction.roots` entry
+  (found by its `base`). It is sent before the preflight listing, so not even
+  that listing carries the name of a folder that is rolled up.
+- A purge (names now rolled up that the catalog held) deletes them, their
+  members and dropped entries, prunes samples and member sets, deletes the
+  unpinned treemap snapshots of the root and merges the folders of a pinned
+  one into `[REDACTED]`, clears `last_error` and `newest_file` when they
+  pointed there, and on SQLite runs `VACUUM` (with `secure_delete`) after the
+  aggregates were rebuilt, so the names are not left in a free page or the
+  write-ahead log. A pinned snapshot cut above the purged folder still carries
+  the enclosing folder's extension bytes.
+- A real child named like a tag is folded into the rollup when the rollup comes
+  from a rule or the sticky store; for one made by a marker found later, only
+  if the child is not yet reached.
+- `Backend.scrub()` (a no-op except SQLite), `Backend.delete_many`,
+  `purge_dropped_paths`, `rollups`, `rollup_totals` and the `redactions`
+  methods are on every backend; the server backends are written but only
+  exercised when their DSN variables are set.
+
 **Order inside A**: (1) record, matcher, vectors, modes and config;
 (2) redaction key, hash, `redactions` store; (3) Python walk, markers, sums,
 `delete_many`, readers needed to keep the catalog consistent (aggregate,
@@ -1317,12 +1366,8 @@ privacy test; (6) `rollups list|suggest|redacted`.
 
 ## 10. Open questions
 
-1. **Marker cost over SMB.** Looking for the marker names inside every child
-   directory is a handful of `lstat`s per directory, free on an agent and
-   about a millisecond each over SMB (100,000 folders: minutes in the
-   read-ahead threads). Accept, or look for `.filecat-redacted` only over
-   SMB by default (the others needing `markers = "all"`)? (Recommended: accept
-   the full set; `disabled` types are not looked for.)
+1. **Marker cost over SMB.** Settled: Python takes markers from the child's
+   own listing (section 3.6), at no extra I/O. The agent `lstat`s them.
 2. **A marker in a scanned root itself** is recorded as one `<root>\[TAG]`
    rollup (3.6). Right, or refuse such a scan?
 3. **A bare `--verify-backups` means level 1** and no longer the per-file

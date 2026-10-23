@@ -690,3 +690,141 @@ def test_agents_list(fixture_dir, agent, capsys):
     assert cli.main(["--config", path, "agents", "list", "--json"]) == 0
     row = json.loads(capsys.readouterr().out)
     assert row["name"] == "fake" and row["token"] == "***" and row["shares"] == {"/volume2/A": "\\\\fake\\A"}
+
+
+# --- rollups on the wire: progress, deadline, cancel, busy, sum_subtree options ---------------
+def _big(tree):
+    base = tree / "volume1" / "Backup"
+    for i in range(3):
+        (base / "node_modules" / f"d{i}").mkdir(parents=True, exist_ok=True)
+        (base / "node_modules" / f"d{i}" / "f.js").write_bytes(b"x" * (10 + i))
+    return base
+
+
+CACHE_RULE = [{"id": 0, "tag": "[CACHE]", "match": ["node_modules"], "type": "dir"}]
+
+
+def test_progress_lines_are_read_before_the_response(agent, tree):
+    _big(tree)
+    agent.progress_always = True
+    seen = []
+    with client_for(agent) as c:
+        c.configure_policy(rules=CACHE_RULE)
+        listing = c.list_dir("/volume1/Backup", progress_ms=500, on_progress=seen.append)
+    assert seen and set(seen[0]) == {"entries", "bytes"}
+    assert any(e.kind == "rollup" for e in listing.entries)
+    assert any("progress" in line for way, line in agent.wire if way == "out")
+    assert [r["progress_ms"] for r in agent.requests if r["cmd"] == "list_dir"] == [500]
+
+
+def test_no_progress_line_is_sent_to_a_client_that_did_not_ask(agent, tree):
+    _big(tree)
+    agent.progress_always = True
+    with client_for(agent) as c:
+        c.configure_policy(rules=CACHE_RULE)
+        assert c.list_dir("/volume1/Backup").entries
+    assert not any("progress" in line for way, line in agent.wire if way == "out")
+
+
+def test_sum_subtree_options_and_fields(agent, tree):
+    base = _big(tree)
+    (base / "node_modules" / "d1" / "skip.log").write_bytes(b"zz")
+    with client_for(agent) as c:
+        full = c.sum_subtree("/volume1/Backup/node_modules")
+        part = c.sum_subtree("/volume1/Backup/node_modules", exclude=["**/*.log"], private=True)
+    assert (full.total_files, full.total_dirs, full.total_size) == (4, 4, 10 + 11 + 12 + 2)
+    assert full.path == "/volume1/Backup/node_modules" and full.complete and full.error_codes == {}
+    assert full.oldest_mtime_ns and full.oldest_mtime_ns <= full.newest_mtime_ns
+    assert part.total_files == 3 and part.path is None
+    req = [r for r in agent.requests if r["cmd"] == "sum_subtree"][1]
+    assert req["private"] is True and req["exclude"] == ["**/*.log"]
+
+
+def test_sum_subtree_counts_unreadable_folders_by_code_and_skips_mounts(agent, tree):
+    base = _big(tree)
+    agent.unreadable = {"d1"}
+    agent.mounts = {"d2"}
+    with client_for(agent) as c:
+        s = c.sum_subtree("/volume1/Backup/node_modules")
+        every = c.sum_subtree("/volume1/Backup/node_modules", one_filesystem=False)
+    assert s.errors == 1 and s.error_codes == {"permission_denied": 1} and s.skipped_mounts == 1
+    assert s.total_files == 1 and every.skipped_mounts == 0 and every.total_files == 2
+
+
+def test_deadline_ends_a_sum_early_and_says_so(agent, tree):
+    _big(tree)
+    agent.sum_delay = 0.05
+    with client_for(agent) as c:
+        s = c.sum_subtree("/volume1/Backup/node_modules", deadline_ms=60)
+    assert s.complete is False
+
+
+def test_a_busy_agent_is_retried_after_a_pause(agent, tree):
+    _big(tree)
+    agent.max_sums = 0
+    with client_for(agent, busy_pause=0.01) as c:
+        import threading
+        threading.Timer(0.1, lambda: setattr(agent, "max_sums", 4)).start()
+        assert c.sum_subtree("/volume1/Backup/node_modules").total_files == 3
+    busy = [r for r in agent.requests if r["cmd"] == "sum_subtree"]
+    assert len(busy) >= 2
+
+
+def test_cancel_stops_a_running_sum_from_another_connection(agent, tree):
+    _big(tree)
+    agent.sum_delay = 0.2
+    errors = []
+
+    def run():
+        with client_for(agent) as c:
+            try:
+                c.sum_subtree("/volume1/Backup/node_modules", request_id="job-1")
+            except AgentError as exc:
+                errors.append(exc.code)
+
+    import threading
+    import time
+    t = threading.Thread(target=run)
+    t.start()
+    time.sleep(0.15)
+    with client_for(agent) as other:
+        assert other.cancel("job-1") is True
+        assert other.cancel("job-unknown") is False
+    t.join(5)
+    assert errors == ["cancelled"] and agent.cancelled == ["job-1"]
+
+
+def test_a_policy_id_the_client_does_not_expect_refuses_the_connection(agent, monkeypatch):
+    import _fake_agent
+    monkeypatch.setattr(_fake_agent, "policy_id", lambda rules, markers: "000000000000")
+    with client_for(agent) as c:
+        with pytest.raises(AgentError) as err:
+            c.configure_policy(rules=CACHE_RULE)
+    assert err.value.code == "policy"
+
+
+def test_the_policy_is_sent_again_after_a_reconnect_with_its_rules(agent, tree):
+    _big(tree)
+    with client_for(agent) as c:
+        c.configure_policy(rules=CACHE_RULE, markers=[{"name": ".filecat-cache", "tag": "[CACHE]"}])
+        agent.drop_connections()
+        assert any(e.kind == "rollup" for e in c.list_dir("/volume1/Backup").entries)
+    sent = [r for r in agent.requests if r["cmd"] == "configure_policy"]
+    assert len(sent) == 2 and sent[0]["policy"] == sent[1]["policy"]
+
+
+def test_markers_and_redaction_sets_fold_a_folder_without_listing_it(agent, tree):
+    base = tree / "volume1" / "Backup"
+    (base / "vault").mkdir()
+    (base / "vault" / "secret.txt").write_bytes(b"s")
+    (base / "vault" / ".filecat-redacted").write_bytes(b"")
+    with client_for(agent) as c:
+        c.configure_policy(markers=[{"name": ".filecat-redacted", "tag": "[REDACTED]", "private": True}],
+                           redaction={"key": "00" * 32, "roots": [{"root": "r1", "base": "/volume1/Backup",
+                                                                    "hashes": [], "inodes": []}]})
+        entries = {e.name: e for e in c.list_dir("/volume1/Backup").entries}
+    assert "vault" not in entries and entries["[REDACTED]"].rollup["matched"] == 1
+    folded = entries["[REDACTED]"].rollup["folded"]
+    assert len(folded) == 1 and len(folded[0]["h"]) == 32 and folded[0]["ino"]
+    assert not any("vault" in r.get("path", "") for r in agent.requests if r["cmd"] == "list_dir")
+    assert not any("secret.txt" in line for _, line in agent.wire)

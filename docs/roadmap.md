@@ -168,7 +168,7 @@ server keeps store detection, manifest verification, probing and Ollama.
     re-sum and fingerprint change detection, progress/deadline/cancel for long
     sums, the agent requirements (also in
     [agent-protocol.md](agent-protocol.md)), the Python work plan.
-  - [ ] Python stage A: `rollup.py` (matcher, path forms, `sum_tree`), modes
+  - [x] Python stage A: `rollup.py` (matcher, path forms, `sum_tree`), modes
     and config, markers, `redaction.py` and the `redactions` store, walker,
     `fsource`/`agent_client`, the records and the readers that must skip
     them, the privacy test, the extended fake agent, and

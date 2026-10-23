@@ -199,7 +199,7 @@ of shares. Design: [rollups.md](rollups.md).
   channel). Per `roots` entry: `root` (the catalog's root id), `base` (the
   root's absolute path on this host), `hashes` and `inodes`. For each child
   **directory** at or beneath `base`, the agent computes
-  `HMAC-SHA256(key, "filecat-redact-v1 " + root + " " + rel)` where `rel`
+  `HMAC-SHA256(key, "filecat-redact-v1 " + root + " " + rel)` (NUL bytes) where `rel`
   is the child's path relative to `base`, `/`-separated, no leading or trailing
   `/`, in the catalog's name form (a byte that is not valid UTF-8 is the
   character U+F700 + byte, UTF-8 encoded), no case folding and no Unicode
@@ -212,10 +212,12 @@ of shares. Design: [rollups.md](rollups.md).
   log line, and puts no path or OS error text in any reply, for matches of that
   rule, of its markers and of the redaction sets.
 - The reply carries `policy_id` (the first 12 hex digits of the SHA-256 of
-  the canonical JSON of `rules`: `{"tag","match","type","case","keep",
-  "private","suggest"}` per rule in that key order, then the marker names,
-  compact separators, UTF-8; the client computes the same and treats a
-  difference as a failure to scan that root). Limits: 1024 rules, 64 KiB of
+  the compact JSON (`separators=(",", ":")`, UTF-8, no ASCII escaping) of
+  `[rules, marker names]`, each rule as `{"tag","match","type","case","keep",
+  "private","suggest"}` in that key order with `tag` null for a `keep` rule and
+  the booleans false when absent; the client computes the same and treats a
+  difference as a failure to scan that root; the reply carries it only when
+  the policy has rules or markers). Limits: 1024 rules, 64 KiB of
   patterns in all, 4096 bytes in a pattern; more is `bad_request`.
 
 ### `list_dir`
@@ -247,7 +249,7 @@ An entry:
 | `ino`, `dev`, `nlink` | from `lstat`; 0, the directory's `dev` and 1 for a rollup. Hard links share `(dev, ino)`; the client deduplicates |
 | `mtime_ns`, `ctime_ns` | see Timestamps; for a rollup both are the newest mtime of a non-directory inside (0 when none) |
 | `link_target` | links only: `readlink` text (byte-string rule: `link_target_b64`) |
-| `rollup` | rollups only: the summary below |
+| `rollup` | rollups only: the summary below (optionally `rule`: the id of the first rule that folded something in, or `"marker"` or `"sticky"`; the client records it as `rollup.rule`) |
 | `error` | `{"code": "...", "message": "..."}` when the entry could not be `lstat`ed |
 
 An entry whose `lstat` fails is still listed: `name`, `kind` (from the

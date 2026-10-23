@@ -178,12 +178,17 @@ stored aggregates (`filecat summary`) still add every name.
 
 Special entries: a link is a `link` record with `probe.link_target`; a FIFO,
 socket or device is a record with `probe.special_file` and is never opened; a
-`rollup` entry (only present when the agent is given rollup groups) is skipped
-today. Planned: folders and files a rule sends to `[REDACTED]`, `[CACHE]`,
-`[SYNOLOGY]`, `[BACKUP]` or a tag of your own become one `rollup` record per
-parent folder and tag, holding only totals and no names, and a backup or
-database store's bulk data folder is summed instead of listed
-([rollups.md](rollups.md)).
+`rollup` entry is a group of children the agent folded into one entry (by a
+rule, a marker file or the sticky redaction store, [rollups.md](rollups.md)).
+It is recorded as a `kind: "rollup"` record, `<parent>/[TAG]`, holding totals
+and no names, and nothing is stored beneath it. On a local or SMB scan Python
+does the same itself: rules and the sticky store are applied before a folder is
+listed, and a marker file is found in the folder's own listing (which the walk
+reads anyway), whose names are then dropped unread. All of it is opt-in: a
+type is `manual` unless `[rollups]` or `--rollup TYPE=MODE` says otherwise, so
+an existing catalog changes only when its owner asks. A backup or database
+store's bulk data folder summed instead of listed is stage B of the same
+design.
 A name that is not valid UTF-8 is stored with each bad byte `b` as the
 private-use character U+F700 + b (`fsource.to_storage`), which is valid in
 JSON and every database, and is turned back into the exact bytes when the
