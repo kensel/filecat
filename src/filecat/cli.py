@@ -28,6 +28,7 @@ COMMANDS = {
     "databases": "filecat.databases_cmd",
     "dupes": "filecat.dupes_cmd",
     "scan-everything": "filecat.everything",
+    "agents": "filecat.agents_cmd",
 }
 
 
@@ -286,6 +287,17 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--alias", action="append", metavar="PATH=ROOT",
                    help="as scan --alias: ROOT's records are read through PATH")
     p.add_argument("--json", action="store_true", help="one JSON cluster per line")
+
+    p = sub.add_parser("agents", help="filecat-agent hosts from filecat.toml: list them, or check "
+                                      "each one's certificate fingerprint, token and protocol")
+    asub = p.add_subparsers(dest="action", required=True)
+    a = asub.add_parser("list", help="the configured [[agents]], tokens masked")
+    a.add_argument("--json", action="store_true", help="one JSON object per agent")
+    a = asub.add_parser("test", help="connect to each agent: TLS, fingerprint, hello, token; "
+                                     "exit 1 if any fails")
+    a.add_argument("names", nargs="*", metavar="NAME", help="agents to test (default: all)")
+    a.add_argument("--timeout", type=float, default=5.0, help="seconds per connection and request")
+    a.add_argument("--json", action="store_true", help="one JSON object per agent")
 
     p = sub.add_parser("serve", help="web viewer: browse the summary and drill into the records")
     _storage(p)

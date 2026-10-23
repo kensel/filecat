@@ -114,7 +114,8 @@ their anomalies, such as macros, embedded objects or a hidden `.exe`, are
 stored as members. `--expand-compound` stores every entry. The
 classification is in `src/filecat/data/compound_formats.toml`, described in
 [docs/compound-formats.md](docs/compound-formats.md). Planned releases are
-in [docs/roadmap.md](docs/roadmap.md).
+in [docs/roadmap.md](docs/roadmap.md); the NAS agent's wire protocol is
+[docs/agent-protocol.md](docs/agent-protocol.md).
 
 A scan exits 0 when every entry was recorded cleanly and 1 when any record has
 an `errors` entry. Reruns skip files whose size and mtime are unchanged

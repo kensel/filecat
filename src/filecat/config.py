@@ -17,6 +17,10 @@ when that value is used, so passwords can stay out of the file.
     verify  test, then open the backend as scan would (creating tables or
             collections) and put/get/delete one record and its members under
             a throwaway root
+
+`[[agents]]` tables name the NAS hosts running filecat-agent (see
+docs/agent-protocol.md); load_agents validates them and agent_for picks the
+one that covers a UNC path. `filecat agents` lists and tests them.
 """
 from __future__ import annotations
 
@@ -26,9 +30,11 @@ import socket
 import sys
 import time
 import tomllib
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
+from .agent_client import DEFAULT_PORT, ShareMap, normalize_fingerprint
 from .backends import BACKENDS, DEFAULT_OUT
 
 FILE_NAME = "filecat.toml"
@@ -129,6 +135,145 @@ def mask(dsn: str | None) -> str | None:
         return None
     dsn = re.sub(r"(://[^:/@]*:)(?!\$\{)[^@]*(@)", r"\1***\2", dsn)
     return re.sub(r"(?i)\b(pwd|password)=(?!\$\{)(\{[^}]*\}|[^;\s]*)", r"\1=***", dsn)
+
+
+# --- [[agents]] ---------------------------------------------------------
+AGENT_KEYS = ("name", "host", "port", "cert_sha256", "token", "alias", "shares", "volume",
+              "exclude", "rollup_groups", "timeout")
+
+
+@dataclass(frozen=True)
+class AgentConfig:
+    """One [[agents]] table, validated. `token` is as written (it may hold
+    ${NAME}); resolved_token() reads the environment."""
+    name: str
+    host: str
+    cert_sha256: str                    # 64 lowercase hex digits
+    token: str
+    alias: str                          # \\nas-main: the server SMB scans record it under
+    port: int = DEFAULT_PORT
+    shares: dict[str, str] = field(default_factory=dict)    # POSIX prefix -> UNC root
+    volume: int = 1                     # the /volumeN whose /<share> folders are \\alias\<share>
+    exclude: tuple[str, ...] = ()
+    rollup_groups: dict[str, list[str]] = field(default_factory=dict)
+    timeout: float = 30.0
+
+    @property
+    def endpoint(self) -> str:
+        return f"{self.host}:{self.port}"
+
+    def resolved_token(self) -> str:
+        return expand(self.token)
+
+    def policy(self) -> dict[str, Any]:
+        """The configure_policy payload; empty when nothing is configured."""
+        policy: dict[str, Any] = {}
+        if self.exclude:
+            policy["exclude"] = list(self.exclude)
+        if self.rollup_groups:
+            policy["rollup_groups"] = {k: list(v) for k, v in self.rollup_groups.items()}
+        return policy
+
+    def share_map(self) -> ShareMap:
+        return ShareMap(self.alias, self.shares, self.volume)
+
+
+def _agent(table: Any, index: int) -> AgentConfig:
+    label = f"[[agents]] #{index}"
+    if not isinstance(table, dict):
+        raise ConfigError(f"{label}: wants a table with name, host, cert_sha256 and token")
+    if isinstance(table.get("name"), str) and table["name"]:
+        label += f" ({table['name']})"
+
+    def bad(message: str) -> ConfigError:
+        return ConfigError(f"{label}: {message}")
+
+    unknown = [k for k in table if k not in AGENT_KEYS]
+    if unknown:
+        raise bad(f"unknown key {unknown[0]!r}; the keys are {', '.join(AGENT_KEYS)}")
+
+    def text(key: str, default: str | None = None) -> str:
+        value = table.get(key, default)
+        if value is None:
+            raise bad(f"{key} is required")
+        if not isinstance(value, str) or not value.strip():
+            raise bad(f"{key} wants a non-empty string")
+        return value.strip()
+
+    def number(key: str, default: Any, low: float, high: float | None, kind: type) -> Any:
+        value = table.get(key, default)
+        ok = (isinstance(value, (int, float)) and not isinstance(value, bool)
+              and (kind is float or isinstance(value, int)))
+        if not ok or value < low or (high is not None and value > high):
+            span = f"from {low:g} to {high:g}" if high is not None else f"of at least {low:g}"
+            raise bad(f"{key} = {value!r}; want a number {span}")
+        return kind(value)
+
+    name = text("name")
+    if any(c.isspace() for c in name):
+        raise bad("name must not contain spaces")
+    host = text("host")
+    if host.count(":") == 1 and host.rsplit(":", 1)[1].isdigit():
+        raise bad(f"host = {host!r} includes a port; put it in port = {host.rsplit(':', 1)[1]}")
+    try:
+        cert = normalize_fingerprint(text("cert_sha256"))
+    except ValueError as exc:
+        raise bad(f"cert_sha256: {exc}") from None
+    shares = table.get("shares", {})
+    if not isinstance(shares, dict) or not all(isinstance(k, str) and isinstance(v, str)
+                                               for k, v in shares.items()):
+        raise bad("[agents.shares] wants '/volume1/Share' = '\\\\server\\Share' string pairs")
+    volume = number("volume", 1, 1, None, int)
+    try:
+        smap = ShareMap(text("alias", "\\\\" + name), shares, volume)
+    except ValueError as exc:
+        raise bad(str(exc)) from None
+    exclude = table.get("exclude", [])
+    if not isinstance(exclude, list) or not all(isinstance(x, str) and x for x in exclude):
+        raise bad("exclude wants a list of paths or names")
+    groups = table.get("rollup_groups", {})
+    if (not isinstance(groups, dict)
+            or not all(isinstance(k, str) and k and "/" not in k for k in groups)
+            or not all(isinstance(v, list) and all(isinstance(x, str) and x for x in v)
+                       for v in groups.values())):
+        raise bad('[agents.rollup_groups] wants "[TAG]" = ["pattern", ...] pairs')
+    return AgentConfig(
+        name=name, host=host, cert_sha256=cert, token=text("token"), alias=smap.alias,
+        port=number("port", DEFAULT_PORT, 1, 65535, int), shares=dict(shares), volume=volume,
+        exclude=tuple(exclude), rollup_groups={k: list(v) for k, v in groups.items()},
+        timeout=number("timeout", 30.0, 0.001, None, float))
+
+
+def load_agents(cfg: dict[str, Any]) -> list[AgentConfig]:
+    """The validated [[agents]] tables, in file order."""
+    tables = cfg.get("agents")
+    if tables is None:
+        return []
+    if not isinstance(tables, list):
+        raise ConfigError("agents: write one [[agents]] table per host (double brackets)")
+    agents = [_agent(t, i) for i, t in enumerate(tables, 1)]
+    names = [a.name for a in agents]
+    for name in names:
+        if names.count(name) > 1:
+            raise ConfigError(f"[[agents]]: name {name!r} is used twice")
+    return agents
+
+
+def agent_for(agents: list[AgentConfig], unc_path: str) -> AgentConfig | None:
+    """The agent that covers a UNC path: the one with the longest matching
+    alias or share root (components, case-insensitively); the first listed
+    wins a tie. None when no agent does."""
+    best, best_len = None, 0
+    for agent in agents:
+        length = agent.share_map().covers(unc_path)
+        if length > best_len:
+            best, best_len = agent, length
+    return best
+
+
+def mask_token(token: str) -> str:
+    """***, except a ${NAME} reference, which is not a secret (as in mask)."""
+    return token if "${" in token else "***"
 
 
 # --- applying to parsed arguments ---------------------------------------
@@ -238,6 +383,18 @@ def render(*, backend: str = "sqlite", dsns: dict[str, str] | None = None,
         f"url = {_toml_str(ollama_url)}",
         f"model = {_toml_str(model)}",
         "",
+        "# filecat-agent on a NAS (docs/agent-protocol.md), one [[agents]] per host. The agent prints",
+        "# its cert_sha256 when it starts; the token is the one it was started with.",
+        "# [[agents]]",
+        '# name = "nas-main"',
+        '# host = "192.0.2.13"',
+        "# port = 9876",
+        '# cert_sha256 = "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"',
+        '# token = "${FILECAT_NAS_MAIN_TOKEN}"',
+        "# alias = '\\\\nas-main'      # the server SMB scans record it under (default \\\\NAME)",
+        "# [agents.shares]           # folders that are not /volume1/<share>",
+        "# '/volume2/Archive' = '\\\\nas-main\\Archive'",
+        "",
     ]
     return "\n".join(lines)
 
@@ -300,6 +457,20 @@ def cmd_show(args: Any, path: Path | None, cfg: dict[str, Any]) -> int:
     ollama = cfg.get("ollama") or {}
     url = os.environ.get("OLLAMA_HOST") or ollama.get("url") or DEFAULT_OLLAMA_URL
     print(f"ollama:      {url}  model = {ollama.get('model') or '(none; pass --model)'}")
+    try:
+        agents = load_agents(cfg)
+    except ConfigError as exc:
+        print(f"agents:      invalid: {exc}")
+        return 1
+    if agents:
+        print(f"agents:      {len(agents)} configured (filecat agents test)")
+    for a in agents:
+        unset = missing_vars(a.token)
+        warn = f"   (not set: {', '.join(unset)})" if unset else ""
+        print(f"  {a.name:8} {a.endpoint}  alias = {a.alias}  cert_sha256 = {a.cert_sha256}")
+        print(f"  {'':8} token = {a.token if args.reveal else mask_token(a.token)}{warn}")
+        for prefix, unc in a.shares.items():
+            print(f"  {'':8} share {prefix} = {unc}")
     return 0
 
 

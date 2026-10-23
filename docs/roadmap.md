@@ -116,6 +116,19 @@ server keeps store detection, manifest verification, probing and Ollama.
   `RemoteFileProxy` (bounded `read_range` for ZIP directories, disk images
   and PE headers), POSIX-to-UNC path mapping so records and treemap pins
   line up with SMB scans.
+  - [x] The wire protocol, version 1, written down as the contract the agent
+    is brought into line with: [agent-protocol.md](agent-protocol.md), with
+    `hello`, error codes, `measure` that reproduces `hashing.py` (including
+    the 100 ns mtime of an SMB scan) and `sum_subtree`.
+  - [x] `[[agents]]` in `filecat.toml` (token via `${NAME}`, share map,
+    exclude and rollup groups), shown by `filecat config show`, with the
+    agent that covers a UNC path found by longest match.
+  - [x] `AgentClient` (TLS with certificate pinning, thread-safe, reconnects
+    once), `RemoteFileProxy` / `open_remote` (works under `zipfile`) and
+    `ShareMap` (POSIX and UNC paths both ways), tested against a fake agent
+    in Python.
+  - [x] `filecat agents list` and `filecat agents test`.
+  - [ ] `filecat-agent` itself changed to match the protocol page.
 - RPCs: list a directory (lstat, inode, `st_blocks`), measure (hash plus
   the 8 KiB head), read a range, sum a subtree. The agent records
   allocated size and deduplicates hardlinks by inode.
