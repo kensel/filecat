@@ -269,7 +269,6 @@
     "size_bytes": 11811160064000,
     "allocated_bytes": 12094627905536,
     "path": "/volume1/@iSCSI/LUN/BLUN/f48f1514-6072-4193-989e-9e7bfbe6d0e1",
-    "guest_server": "\\\\nas-zfs",
     "platform": {
      "synology": {
       "devtype": 5,

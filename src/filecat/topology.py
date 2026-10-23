@@ -7,13 +7,20 @@ One response, whichever platform the host runs:
      "collected_at": "2026-10-21T18:00:00Z",
      "nodes": [{"id": "pool:...", "type": "pool", "parent": null, ...}, ...]}
 
-Seven node types make the hierarchy server > disks > group > pool > volume >
-share / lun / vdisk. `parent` is the containment link (group in pool, volume in
+Eight node types make the hierarchy server > disks > group > pool > volume >
+share / lun / vdisk, plus `vm` on the host that runs it. `parent` is the containment link (group in pool, volume in
 pool or volume, share in volume, lun and vdisk in a volume or a pool). Disks
 are an inventory with no parent: a disk can serve several groups (SHR slices
 one disk into several arrays), so groups, pools and volumes list `members`
 with a role per disk instead. Ids are strings built from platform-native ids
 (pool GUID, disk serial), never array indices; (host, id) is global.
+
+Hosts join through links between individual disks: a `disk`, `lun` or `vdisk`
+may carry `backing: {host, id}` naming the node on another host that provides it,
+or `match` identifiers (`naa:`, `uuid:`, `serial:`, `volid:`, ...) from which
+`resolve_links` pairs consumers with providers across many hosts' snapshots,
+chaining through any number of hops. `physical_summary` counts the bytes behind a
+backed disk once, on the host that owns the real disk.
 
 `validate` checks a response and returns every problem; `parse` raises
 TopologyError(problems) instead. Unknown fields are kept in `Node.extra` so a
@@ -24,11 +31,13 @@ newer agent's output survives a round trip. `share_entries` derives what
 from __future__ import annotations
 
 import dataclasses
+import re
 from dataclasses import dataclass, field
 from typing import Any, Iterable, Iterator
 
 VERSION = 1
-TYPES = ("disk", "group", "pool", "volume", "share", "lun", "vdisk")
+TYPES = ("disk", "group", "pool", "volume", "share", "lun", "vdisk", "vm")
+LINK_TYPES = ("disk", "lun", "vdisk")   # nodes that can consume or provide a block device
 # type -> types its `parent` may have; None (no parent) is always allowed unless REQUIRES_PARENT.
 PARENT_TYPES: dict[str, tuple[str, ...]] = {
     "disk": (),
@@ -38,15 +47,18 @@ PARENT_TYPES: dict[str, tuple[str, ...]] = {
     "share": ("volume",),
     "lun": ("pool", "volume"),
     "vdisk": ("pool", "volume"),
+    "vm": (),
 }
 REQUIRES_PARENT = ("group", "share")
 ROLES = ("data", "parity", "spare", "log", "cache", "special", "dedup", "boot")
 HEALTH = ("ok", "warning", "degraded", "failed", "unknown")
 PROTOCOLS = ("smb", "nfs")
+HOST_KINDS = ("host", "cluster")
+_MATCH_RE = re.compile(r"^[a-z][a-z0-9_]*:\S")
 
 _INT_FIELDS = ("size_bytes", "used_bytes", "free_bytes", "allocated_bytes", "raw_bytes")
 _STR_FIELDS = ("name", "detail", "role", "level", "kind", "mount", "fs_type", "device", "path",
-               "unc", "guest_server", "serial", "model", "slot", "media")
+               "unc", "target", "serial", "model", "slot", "media")
 
 
 class TopologyError(ValueError):
@@ -63,6 +75,9 @@ class Node:
     """One element of the hierarchy. Which fields apply depends on `type`
     (docs/storage-topology.md); the rest stay None or empty.
 
+    match            "kind:value": naa (SCSI WWN), uuid (a Synology LUN or vdisk), serial (a guest disk),
+                     vmserial (the serial= a hypervisor gave a vdisk), volid (a Proxmox storage volume),
+                     vmmdisk (a Synology VMM vdisk uuid). Lowercase kind; the value keeps its case.
     size_bytes       disk: raw; pool/volume: usable; lun/vdisk: logical (provisioned)
     used_bytes       volume/pool/share: bytes in use (file systems; ZFS `used`)
     free_bytes       volume/pool: bytes available
@@ -92,9 +107,13 @@ class Node:
     path: str | None = None             # share: the folder on the host; lun/vdisk: backing file or dir
     unc: str | None = None              # share: the catalog root, \\server\Share
     protocols: list[str] = field(default_factory=list)   # share: smb, nfs
-    vm: dict[str, Any] | None = None    # vdisk: {"id", "name"} of the VM it is attached to
+    vm: dict[str, Any] | None = None    # vdisk: {"id", "name"} of the VM it is attached to (a vm node's id)
     attached: bool | None = None        # vdisk: False for an image-library template
-    guest_server: str | None = None     # lun/vdisk: UNC server whose own shares live inside it
+    target: str | None = None           # lun: the iSCSI target it is exported through
+    initiators: list[str] = field(default_factory=list)  # lun: initiator names or IQNs allowed (ACL)
+    backing: dict[str, str] | None = None  # disk/lun/vdisk: {"host", "id"} of the node elsewhere that provides it
+    match: list[str] = field(default_factory=list)  # "kind:value" identifiers that link nodes of different hosts
+    virtual: bool | None = None         # disk/lun/vdisk: provided by something else, so a provider is expected
     serial: str | None = None           # disk
     model: str | None = None
     slot: str | None = None
@@ -106,7 +125,7 @@ class Node:
     def from_dict(cls, d: dict[str, Any]) -> "Node":
         known = {f.name for f in dataclasses.fields(cls)} - {"extra"}
         kwargs = {k: v for k, v in d.items() if k in known}
-        for k in ("members", "protocols"):
+        for k in ("members", "protocols", "initiators", "match"):
             if kwargs.get(k) is None:
                 kwargs.pop(k, None)
         if kwargs.get("platform") is None:
@@ -150,9 +169,26 @@ class Topology:
     def of_type(self, *types: str) -> list[Node]:
         return [n for n in self.nodes.values() if n.type in types]
 
+    @property
+    def key(self) -> str:
+        """The host part of the global node key `(host, id)`: the lowercased name."""
+        return self.host["name"].lower()
+
+    @property
+    def is_cluster(self) -> bool:
+        return self.host.get("kind") == "cluster"
+
+    @property
+    def cluster(self) -> str | None:
+        """The cluster this host belongs to (`host.cluster`), or its own name if it is one."""
+        return self.host["name"] if self.is_cluster else self.host.get("cluster")
+
+    def vm_disks(self, vm_id: str) -> list[Node]:
+        return [n for n in self.nodes.values() if n.type == "vdisk" and (n.vm or {}).get("id") == vm_id]
+
     def children(self, node_id: str | None) -> list[Node]:
-        """Nodes whose parent is `node_id`; with None the top of the tree (disks excluded)."""
-        return [n for n in self.nodes.values() if n.parent == node_id and n.type != "disk"]
+        """Nodes whose parent is `node_id`; with None the top of the tree (disks and vms excluded)."""
+        return [n for n in self.nodes.values() if n.parent == node_id and n.type not in ("disk", "vm")]
 
     def ancestors(self, node_id: str) -> list[Node]:
         """Parent first, the top-most last."""
@@ -214,14 +250,20 @@ def validate(doc: Any) -> list[str]:
     host = doc.get("host")
     if not isinstance(host, dict) or not isinstance(host.get("name"), str) or not host["name"]:
         problems.append("host.name must be a non-empty string")
-    elif "unc_server" in host and host["unc_server"] is not None:
-        unc = host["unc_server"]
-        if not isinstance(unc, str) or not unc.startswith("\\\\") or "\\" in unc[2:] or len(unc) < 3:
-            problems.append(f"host.unc_server {unc!r} must look like \\\\server")
+    else:
+        if "unc_server" in host and host["unc_server"] is not None:
+            unc = host["unc_server"]
+            if not isinstance(unc, str) or not unc.startswith("\\\\") or "\\" in unc[2:] or len(unc) < 3:
+                problems.append(f"host.unc_server {unc!r} must look like \\\\server")
+        if host.get("cluster") is not None and (not isinstance(host["cluster"], str) or not host["cluster"]):
+            problems.append(f"host.cluster {host['cluster']!r} must be a cluster name")
+        if host.get("kind") is not None and host["kind"] not in HOST_KINDS:
+            problems.append(f"host.kind {host['kind']!r} is not one of {', '.join(HOST_KINDS)}")
     nodes = doc.get("nodes")
     if not isinstance(nodes, list):
         return problems + ["nodes must be a list"]
 
+    own_host = host["name"].lower() if isinstance(host, dict) and isinstance(host.get("name"), str) else None
     by_id: dict[str, dict[str, Any]] = {}
     for i, n in enumerate(nodes):
         if not isinstance(n, dict):
@@ -249,7 +291,7 @@ def validate(doc: Any) -> list[str]:
             v = n.get(k)
             if v is not None and not isinstance(v, str):
                 problems.append(f"{nid}: {k} must be a string, got {v!r}")
-        for k in ("thin", "attached"):
+        for k in ("thin", "attached", "virtual"):
             v = n.get(k)
             if v is not None and not isinstance(v, bool):
                 problems.append(f"{nid}: {k} must be true or false, got {v!r}")
@@ -267,6 +309,26 @@ def validate(doc: Any) -> list[str]:
                 problems.append(f"{nid}: protocols must be a list of {', '.join(PROTOCOLS)}")
         if n.get("vm") is not None and not isinstance(n["vm"], dict):
             problems.append(f"{nid}: vm must be an object")
+        for k in ("initiators", "match"):
+            v = n.get(k)
+            if v is not None and (not isinstance(v, list) or not all(isinstance(x, str) and x for x in v)):
+                problems.append(f"{nid}: {k} must be a list of non-empty strings")
+        if isinstance(n.get("match"), list):
+            for m in n["match"]:
+                if isinstance(m, str) and m and not _MATCH_RE.match(m):
+                    problems.append(f"{nid}: match {m!r} must look like kind:value")
+        if n.get("initiators") and t != "lun":
+            problems.append(f"{nid}: only a lun has initiators")
+        if n.get("virtual") and t not in LINK_TYPES:
+            problems.append(f"{nid}: only a disk, lun or vdisk can be virtual")
+        b = n.get("backing")
+        if b is not None:
+            if t not in LINK_TYPES:
+                problems.append(f"{nid}: only a disk, lun or vdisk can have a backing, not a {t}")
+            if not isinstance(b, dict) or not all(isinstance(b.get(k), str) and b[k] for k in ("host", "id")):
+                problems.append(f"{nid}: backing must be an object with a host and an id")
+            elif own_host is not None and b["host"].lower() == own_host:
+                problems.append(f"{nid}: backing {b['id']!r} is on this host (backing joins different hosts)")
         if n.get("unc") is not None and isinstance(n["unc"], str):
             if not n["unc"].startswith("\\\\") or n["unc"].count("\\") < 3:
                 problems.append(f"{nid}: unc {n['unc']!r} must look like \\\\server\\Share")
@@ -296,6 +358,13 @@ def validate(doc: Any) -> list[str]:
             problems.append(f"{nid}: parent {parent!r} is not in this topology")
         elif by_id[parent].get("type") not in PARENT_TYPES[t]:
             problems.append(f"{nid}: a {t} cannot sit under a {by_id[parent].get('type')} ({parent})")
+
+    vm_ids = {nid for nid, n in by_id.items() if n.get("type") == "vm"}
+    if vm_ids:
+        for nid, n in by_id.items():
+            vm = n.get("vm")
+            if n.get("type") == "vdisk" and isinstance(vm, dict) and vm.get("id") not in vm_ids:
+                problems.append(f"{nid}: vm {vm.get('id')!r} is not a vm node in this topology")
 
     # cycles: only pool-in-pool and volume-in-volume can loop, but check every chain
     for nid in by_id:
@@ -414,18 +483,268 @@ def merge_share_maps(derived: dict[str, str], configured: dict[str, str] | None)
     return out
 
 
-def link_guests(topo: Topology, guests: dict[str, str]) -> int:
-    """Fill `guest_server` on luns and vdisks that have none. `guests` maps a node id, a
-    VM name or a LUN name (the last two matched case-insensitively) to a UNC server like
-    `\\\\nas-vm`. Returns how many nodes were linked."""
-    by_name = {k.lower(): v for k, v in guests.items()}
-    linked = 0
-    for n in topo.of_type("lun", "vdisk"):
-        if n.guest_server:
+def snapshots_from_response(resp: dict[str, Any]) -> list[Topology]:
+    """A `storage_topology` reply as the snapshots it carries: the host's own and, from a
+    Proxmox node, the cluster's (`cluster_topology`, host.kind "cluster")."""
+    out = [from_response(resp)]
+    if isinstance(resp.get("cluster_topology"), dict):
+        out.append(parse(resp["cluster_topology"]))
+    return out
+
+
+# --- links between hosts ------------------------------------------------------------------
+
+Key = tuple[str, str]   # (lowercased host name, node id): the global key of a node
+
+
+@dataclass(frozen=True)
+class Link:
+    """`consumer` is a disk, lun or vdisk that is made of `provider`, a node on another host.
+    via: "backing" (the node says so), "config" (an override) or "<consumer kind>~<provider
+    kind>" (an automatic match); key is the matched identifier. initiator_ok: when the
+    provider is a lun with an ACL, whether the consumer's host (name or IQN) is on it."""
+    consumer: Key
+    provider: Key
+    via: str
+    key: str | None = None
+    initiator_ok: bool | None = None
+
+
+@dataclass(frozen=True)
+class Unresolved:
+    """A node that should have a provider and has none. Reported, not an error."""
+    node: Key
+    reason: str
+    wanted: str | None = None
+
+
+def _hex(s: str) -> str:
+    return re.sub(r"[^0-9a-f]", "", s.lower())
+
+
+def _naa(s: str) -> str:
+    """Hex of an NAA id as written in `naa.6001...`, `scsi-36001...` or bare."""
+    h = _hex(s.lower().removeprefix("naa.").removeprefix("scsi-"))
+    return h[1:] if len(h) == 33 and h.startswith("3") else h
+
+
+def _naa_uuid(naa: str, uuid: str) -> bool:
+    """A Synology (LIO) NAA id is `6`, the OUI `001405`, then 25 hex digits that start the
+    LUN UUID. Tolerant: a prefix match of at least 16 digits either way, so a shortened or
+    differently formatted id still links."""
+    n, u = _naa(naa), _hex(uuid)
+    if n.startswith("6001405"):
+        n = n[7:]
+    return min(len(n), len(u)) >= 16 and (u.startswith(n) or n.startswith(u))
+
+
+def _same(a: str, b: str) -> bool:
+    return a == b
+
+
+def _same_ci(a: str, b: str) -> bool:
+    return a.strip().lower() == b.strip().lower()
+
+
+# (consumer kind, provider kind, equal?, consumer types, provider types)
+_RULES = (
+    ("naa", "uuid", _naa_uuid, LINK_TYPES, ("lun",)),         # initiator or cluster disk -> Synology LUN
+    ("serial", "vmserial", _same_ci, ("disk",), ("vdisk",)),  # guest disk -> hypervisor vdisk
+    ("volid", "volid", _same, ("vdisk",), ("disk", "lun")),   # VM disk -> cluster storage volume
+    ("vmmdisk", "vmmdisk", _same, ("disk",), ("vdisk",)),     # Virtual DSM disk -> VMM vdisk
+)
+_CONSUMER_KINDS = {r[0] for r in _RULES}
+
+
+def _keys(node: Node) -> list[tuple[str, str]]:
+    return [tuple(m.split(":", 1)) for m in node.match if ":" in m]  # type: ignore[misc]
+
+
+def _expects_provider(node: Node) -> bool:
+    if node.virtual:
+        return True
+    return (node.parent is None and node.type in ("lun", "vdisk")
+            and any(k in _CONSUMER_KINDS for k, _ in _keys(node)))
+
+
+def _parse_ref(ref: str) -> Key:
+    host, sep, nid = ref.partition("/")
+    if not sep or not host or not nid:
+        raise ValueError(f"link {ref!r} must look like host/node-id")
+    return host.lower(), nid
+
+
+def resolve_links(snapshots: Iterable[Topology],
+                  overrides: dict[str, str] | None = None) -> tuple[list[Link], list[Unresolved]]:
+    """Link the disks, luns and vdisks of many hosts' snapshots (a later snapshot replaces an
+    earlier one of the same host). For each consumer, in this order:
+
+    1. `overrides` (the `[storage.links]` table, `"host/id" = "host/id"`, consumer to provider);
+    2. its own `backing`;
+    3. an automatic match on its `match` identifiers: NAA id to LUN uuid (prefix, tolerant),
+       disk serial to a hypervisor vdisk's `vmserial`, Proxmox volume id to the cluster
+       storage's disk, VMM vdisk uuid to a Virtual DSM disk.
+
+    A link is always to a different host. A named target that is missing, or an automatic
+    match that is ambiguous, is `Unresolved`; so is a node that expects a provider (virtual,
+    or a cluster-scope vdisk with a volume id) and finds none.
+    """
+    topos = {t.key: t for t in snapshots}
+    over = {_parse_ref(k): _parse_ref(v) for k, v in (overrides or {}).items()}
+    providers: dict[str, list[tuple[Key, Node, str]]] = {}
+    for host, topo in topos.items():
+        for node in topo.nodes.values():
+            for kind, value in _keys(node):
+                providers.setdefault(kind, []).append(((host, node.id), node, value))
+
+    links: list[Link] = []
+    unresolved: list[Unresolved] = []
+    for host, topo in topos.items():
+        for node in topo.nodes.values():
+            if node.type not in LINK_TYPES:
+                continue
+            me = (host, node.id)
+            via = "config" if me in over else "backing" if node.backing else None
+            if via:
+                target = over[me] if me in over else (node.backing["host"].lower(), node.backing["id"])
+                problem = _target_problem(topos, me, target)
+                if problem:
+                    unresolved.append(Unresolved(me, problem, f"{target[0]}/{target[1]}"))
+                else:
+                    links.append(Link(me, target, via))
+                continue
+            found: dict[Key, tuple[str, str]] = {}
+            for ckind, pkind, same, ctypes, ptypes in _RULES:
+                if node.type not in ctypes:
+                    continue
+                for kind, value in _keys(node):
+                    if kind != ckind:
+                        continue
+                    for pkey, pnode, pvalue in providers.get(pkind, ()):
+                        if pkey[0] != host and pnode.type in ptypes and same(value, pvalue):
+                            found.setdefault(pkey, (f"{ckind}~{pkind}", f"{kind}:{value}"))
+            if len(found) == 1:
+                (pkey, (how, key)), = found.items()
+                links.append(Link(me, pkey, how, key, _initiator_ok(topo, topos[pkey[0]].nodes[pkey[1]])))
+            elif found:
+                names = ", ".join(f"{h}/{i}" for h, i in found)
+                unresolved.append(Unresolved(me, f"ambiguous: matches {names}"))
+            elif _expects_provider(node):
+                wanted = next((f"{k}:{v}" for k, v in _keys(node) if k in _CONSUMER_KINDS), None)
+                unresolved.append(Unresolved(me, "no provider found", wanted))
+    return links, unresolved
+
+
+def _target_problem(topos: dict[str, Topology], me: Key, target: Key) -> str | None:
+    if target[0] == me[0]:
+        return "a link joins different hosts"
+    topo = topos.get(target[0])
+    if topo is None:
+        return f"no snapshot for host {target[0]}"
+    node = topo.nodes.get(target[1])
+    if node is None:
+        return f"{target[0]} has no node {target[1]}"
+    if node.type not in LINK_TYPES:
+        return f"{target[1]} is a {node.type}, not a disk, lun or vdisk"
+    return None
+
+
+def _initiator_ok(consumer: Topology, provider: Node) -> bool | None:
+    if provider.type != "lun" or not provider.initiators:
+        return None
+    mine = {consumer.key, str(consumer.host.get("iqn") or "").lower(),
+            *(str(q).lower() for q in consumer.host.get("iqns") or ())}
+    return any(i.lower() in mine for i in provider.initiators)
+
+
+def chain(links: Iterable[Link], start: Key) -> list[Key]:
+    """`start` and every provider below it, hop by hop, as far as links go."""
+    nxt = {link.consumer: link.provider for link in links}
+    out = [start]
+    while out[-1] in nxt and nxt[out[-1]] not in out:
+        out.append(nxt[out[-1]])
+    return out
+
+
+def guest_servers(snapshots: Iterable[Topology], links: Iterable[Link]) -> dict[Key, list[str]]:
+    """Derived convenience (what `guest_server` used to store): for every provider node, the
+    UNC servers of the hosts whose disks are made of it, through any number of hops. A
+    cluster is not a guest."""
+    topos = {t.key: t for t in snapshots}
+    links = list(links)
+    out: dict[Key, list[str]] = {}
+    for link in links:
+        topo = topos.get(link.consumer[0])
+        node = topo.nodes.get(link.consumer[1]) if topo else None
+        if topo is None or node is None or node.type != "disk" or topo.is_cluster:
             continue
-        keys = [n.id, (n.vm or {}).get("name"), n.name]
-        server = guests.get(n.id) or next((by_name[k.lower()] for k in keys[1:] if k and k.lower() in by_name), None)
-        if server:
-            n.guest_server = server
-            linked += 1
-    return linked
+        for key in chain(links, link.consumer)[1:]:
+            servers = out.setdefault(key, [])
+            if topo.unc_server not in servers:
+                servers.append(topo.unc_server)
+    return out
+
+
+def _disks_behind(topo: Topology, node: Node) -> set[str]:
+    """Ids of the disks under a node: its members, those beneath it and those of its ancestors."""
+    ids = {m["disk"] for n in topo.subtree(node.id) for m in n.members}
+    ids |= {m["disk"] for a in topo.ancestors(node.id) for m in a.members}
+    return ids
+
+
+def physical_summary(snapshots: Iterable[Topology], links: Iterable[Link],
+                     unresolved: Iterable[Unresolved] = ()) -> dict[str, Any]:
+    """Physical totals over many hosts, each byte counted once.
+
+    The rule is per disk. A disk with a resolved link is not physical on its own host: its
+    bytes are already inside the provider's volume (a LUN's allocation lives in the NAS
+    volume; a VM disk in the hypervisor's local storage). A top-level pool or volume whose
+    disks are all backed is `excluded` from the totals, but its shares still count in
+    `share_used_bytes`, which is logical and counts every share of every host. A volume
+    that sits on at least one unbacked disk is counted whole.
+
+        disk_bytes         raw size of the unbacked disks
+        pool_bytes / volume_bytes / volume_used_bytes / volume_free_bytes   unbacked top-level ones
+        excluded           [{host, id, name, type, bytes, backed_by}] pools and volumes left out
+        excluded_disk_bytes / unresolved_disk_bytes   backed disks, and virtual disks with no provider
+                           (those are counted, since nothing else holds their bytes)
+        share_used_bytes   every share that reports a size
+        by_host            {host: volume_used_bytes of what was counted}
+    """
+    topos = {t.key: t for t in snapshots}
+    backed = {link.consumer: link.provider for link in links}
+    unres = {u.node for u in unresolved}
+    out: dict[str, Any] = {k: 0 for k in ("disk_bytes", "pool_bytes", "volume_bytes", "volume_used_bytes",
+                                          "volume_free_bytes", "excluded_disk_bytes",
+                                          "unresolved_disk_bytes", "share_used_bytes")}
+    out["excluded"] = []
+    out["by_host"] = {}
+    for host, topo in topos.items():
+        for n in topo.nodes.values():
+            if n.type == "share":
+                out["share_used_bytes"] += n.used_bytes or 0
+            elif n.type == "disk":
+                if (host, n.id) in backed:
+                    out["excluded_disk_bytes"] += n.size_bytes or 0
+                else:
+                    out["disk_bytes"] += n.size_bytes or 0
+                    if (host, n.id) in unres:
+                        out["unresolved_disk_bytes"] += n.size_bytes or 0
+        top = [n for n in topo.nodes.values()
+               if (n.type == "pool" and n.parent is None)
+               or (n.type == "volume" and (n.parent is None or topo.nodes[n.parent].type == "pool"))]
+        for n in top:
+            disks = _disks_behind(topo, n)
+            if disks and all((host, d) in backed for d in disks):
+                first = backed[(host, sorted(disks)[0])]
+                out["excluded"].append({"host": host, "id": n.id, "name": n.name, "type": n.type,
+                                        "bytes": (n.used_bytes if n.type == "volume" else n.size_bytes) or 0,
+                                        "backed_by": f"{first[0]}/{first[1]}"})
+            elif n.type == "pool":
+                out["pool_bytes"] += n.size_bytes or 0
+            else:
+                out["volume_bytes"] += n.size_bytes or 0
+                out["volume_used_bytes"] += n.used_bytes or 0
+                out["volume_free_bytes"] += n.free_bytes or 0
+                out["by_host"][host] = out["by_host"].get(host, 0) + (n.used_bytes or 0)
+    return out

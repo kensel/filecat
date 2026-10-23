@@ -1,0 +1,91 @@
+{
+ "ok": true,
+ "topology": {
+  "version": 1,
+  "platform": "synology",
+  "host": {
+   "name": "nas01",
+   "unc_server": "\\\\nas01",
+   "os": "DSM 7.2.2 (Virtual DSM)"
+  },
+  "collected_at": "2026-10-22T09:04:00Z",
+  "nodes": [
+   {
+    "id": "disk:vmm-0b10c7a2-58de-4b3f-a641-9d02f7e8c5b1",
+    "type": "disk",
+    "parent": null,
+    "name": "Drive 1",
+    "size_bytes": 21474836480,
+    "match": [
+     "vmmdisk:0b10c7a2-58de-4b3f-a641-9d02f7e8c5b1"
+    ],
+    "virtual": true,
+    "model": "Virtual disk",
+    "slot": "1"
+   },
+   {
+    "id": "disk:vmm-ff8a106f-f063-439f-85e9-e21abb402ae1",
+    "type": "disk",
+    "parent": null,
+    "name": "Drive 2",
+    "size_bytes": 2147483648000,
+    "match": [
+     "vmmdisk:ff8a106f-f063-439f-85e9-e21abb402ae1"
+    ],
+    "virtual": true,
+    "model": "Virtual disk",
+    "slot": "2"
+   },
+   {
+    "id": "pool:2e7b9d50-8c14-4a63-b0f2-5d1a3c68e947",
+    "type": "pool",
+    "parent": null,
+    "name": "Storage Pool 1",
+    "health": "ok",
+    "size_bytes": 2000000000000,
+    "level": "single",
+    "members": [
+     {
+      "disk": "disk:vmm-ff8a106f-f063-439f-85e9-e21abb402ae1",
+      "role": "data"
+     }
+    ]
+   },
+   {
+    "id": "vol:61c0e2f7-b4a9-4d38-8e15-c9d7a2503f84",
+    "type": "volume",
+    "parent": "pool:2e7b9d50-8c14-4a63-b0f2-5d1a3c68e947",
+    "name": "volume1",
+    "size_bytes": 1950000000000,
+    "used_bytes": 1380000000000,
+    "free_bytes": 570000000000,
+    "mount": "/volume1",
+    "fs_type": "btrfs"
+   },
+   {
+    "id": "share:media",
+    "type": "share",
+    "parent": "vol:61c0e2f7-b4a9-4d38-8e15-c9d7a2503f84",
+    "name": "Media",
+    "used_bytes": 1300000000000,
+    "path": "/volume1/Media",
+    "unc": "\\\\nas01\\Media",
+    "protocols": [
+     "smb"
+    ]
+   },
+   {
+    "id": "share:docs",
+    "type": "share",
+    "parent": "vol:61c0e2f7-b4a9-4d38-8e15-c9d7a2503f84",
+    "name": "Docs",
+    "used_bytes": 60000000000,
+    "path": "/volume1/Docs",
+    "unc": "\\\\nas01\\Docs",
+    "protocols": [
+     "smb"
+    ]
+   }
+  ]
+ }
+}

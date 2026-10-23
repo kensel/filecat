@@ -2,8 +2,9 @@
 
 One generic description of how a host's storage is built, from its physical
 disks up to the shares, LUNs and VM disks that hold the files filecat
-catalogs. Synology is the first implementation; Windows, Proxmox and
-TrueNAS are derivatives of the same layout, not new layouts. The code is
+catalogs, and how hosts are built on each other (a LUN that is a VM's disk
+that is another NAS's pool). Synology is the first implementation; Windows,
+Proxmox and TrueNAS are derivatives of the same layout, not new layouts. The code is
 `src/filecat/topology.py`; the wire form is the `storage_topology` command of
 [agent-protocol.md](agent-protocol.md); the inputs are notes
 [03](research/03-synology-vmm-san-luns.md) and
@@ -21,10 +22,14 @@ host (computer name)
          +- share  SMB or NFS share: a folder on the volume, and the catalog root for it
          +- lun .. iSCSI LUN, ZFS zvol, raw LV: a block device exported or consumed
          +- vdisk  VM disk, or an unattached image-library template
+ +- vm ........... a VM the host runs (hypervisors); its vdisks point to it
 ```
 
-A response is one `host` plus a flat list of `nodes`. Seven node types,
-`disk group pool volume share lun vdisk`; every node has `id`, `type`,
+Between hosts, a `disk`, `lun` or `vdisk` links to the node on another host
+that provides it (section 5).
+
+A response is one `host` plus a flat list of `nodes`. Eight node types,
+`disk group pool volume share lun vdisk vm`; every node has `id`, `type`,
 `name`, `parent` (or null), optional `health`/`detail`, capacity fields, and
 a `platform` object.
 
@@ -75,9 +80,12 @@ platforms that name parity disks (ZFS and md do not, so their members are
 | `path` | share, lun, vdisk | share: the folder on the host; lun/vdisk: the backing file or directory |
 | `unc` | share | the catalog root the share's records use, `\\nas-main\Backup` |
 | `protocols` | share | `smb`, `nfs` |
-| `vm` | vdisk | `{"id", "name"}` of the VM it is attached to (absent for a template) |
+| `vm` | vdisk | `{"id", "name"}` of the VM it is attached to: the id of a `vm` node (absent for a template) |
 | `attached` | vdisk | false for an image-library template or an orphaned disk |
-| `guest_server` | lun, vdisk | the UNC server (`\\nas-vm`) whose own shares live inside this disk |
+| `target`, `initiators` | lun | the iSCSI target name; the initiator names or IQNs its ACL allows |
+| `backing` | disk, lun, vdisk | `{"host", "id"}` of the node on another host that provides this one (section 5) |
+| `match` | disk, lun, vdisk | `kind:value` identifiers to link nodes across hosts: `naa`, `uuid`, `serial`, `vmserial`, `volid`, `vmmdisk` |
+| `virtual` | disk, lun, vdisk | something else provides it; a missing provider is then reported |
 | `serial`, `model`, `slot`, `media` | disk | `media` is `hdd ssd nvme` |
 | `platform` | all | namespaced extras, `{"synology": {...}}`; section 3 |
 
@@ -103,6 +111,11 @@ Rules: nothing the viewer or ShareMap needs for the generic drill-down may
 live only there; anything native (md device names, `vg1/volume_1`, SMART
 attributes, ZFS guid and `ashift`, `devtype`) may. Values are plain JSON.
 
+A `vm` node has `id`, `name`, `health` and `platform`; no parent, no capacity.
+Host fields beyond `name`/`unc_server`/`os`: `kind: "cluster"` for a cluster
+snapshot, `cluster: "<name>"` for a node that belongs to one, `iqn`/`iqns`
+(the initiator names, used to check a LUN's ACL).
+
 ## 2. Ids
 
 An id is `<type>:<platform-native key>`, a string, unique in the response
@@ -113,13 +126,14 @@ volume is deleted. They are fields (`name`, `mount`, `slot`, `platform`).
 
 | Node | Key | Fallback when the key is unreadable |
 |---|---|---|
-| disk | serial number (`disk:ZR5A1B2C`) | WWN, then `by-path`; agent marks `platform.<p>.id_unstable: true` |
+| disk | serial number (`disk:ZR5A1B2C`); an iSCSI disk with none: its NAA id (`disk:naa.6001405...`) | WWN, then `by-path`; agent marks `platform.<p>.id_unstable: true` |
 | group | the array UUID (md) or the vdev guid (ZFS) | pool key + member serials, hashed |
 | pool | VG UUID (LVM), pool guid (ZFS), `UniqueId` (Storage Spaces), md UUID when no LVM | none; skip the node and report it |
 | volume | file system UUID (`blkid`), dataset guid (ZFS), volume GUID path (Windows) | pool key + mount point |
 | share | lowercased SMB name, else the NFS export path (`share:backup`) | none needed: a share is its name |
-| lun | LUN UUID (Synology `iscsi_lun.conf`), zvol guid, LV UUID | backing path |
-| vdisk | vdisk/image UUID (Synology), zvol guid / `vmid-disk-N` (Proxmox) | backing path |
+| lun | LUN UUID (Synology `iscsi_lun.conf`; also recorded as `uuid:` in `match`), zvol guid, LV UUID | backing path |
+| vdisk | vdisk/image UUID (Synology), `vdisk:<vmid>:<slot>` (Proxmox, so it survives a move to another node) | backing path |
+| vm | `vm:<guest uuid>` (Synology VMM), `vm:<vmid>` (Proxmox, unique in the cluster) | none |
 
 Renaming a share is a new node; that is right, because the catalog root
 changes with it. A replaced disk is a new `disk` node and its group's
@@ -142,15 +156,23 @@ a device before the agent relies on them.
 | share | share definitions (`/usr/syno/etc/synoshare.conf` or `smb.conf`, *verify*), not every top-level folder | skip `@*`, `#*`; `unc = \\<host>\<name>`; `path = /volumeN/<name>` |
 | lun | `iscsi_lun.conf` stanzas, `devtype` 5 (BLUN, thin) and 11 (BLUN_THICK) | `kind: iscsi`; `thin` = devtype 5; `size_bytes` = `bytes=`; `allocated_bytes` = sum of `st_blocks * 512` in the UUID directory (never `st_size`: the 512 GiB `ROD` sparse file); `path` = `@iSCSI/LUN/BLUN[_THICK]/<uuid>` |
 | vdisk | `devtype` 7 (VDISK_BLUN); `name=vdisk.<vm>.<vdisk>.<bus>.<unit>` attached, `name=image.<image>.<vol>...` template | attached: `vm` from `@Repository/<vm_uuid>/vguest.conf`, `attached: true`; image: `attached: false`, no `vm`; vCPU, RAM, `is_meta_disk`, `is_general_vm` go in `platform.synology` |
-| `guest_server` | not known on the NAS (section 5) | |
+| vm | `@Repository/<vm_uuid>/vguest.conf` | `vm:<uuid>`, name, vCPU and RAM in `platform.synology`; Virtual DSM has `is_general_vm: false` |
+| links | LUN: `target`, the target's ACL (initiator IQNs/names), `match: ["uuid:<lun uuid>"]`; vdisk: `match: ["uuid:<uuid>", "vmmdisk:<uuid>"]` and `vm` | a LUN's initiators come from the SAN Manager target config (*verify* the file); the NAA/WWN an initiator sees derives from the LUN uuid (section 5, *verify on nas3*) |
 
 NAS-MAIN is the fixture `tests/data/synology_nas_main.json`: five disks in
 one `md2` RAID 5 group (SHR) of one pool; `volume1` (btrfs) and `volume2`
 (ext4) in it; four SMB shares on `volume1`; LUN-3 (thin, 11.0 TiB allocated,
-guest `\\nas-zfs`), LUN-2 (thick), LUN-7 (thin); the NAS-VM disk (guest
-`\\nas-vm`) and an Image Library template (`attached: false`) that note 03
+note 03's old name for the hosted ZFS), LUN-2 (thick), LUN-7 (thin); the
+NAS-VM disk and an Image Library template (`attached: false`) that note 03
 lists as a cleanup target. NAS-OLD (`synology_nas_old.json`) is two disks, one
-RAID 1 array, one volume.
+RAID 1 array, one volume. The links between hosts are tested on the lab
+instead: `lab_nas3.json` (Synology SAN Manager: Volume 1, seven LUNs with
+targets and initiators, thin and thick, and NAS01's VMM vdisks),
+`lab_pvec.json` (the Proxmox cluster, PVEC), `lab_pve2.json` (VM 155 with its
+four disks, local-btrfs), `lab_truenas2.json`, `lab_nas01.json` (Virtual
+DSM) and `lab_lkensel_g5_5090.json` (a Windows initiator, sketched). Their
+uuids, serials and nas3's pool layout are invented; the sizes, names and
+targets are the lab's.
 
 ### TrueNAS (fixture `tests/data/truenas_tank.json`)
 
@@ -171,12 +193,14 @@ vdevs hold no data; they are groups with their own `role` and contribute no
 
 | Node | Source | Notes |
 |---|---|---|
-| disk | `lsblk -J`, `smartctl` | |
+| disk | `lsblk -J`, `smartctl` | serial and WWN (`lsblk -o SERIAL,WWN`) in `serial` and `match: ["naa:..."]`; an iSCSI storage's LUNs are `disk` nodes of the cluster snapshot with `virtual: true` and `match: ["naa:...", "volid:<storage>:<lun>"]` |
+| cluster | `pvesh get /cluster/status`, `/etc/pve/storage.cfg` | `host.cluster` on each node; a snapshot of `kind: cluster` for storages with `shared 1` or no `nodes` restriction (PVEC, Ceph, NFS) |
+| vm | `qm list`, `qm config <vmid>` | `vm:<vmid>`; machine, bios, cores, memory in `platform.proxmox` |
 | group | `zpool status -P` (ZFS); `mdadm`; Ceph OSDs are optional groups | |
 | pool | `pvesm status` storages: ZFS pool, LVM VG, LVM-thin (a pool in the VG pool, `kind: lvm_thin`, `thin: true`), directory | Ceph pool: `kind: ceph`, members empty (OSDs live on other hosts) |
 | volume | directory storage / mount with a file system; ZFS dataset | `/var/lib/vz` is a volume holding qcow2 files |
 | lun | LVs and zvols without a file system | `kind: lv` or `zvol` |
-| vdisk | `qm config <vmid>` disk lines (`scsi0: local-zfs:vm-101-disk-0`), `pvesm list <storage>`; qcow2/raw files | `vm = {"id": 101, "name": ...}`; `guest_server` from the guest's name; `attached: false` for unused disks and ISO/template images |
+| vdisk | `qm config <vmid>` disk lines (`scsi0: local-zfs:vm-101-disk-0`), `pvesm list <storage>`; qcow2/raw files | `vm = {"id": "vm:101", "name": ...}`; `attached: false` for unused disks and ISO/template images. Links: `match: ["vmserial:<serial=>"]` when the config sets a `serial=`, `volid:<storage>:<volume>` when the storage is cluster-wide (no `parent`) |
 
 A vdisk is one of the three things: a file (qcow2) in a volume, an LV in a
 thin pool, a zvol in a pool; its `parent` says which, and `path` the file or
@@ -186,7 +210,7 @@ device.
 
 | Node | Source | Notes |
 |---|---|---|
-| disk | `Get-PhysicalDisk` (SerialNumber, Usage -> role: `AutoSelect`/`HotSpare`/`Journal`), `Get-Disk` | `slot` from `PhysicalLocation` |
+| disk | `Get-PhysicalDisk` (SerialNumber, Usage -> role: `AutoSelect`/`HotSpare`/`Journal`), `Get-Disk` | `slot` from `PhysicalLocation`; `UniqueId`/`Guid` for an iSCSI disk is its NAA id: `match: ["naa:..."]`, `virtual: true`; `serial:<SerialNumber>` for a VM's disk. `host.iqn` from `Get-InitiatorPort` |
 | group | none for Storage Spaces (the virtual disk's `NumberOfColumns` and `ResiliencySettingName` go on the pool or volume `level`); dynamic-disk mirrors/RAID 5 are groups | optional layer, usually absent |
 | pool | `Get-StoragePool` (UniqueId) | `level` from the virtual disk's resiliency (`simple mirror parity`) |
 | volume | `Get-Volume` (ObjectId); `Get-VirtualDisk` -> pool; plain NTFS/ReFS on a basic disk has no pool | `mount` `D:\`, `fs_type` ntfs/refs; a Space's virtual disk is a lun, with a volume on it |
@@ -227,35 +251,163 @@ Wiring (not done; `ShareMap` is untouched):
    renamed share follows the NAS without a config edit. Records keep the UNC
    root, so a stale map can only mis-name new files, never old records.
 
-## 5. Links to the catalog
+## 5. Links
+
+### Between hosts
+
+A host's storage is often made of another host's: a LUN becomes a Proxmox
+disk, which becomes a TrueNAS pool; a Synology VMM vdisk becomes the disk of
+a Virtual DSM. The link is between **individual disks**, never between
+servers, so one host can sit on several providers and a chain can run
+through any number of hops.
+
+- `backing: {"host": "nas3", "id": "lun:f48f..."}` on a `disk`, `lun` or
+  `vdisk` names the node on another host that provides it. The agent sets it
+  only when it knows (a hypervisor knows which storage a vdisk is on).
+- `match: ["naa:...", "serial:..."]` lists identifiers the node can be
+  recognised by (`kind:value`, lowercase kind). Most links are made from
+  these, because the guest does not know the host it runs on.
+- `virtual: true` marks a disk, lun or vdisk that something else provides
+  (a QEMU disk, an iSCSI disk, a Virtual DSM disk). It says "a provider is
+  expected", so a missing one is reported.
+- A `lun` lists `initiators` (names or IQNs from its target's ACL) and its
+  `target`; a `vdisk` names its `vm` (`{"id": <vm node id>, "name"}`).
+- `topology.resolve_links(snapshots, overrides=None) -> (links, unresolved)`
+  works over any number of hosts' snapshots. The global key of a node is
+  `(host, id)`, the host lowercased. A link always joins two hosts.
+  `chain(links, key)` follows a node down to the real storage.
+
+Order of resolution for each consumer: the `[storage.links]` config table
+(`"truenas2/disk:TRUENASDISK002" = "pve2/vdisk:155:scsi1"`), then its own
+`backing`, then the automatic keys:
+
+| Consumer `match` | Provider `match` | Used for |
+|---|---|---|
+| `naa:<NAA id>` on a disk, lun or vdisk | `uuid:<LUN uuid>` on a Synology `lun` | an initiator's or cluster's iSCSI disk -> the NAS LUN. Prefix match on normalized hex (`naa.`, `scsi-3` and case ignored), at least 16 digits |
+| `serial:<serial>` on a `disk` | `vmserial:<serial=>` on a hypervisor `vdisk` | a guest's disk -> the Proxmox vdisk whose `serial=` the VM config set (case-insensitive) |
+| `volid:<storage:volume>` on a `vdisk` | `volid:<same>` on the cluster storage's `disk` or `lun` | a VM's raw iSCSI volume -> the storage that is attached cluster-wide |
+| `vmmdisk:<vdisk uuid>` on a `disk` | `vmmdisk:<uuid>` on a Synology `vdisk` | a Virtual DSM disk -> its VMM vdisk, when the guest can see the uuid |
+
+A match must be exactly one provider on another host. Two candidates are
+`ambiguous`, none is "no provider found". Overrides win over everything, so a
+wrong guess is fixed in the config, not in the code.
+
+**Unresolved is a report, not an error.** `resolve_links` returns
+`Unresolved(node, reason, wanted)` for a named target that is missing (`no
+snapshot for host nas9`, `nas3 has no node lun:...`), an ambiguous match, and
+a node that expects a provider and finds none: `virtual: true`, or a
+cluster-scope `vdisk` with a `volid`. A lab that changes over time is
+normal: when truenas2 is torn down nothing is left dangling (its provider
+simply has no consumer); when LUN-3 goes, the cluster's disk shows up as
+unresolved and the viewer draws the chain up to the gap.
+
+`guest_server` is gone. What it recorded is derived:
+`guest_servers(snapshots, links)` maps each provider node to the UNC servers
+of the hosts whose disks are made of it, at any depth (a cluster is not a
+guest). This supersedes note 04's `parent_storage` and `child_server`: the
+upward link is the `backing`/`match` on the guest's disk, the downward
+"Jump to Guest Shares" button is `guest_servers` on the LUN or vdisk.
+
+### Compute versus storage, and cluster scope
+
+A `vm` node lives on the host that runs it (the hypervisor): id from the
+platform (`vm:155`, Proxmox's vmid, unique in its cluster; `vm:<guest uuid>`
+for Synology VMM), `parent: null`, outside the containment tree. Its `vdisk`s
+point to it with `vm: {"id": "vm:155", "name": "truenas2"}`. A vdisk on
+node-local storage has a `parent` (the volume it is a file in); a vdisk on
+cluster storage has none and links to the cluster's disk by `volid`.
+
+A Proxmox **cluster** is a snapshot of its own, `host: {"name": "pvec",
+"kind": "cluster"}`, holding what belongs to the cluster: shared storage
+(PVEC, an iSCSI storage: a `pool` with the attached LUNs as `disk` nodes,
+`virtual: true`, linked to the NAS). Each node's snapshot says
+`host.cluster: "pvec"` and holds the VMs and the node-local storage
+(local-btrfs). The agent on a node may return the cluster snapshot in the
+reply as `cluster_topology` (`snapshots_from_response`). A VM that migrates
+moves its `vm` node and its vdisks to the other node's snapshot with the same
+ids; the cluster-storage vdisk's `volid` and the guest's `serial` still match,
+so no link changes and the storage did not move. Node-local disks do not
+travel (a live migration copies them), which is why a guest's local disk may
+be unresolved for a moment. Prefer `match` to explicit `backing` between a
+guest and a hypervisor: a `backing` that names `pve2` is wrong after the move.
+
+Generic rule, not Proxmox-specific: shared storage that several hosts see is a
+snapshot (or a set of nodes) of its own; a host that lists the same storage
+too is a consumer of it. A TrueNAS or Windows failover pair can use
+`host.cluster` the same way.
+
+### To the catalog
 
 - **Roots.** A share's `unc` is a root as `roots` and `records` know it
   (`\\nas-main\Backup`). The viewer joins a share to its root by that string,
   compared case-insensitively like `aliases.py`. A share with no scanned
   root shows as "not cataloged".
-- **Guests.** A `lun` or `vdisk` with `guest_server: "\\nas-vm"` says that
-  server's own shares live inside this disk; the guest has its own topology
-  document (host `nas-vm`) and its own roots. The upward link is *derived*:
-  find the lun/vdisk, in any host's document, whose `guest_server` is this
-  host's `unc_server`. No `parent_storage` is stored on the guest, so the two
-  never disagree. This also gives the "net physical" total of note 04: skip
-  a guest's pool bytes when its host is a `guest_server` of another.
-- **Who fills `guest_server`.** The agent cannot: it knows the VM's name
-  (`NAS-VM`), not the UNC server. The central side links them with
-  `topology.link_guests(topo, {vm name or node id: unc server})` from
-  a config table (`[storage.guests]`, proposed) and, as a hint, a VM name
-  that matches an `[[agents]]` alias or a catalog server name case-
-  insensitively. An agent may set it when it knows (a LUN's initiator is a
-  known host).
+- **Guests' roots** are found through the links: the shares of a host whose
+  disks chain to a LUN are the "guest shares" of that LUN.
+
+### Worked example: truenas2 on nas3
+
+The lab, temporarily: a TrueNAS VM on a Proxmox cluster whose pool is one raw
+iSCSI LUN of a Synology (`tests/data/lab_*.json`).
+
+```text
+truenas2   disk:TRUENASDISK002   match serial:TRUENASDISK002          (virtual)
+   |  serial ~ vmserial: the VM config said serial=TRUENASDISK002
+pve2       vdisk:155:scsi1       match vmserial:TRUENASDISK002, volid:PVEC:0.0.1.scsi-36001405f48f...
+   |  volid ~ volid: the storage volume of the cluster-wide iSCSI storage PVEC
+pvec       disk:naa.6001405f48f1514d6072d4193d989ed9   match naa:6001405f48f1..., volid:...
+   |  naa ~ uuid: 6001405 + the first 25 hex digits of the LUN uuid
+nas3       lun:f48f1514-d607-2d41-93d9-89ed9a7c4e10    (LUN-3, target PVEC, match uuid:...)
+```
+
+The boot disk, `TRUENASDISK001`, stops one hop earlier, at pve2's
+`vdisk:155:scsi0` on local-btrfs. The hop from the cluster to the LUN rests
+on a hypothesis to verify on nas3: the SCSI id `36001405f48f1514...` is NAA
+type 6, OUI `001405` (LIO, which Synology uses), and the 25 digits after it
+are the start of the LUN's UUID in `iscsi_lun.conf` (`f48f1514-d607-...`). If
+a real LUN's id does not start that way, set it by hand
+(`[storage.links]`) or have the agent also record the LUN's actual
+`vpd_unit_serial`/`wwn` as a `naa:` match on the lun (a `naa`-to-`naa`
+rule is one line in `_RULES`).
+
+NAS01 is the same on a different axis: `nas3` has `vm:<guid>` NAS01 whose two
+vdisks carry `vmmdisk:<vdisk uuid>`; NAS01's own snapshot has two virtual
+disks carrying the same uuid, **if** Virtual DSM can see it (open question
+4); otherwise a `[storage.links]` line per disk. LUN-4..7 (target
+`lkensel-g5-5090`, initiator its IQN) match the workstation's four iSCSI
+disks by `naa`; the workstation's IQN being in the LUN's `initiators` is
+reported on the link as `initiator_ok`, a hint and not a requirement.
 
 ## 6. Totals
 
 `capacity_summary(topo)` returns disk, pool, volume (size/used/free), share,
-and block-storage (provisioned vs allocated) totals, each node counted once
-(nested pools and datasets are not added twice). `subtree_sum(topo, id, field,
-*types)` sums under any node, e.g. the bytes in LUNs and VM disks on
-`volume1`. For NAS-MAIN, volume used minus share used is the hidden block
-storage of note 03: shares 29.7 TB, LUNs and VM disks the rest.
+and block-storage (provisioned vs allocated) totals for one host, each node
+counted once (nested pools and datasets are not added twice).
+`subtree_sum(topo, id, field, *types)` sums under any node, e.g. the bytes in
+LUNs and VM disks on `volume1`. For NAS-MAIN, volume used minus share used is
+the hidden block storage of note 03: shares 29.7 TB, LUNs and VM disks the
+rest.
+
+### Physical bytes across hosts, counted once
+
+`physical_summary(snapshots, links, unresolved)` is the global total, with
+this rule: **a disk with a resolved link is not physical on its own host**,
+because its bytes are already inside the provider. A top-level pool or volume
+whose disks are all backed is `excluded` from the physical figures
+(`pool_bytes`, `volume_*`, `disk_bytes`); a volume with at least one real disk
+under it counts whole. The rule is per disk, not per server: a host can have
+a real SSD and an iSCSI disk and only the latter's volumes drop out.
+
+In the lab: nas3's Volume 1 (87.22% used) already contains LUN-3's 10.2 TB and
+NAS01's VMM disks, so truenas2's `tank`, NAS01's `volume1`, the PVEC pool and
+the workstation's E: to H: are excluded, and truenas2's 32 GiB boot disk is
+counted once, inside pve2's local-btrfs. What is still reported are the
+logical bytes: `share_used_bytes` sums every share of every host (truenas2's
+migrated share, NAS01's Media), a different question than "how much disk is
+in use". Virtual disks with no provider (the provider's snapshot is missing)
+are counted, since nothing else holds them, and listed in
+`unresolved_disk_bytes`. Thin provisioning is not unwound: a thin LUN counts
+as the NAS volume's used bytes, not as its provisioned size.
 
 ## 7. Storage in the catalog (proposal)
 
@@ -268,7 +420,7 @@ are all nodes here):
  "scanned_at": "...", "agent": {"version": "...", "protocol": 1},
  "topology": { ...the response... },
  "unc_roots": ["\\\\nas-main\\Backup", ...],
- "guest_servers": ["\\\\nas-vm", "\\\\nas-zfs"],
+ "attached_to": ["nas3"],
  "structure_hash": "<sha256 of the nodes without usage fields>"}
 ```
 
@@ -290,8 +442,10 @@ Why not a document per node:
   usage growth per volume). With per-node rows, history is per-node
   versioning plus reassembly.
 - The cross-host queries are few, and covered by the denormalized
-  `unc_roots` and `guest_servers` arrays (indexed): share -> root, root ->
-  host, guest -> parent host. Anything else (search by disk serial) scans a
+  `unc_roots` and `attached_to` arrays (indexed): share -> root, root ->
+  host, guest -> provider hosts. The links themselves are not stored: they are
+  recomputed from the latest snapshots with `resolve_links`, so a replaced
+  host re-links without a rewrite. Anything else (search by disk serial) scans a
   few dozen documents.
 
 The cost is that a very large host (hundreds of shares, a thousand VM disks)
@@ -302,13 +456,31 @@ into their own store, since they are already keyed by root.
 
 ## 8. Open questions
 
-1. Disks as an inventory with `members` edges (this design) versus disks as
+1. To verify on the real hosts: (a) Synology's NAA id for a LUN starts with
+   `6001405` followed by the first 25 hex digits of the `iscsi_lun.conf`
+   UUID (fall back: read the LUN's serial/`wwn` from the target config and
+   record it as `naa:`); (b) where DSM keeps the target/initiator ACL, and
+   whether it lists IQNs only; (c) the `serial=` a Proxmox VM sets is what
+   the guest reports (TrueNAS shows it as the disk serial: expected, check).
+2. Disks as an inventory with `members` edges (this design) versus disks as
    the top of the tree. The inventory handles SHR and shared spares; the cost
    is that "disk -> pool" is a join the viewer does.
-2. `guest_server`: a `[storage.guests]` config table, name matching, or both.
-3. History: keep every changed structure forever, or a fixed number per host;
+3. `[storage.links]` is a config table `"host/id" = "host/id"`; the loader
+   is not written yet (`resolve_links` takes the dict). Where the central side
+   keeps the latest snapshot of each host for resolving, and how stale a
+   snapshot may be before its links are called unresolved.
+4. Can Virtual DSM see its VMM vdisk uuid? Unknown: the guest's disk model is
+   "Virtual disk" and its serial may be generated. If not, link by config, or
+   by size and boot order (not implemented, too weak to guess).
+5. Does a cluster snapshot come from any one node's agent (as
+   `cluster_topology`, duplicated across nodes, latest wins) or from a
+   cluster-level entry in `[[agents]]`?
+6. Thin provisioning is not unwound in the physical total; a LUN that is
+   thin on the NAS and ZFS-formatted in the guest counts as what the NAS
+   volume holds.
+7. History: keep every changed structure forever, or a fixed number per host;
    what usage movement counts as a change.
-4. Windows: its agent (if any) needs drive-letter path mapping before shares
+8. Windows: its agent (if any) needs drive-letter path mapping before shares
    derive; until then Windows hosts stay on SMB scans.
-5. Replace `storage_pools` (note 04) outright, as proposed here, or keep that
+9. Replace `storage_pools` (note 04) outright, as proposed here, or keep that
    name for the store.

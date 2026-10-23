@@ -163,6 +163,14 @@ server keeps store detection, manifest verification, probing and Ollama.
     `storage_topology` reply in [agent-protocol.md](agent-protocol.md), and
     `filecat.topology` (dataclasses, validation, `share_entries`) with
     fixtures in `tests/data`.
+  - [x] Links between hosts: disks carry `backing`/`match`, snapshots of
+    many hosts resolve into chains (TrueNAS pool -> Proxmox vdisk -> PVEC ->
+    Synology LUN; Virtual DSM -> VMM vdisk), `vm` nodes and Proxmox cluster
+    scope, a physical total that counts each backed disk once
+    (`resolve_links`, `physical_summary`, the `lab_*` fixtures).
+  - [ ] Verify on the real hosts: the NAA id to LUN uuid mapping on nas3, the
+    LUN ACL file, and whether Virtual DSM sees its VMM vdisk uuid; then the
+    `[storage.links]` config loader.
   - [ ] Review the design (open questions at the end of the page), then:
     `synology_storage.rs` brought into line, `AgentClient.storage_topology`
     returning `Topology`, derived entries merged into `ShareMap` (config

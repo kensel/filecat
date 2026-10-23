@@ -311,12 +311,14 @@ timeout.
      "path": "/volume1/Backup", "unc": "\\\\nas-main\\Backup", "protocols": ["smb"]},
     {"id": "lun:f48f1514-...", "type": "lun", "parent": "vol:5b0e9c77-...", "kind": "iscsi",
      "thin": true, "size_bytes": 11811160064000, "allocated_bytes": 12094627905536,
+     "target": "PVEC", "initiators": ["iqn.1993-08.org.debian:01:pve2"],
+     "match": ["uuid:f48f1514-d607-2d41-93d9-89ed9a7c4e10"],
      "platform": {"synology": {"devtype": 5}}}
   ]}}
 ```
 
 The host's storage as one generic hierarchy (disk, group, pool, volume,
-share, lun, vdisk) rather than Synology-shaped volume records. The node
+share, lun, vdisk, plus `vm` on a hypervisor) rather than Synology-shaped volume records. The node
 types, fields, id scheme, `platform` extras and the per-platform mappings
 are specified in [storage-topology.md](storage-topology.md); the Python
 validator is `filecat.topology`. In short:
@@ -333,8 +335,23 @@ validator is `filecat.topology`. In short:
   of a Synology `ROD` file. A value the agent cannot tell is left out, not 0.
 - Native detail goes in `platform`, keyed by platform name
   (`{"synology": {...}}`).
-- `guest_server` is not set by the agent unless it knows the UNC name; the
-  central side links VMs to servers.
+- Hosts are linked through their disks, not through a server field. The agent
+  reports what it can see and the central side joins the snapshots of many
+  hosts (`topology.resolve_links`, storage-topology.md section 5):
+  - `match`, identifiers as `kind:value`: a LUN's `uuid:`; the NAA/WWN of a
+    disk an initiator sees (`naa:`, from the SCSI id; Windows `UniqueId`,
+    Linux `/dev/disk/by-id/scsi-3...`); a guest disk's `serial:`; a
+    hypervisor vdisk's `vmserial:` (the `serial=` of its VM config) and
+    `volid:` (`PVEC:0.0.1.scsi-...`); a VMM vdisk's `vmmdisk:`.
+  - `virtual: true` on a disk the host knows is provided by something else
+    (model `QEMU HARDDISK`, `Virtual disk`, an iSCSI disk).
+  - `backing: {host, id}` only when the agent really knows the other node.
+  - A `lun` reports its `target` and `initiators` (the target's ACL); a
+    `vdisk` its `vm`, the id of a `vm` node. A hypervisor reports `vm` nodes
+    (Proxmox `vm:<vmid>`, Synology VMM `vm:<guest uuid>`).
+  - A Proxmox node adds `host.cluster` and may return the cluster's own
+    snapshot (shared storage; `host.kind: "cluster"`) as `cluster_topology`
+    next to `topology`.
 - A host the agent has no reader for answers `nodes: []` with its
   `platform` (`linux`). Fields may be added without a protocol bump, so
   clients keep unknown ones. This replaces the draft's `volumes` reply, which
@@ -443,7 +460,22 @@ What the Rust side changes to match this page:
    derives `used` from `bavail`, which counts the reserve as used.
 7. Deterministic order (disks by slot, then pools, groups, volumes, shares,
    luns, vdisks, each by id) so a rescan diffs cleanly; sizes as JSON integers.
-8. Leave `guest_server` empty. A host that is not a Synology answers with
-   `nodes: []` and `platform: "linux"` until a reader for it exists.
-9. Reads stay read-only and root-only paths that cannot be read produce a
+8. Links: for each LUN, `match: ["uuid:<uuid>"]`, `target` (the iSCSI target
+   name) and `initiators` (the initiator names/IQNs in the target's ACL, read
+   from the SAN Manager target config: verify the file); for each VMM vdisk,
+   `match: ["uuid:<uuid>", "vmmdisk:<uuid>"]` and `vm` pointing at a new `vm`
+   node per `@Repository/<vm_uuid>` (`vm:<uuid>`, name, `is_general_vm`, vCPU,
+   RAM). Record the NAA/WWN the LUN is exported with, if the target config
+   has it, as a second `naa:` match; the central side otherwise derives it
+   from the uuid (OUI `001405` plus the first 25 hex digits, to verify on
+   nas3). When the agent runs inside a Virtual DSM, mark its disks
+   `virtual: true` and report the VMM vdisk uuid as `vmmdisk:` if it can
+   see one. Leave `backing` empty. A host that is not a Synology answers
+   with `nodes: []` and `platform: "linux"` until a reader for it exists.
+9. Later agents: Proxmox needs disk serial and WWN (`lsblk -o SERIAL,WWN`),
+   `qm config` (`vm` nodes, `serial=` and volume ids on each vdisk), and the
+   cluster's shared storages; Windows needs `Get-Disk`'s `UniqueId` (NAA id)
+   and `SerialNumber` for each disk and `Get-InitiatorPort` for the host's
+   IQN; TrueNAS needs the disk serial (`lsblk`, `zpool status -P`).
+10. Reads stay read-only and root-only paths that cannot be read produce a
    `health: "unknown"` node with a `detail`, not a failed command.

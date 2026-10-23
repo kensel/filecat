@@ -1,0 +1,431 @@
+{
+ "ok": true,
+ "topology": {
+  "version": 1,
+  "platform": "synology",
+  "host": {
+   "name": "nas3",
+   "unc_server": "\\\\nas3",
+   "os": "DSM 7.2.2",
+   "iscsi_sessions": 3
+  },
+  "collected_at": "2026-10-22T09:00:00Z",
+  "nodes": [
+   {
+    "id": "disk:ZR6N3A01",
+    "type": "disk",
+    "parent": null,
+    "name": "Drive 1",
+    "health": "ok",
+    "size_bytes": 16000900661248,
+    "serial": "ZR6N3A01",
+    "model": "ST16000NM001G",
+    "slot": "1",
+    "media": "hdd",
+    "platform": {
+     "synology": {
+      "device": "/dev/sata1",
+      "smart": "normal"
+     }
+    }
+   },
+   {
+    "id": "disk:ZR6N3A02",
+    "type": "disk",
+    "parent": null,
+    "name": "Drive 2",
+    "health": "ok",
+    "size_bytes": 16000900661248,
+    "serial": "ZR6N3A02",
+    "model": "ST16000NM001G",
+    "slot": "2",
+    "media": "hdd",
+    "platform": {
+     "synology": {
+      "device": "/dev/sata2",
+      "smart": "normal"
+     }
+    }
+   },
+   {
+    "id": "disk:ZR6N3A03",
+    "type": "disk",
+    "parent": null,
+    "name": "Drive 3",
+    "health": "ok",
+    "size_bytes": 16000900661248,
+    "serial": "ZR6N3A03",
+    "model": "ST16000NM001G",
+    "slot": "3",
+    "media": "hdd",
+    "platform": {
+     "synology": {
+      "device": "/dev/sata3",
+      "smart": "normal"
+     }
+    }
+   },
+   {
+    "id": "disk:ZR6N3A04",
+    "type": "disk",
+    "parent": null,
+    "name": "Drive 4",
+    "health": "ok",
+    "size_bytes": 16000900661248,
+    "serial": "ZR6N3A04",
+    "model": "ST16000NM001G",
+    "slot": "4",
+    "media": "hdd",
+    "platform": {
+     "synology": {
+      "device": "/dev/sata4",
+      "smart": "normal"
+     }
+    }
+   },
+   {
+    "id": "pool:7a1d3c5e-2b8f-4e96-8d40-1c6a9f0b3e72",
+    "type": "pool",
+    "parent": null,
+    "name": "Storage Pool 1",
+    "health": "ok",
+    "size_bytes": 48002701983744,
+    "allocated_bytes": 47000000000000,
+    "raw_bytes": 64003602644992,
+    "level": "shr",
+    "platform": {
+     "synology": {
+      "vg": "vg1",
+      "shr": "SHR-1 (1-disk fault tolerance)"
+     }
+    }
+   },
+   {
+    "id": "group:c40e7b19-6d25-4f83-a1b0-93e8d52f7a46",
+    "type": "group",
+    "parent": "pool:7a1d3c5e-2b8f-4e96-8d40-1c6a9f0b3e72",
+    "name": "md2",
+    "size_bytes": 48002701983744,
+    "raw_bytes": 64003602644992,
+    "role": "data",
+    "level": "raid5",
+    "members": [
+     {
+      "disk": "disk:ZR6N3A01",
+      "role": "data"
+     },
+     {
+      "disk": "disk:ZR6N3A02",
+      "role": "data"
+     },
+     {
+      "disk": "disk:ZR6N3A03",
+      "role": "data"
+     },
+     {
+      "disk": "disk:ZR6N3A04",
+      "role": "data"
+     }
+    ]
+   },
+   {
+    "id": "vol:5e2c8d41-90ab-4c17-a3f6-7b1d0e94c258",
+    "type": "volume",
+    "parent": "pool:7a1d3c5e-2b8f-4e96-8d40-1c6a9f0b3e72",
+    "name": "Volume 1",
+    "health": "ok",
+    "detail": "87.22% used",
+    "size_bytes": 47000000000000,
+    "used_bytes": 40993400000000,
+    "free_bytes": 6006600000000,
+    "mount": "/volume1",
+    "fs_type": "btrfs",
+    "device": "/dev/mapper/cachedev_0"
+   },
+   {
+    "id": "share:backup",
+    "type": "share",
+    "parent": "vol:5e2c8d41-90ab-4c17-a3f6-7b1d0e94c258",
+    "name": "Backup",
+    "used_bytes": 22000000000000,
+    "path": "/volume1/Backup",
+    "unc": "\\\\nas3\\Backup",
+    "protocols": [
+     "smb"
+    ]
+   },
+   {
+    "id": "share:homes",
+    "type": "share",
+    "parent": "vol:5e2c8d41-90ab-4c17-a3f6-7b1d0e94c258",
+    "name": "homes",
+    "used_bytes": 1900000000000,
+    "path": "/volume1/homes",
+    "unc": "\\\\nas3\\homes",
+    "protocols": [
+     "smb"
+    ]
+   },
+   {
+    "id": "share:apps",
+    "type": "share",
+    "parent": "vol:5e2c8d41-90ab-4c17-a3f6-7b1d0e94c258",
+    "name": "Apps",
+    "used_bytes": 1600000000000,
+    "path": "/volume1/Apps",
+    "unc": "\\\\nas3\\Apps",
+    "protocols": [
+     "smb"
+    ]
+   },
+   {
+    "id": "lun:7949c2d0-3b1e-4f58-9a6d-0e5c8b1f2a33",
+    "type": "lun",
+    "parent": "vol:5e2c8d41-90ab-4c17-a3f6-7b1d0e94c258",
+    "name": "LUN-1",
+    "health": "ok",
+    "detail": "Healthy",
+    "size_bytes": 10737418240,
+    "allocated_bytes": 0,
+    "thin": true,
+    "kind": "iscsi",
+    "path": "/volume1/@iSCSI/LUN/BLUN/7949c2d0-3b1e-4f58-9a6d-0e5c8b1f2a33",
+    "target": "Synology iSCSI Target",
+    "match": [
+     "uuid:7949c2d0-3b1e-4f58-9a6d-0e5c8b1f2a33"
+    ],
+    "platform": {
+     "synology": {
+      "devtype": 5,
+      "lid": 1
+     }
+    }
+   },
+   {
+    "id": "lun:47f5d7a8-5444-4932-93e3-c712f6aa0130",
+    "type": "lun",
+    "parent": "vol:5e2c8d41-90ab-4c17-a3f6-7b1d0e94c258",
+    "name": "LUN-2",
+    "health": "ok",
+    "detail": "Healthy",
+    "size_bytes": 1073741824000,
+    "allocated_bytes": 1073741824000,
+    "thin": false,
+    "kind": "iscsi",
+    "path": "/volume1/@iSCSI/LUN/BLUN_THICK/47f5d7a8-5444-4932-93e3-c712f6aa0130",
+    "target": "Synology iSCSI Target",
+    "match": [
+     "uuid:47f5d7a8-5444-4932-93e3-c712f6aa0130"
+    ],
+    "platform": {
+     "synology": {
+      "devtype": 11,
+      "lid": 2
+     }
+    }
+   },
+   {
+    "id": "lun:f48f1514-d607-2d41-93d9-89ed9a7c4e10",
+    "type": "lun",
+    "parent": "vol:5e2c8d41-90ab-4c17-a3f6-7b1d0e94c258",
+    "name": "LUN-3",
+    "health": "ok",
+    "detail": "Healthy",
+    "size_bytes": 11811160064000,
+    "allocated_bytes": 11215018603315,
+    "thin": true,
+    "kind": "iscsi",
+    "path": "/volume1/@iSCSI/LUN/BLUN/f48f1514-d607-2d41-93d9-89ed9a7c4e10",
+    "target": "PVEC",
+    "initiators": [
+     "iqn.1993-08.org.debian:01:pve1",
+     "iqn.1993-08.org.debian:01:pve2"
+    ],
+    "match": [
+     "uuid:f48f1514-d607-2d41-93d9-89ed9a7c4e10"
+    ],
+    "platform": {
+     "synology": {
+      "devtype": 5,
+      "lid": 3
+     }
+    }
+   },
+   {
+    "id": "lun:2a93d1c8-71e4-4b60-8c25-5f0e9a6b7d14",
+    "type": "lun",
+    "parent": "vol:5e2c8d41-90ab-4c17-a3f6-7b1d0e94c258",
+    "name": "LUN-4",
+    "health": "ok",
+    "detail": "Healthy",
+    "size_bytes": 107374182400,
+    "allocated_bytes": 89335319756,
+    "thin": true,
+    "kind": "iscsi",
+    "path": "/volume1/@iSCSI/LUN/BLUN/2a93d1c8-71e4-4b60-8c25-5f0e9a6b7d14",
+    "target": "lkensel-g5-5090",
+    "initiators": [
+     "iqn.1991-05.com.microsoft:lkensel-g5-5090"
+    ],
+    "match": [
+     "uuid:2a93d1c8-71e4-4b60-8c25-5f0e9a6b7d14"
+    ],
+    "platform": {
+     "synology": {
+      "devtype": 5,
+      "lid": 4
+     }
+    }
+   },
+   {
+    "id": "lun:a0061b7e-4c92-4d83-b5f1-26d8e3c90a57",
+    "type": "lun",
+    "parent": "vol:5e2c8d41-90ab-4c17-a3f6-7b1d0e94c258",
+    "name": "LUN-5",
+    "health": "ok",
+    "detail": "Healthy",
+    "size_bytes": 107374182400,
+    "allocated_bytes": 674339225,
+    "thin": true,
+    "kind": "iscsi",
+    "path": "/volume1/@iSCSI/LUN/BLUN/a0061b7e-4c92-4d83-b5f1-26d8e3c90a57",
+    "target": "lkensel-g5-5090",
+    "initiators": [
+     "iqn.1991-05.com.microsoft:lkensel-g5-5090"
+    ],
+    "match": [
+     "uuid:a0061b7e-4c92-4d83-b5f1-26d8e3c90a57"
+    ],
+    "platform": {
+     "synology": {
+      "devtype": 5,
+      "lid": 5
+     }
+    }
+   },
+   {
+    "id": "lun:83a1e4f6-0d57-4a29-9c3b-b71f58e2d640",
+    "type": "lun",
+    "parent": "vol:5e2c8d41-90ab-4c17-a3f6-7b1d0e94c258",
+    "name": "LUN-6",
+    "health": "ok",
+    "detail": "Healthy",
+    "size_bytes": 107374182400,
+    "allocated_bytes": 12992276070,
+    "thin": true,
+    "kind": "iscsi",
+    "path": "/volume1/@iSCSI/LUN/BLUN/83a1e4f6-0d57-4a29-9c3b-b71f58e2d640",
+    "target": "lkensel-g5-5090",
+    "initiators": [
+     "iqn.1991-05.com.microsoft:lkensel-g5-5090"
+    ],
+    "match": [
+     "uuid:83a1e4f6-0d57-4a29-9c3b-b71f58e2d640"
+    ],
+    "platform": {
+     "synology": {
+      "devtype": 5,
+      "lid": 6
+     }
+    }
+   },
+   {
+    "id": "lun:bd85bc23-c5d3-459e-8801-39d17f096c57",
+    "type": "lun",
+    "parent": "vol:5e2c8d41-90ab-4c17-a3f6-7b1d0e94c258",
+    "name": "LUN-7",
+    "health": "ok",
+    "detail": "Healthy",
+    "size_bytes": 1073741824000,
+    "allocated_bytes": 1000190509056,
+    "thin": true,
+    "kind": "iscsi",
+    "path": "/volume1/@iSCSI/LUN/BLUN/bd85bc23-c5d3-459e-8801-39d17f096c57",
+    "target": "lkensel-g5-5090",
+    "initiators": [
+     "iqn.1991-05.com.microsoft:lkensel-g5-5090"
+    ],
+    "match": [
+     "uuid:bd85bc23-c5d3-459e-8801-39d17f096c57"
+    ],
+    "platform": {
+     "synology": {
+      "devtype": 5,
+      "lid": 7
+     }
+    }
+   },
+   {
+    "id": "vm:dead21af-c947-4f6a-9b25-1535ccd2dd75",
+    "type": "vm",
+    "parent": null,
+    "name": "NAS01",
+    "health": "ok",
+    "platform": {
+     "synology": {
+      "is_general_vm": false,
+      "vcpu_num": 4,
+      "vram_size_mib": 8192,
+      "version": "7.2.2"
+     }
+    }
+   },
+   {
+    "id": "vdisk:0b10c7a2-58de-4b3f-a641-9d02f7e8c5b1",
+    "type": "vdisk",
+    "parent": "vol:5e2c8d41-90ab-4c17-a3f6-7b1d0e94c258",
+    "name": "NAS01 disk 1",
+    "size_bytes": 21474836480,
+    "allocated_bytes": 6442450944,
+    "thin": true,
+    "path": "/volume1/@iSCSI/LUN/VDISK_BLUN/0b10c7a2-58de-4b3f-a641-9d02f7e8c5b1",
+    "vm": {
+     "id": "vm:dead21af-c947-4f6a-9b25-1535ccd2dd75",
+     "name": "NAS01"
+    },
+    "attached": true,
+    "match": [
+     "uuid:0b10c7a2-58de-4b3f-a641-9d02f7e8c5b1",
+     "vmmdisk:0b10c7a2-58de-4b3f-a641-9d02f7e8c5b1"
+    ],
+    "platform": {
+     "synology": {
+      "devtype": 7,
+      "kind": "VDISK_BLUN",
+      "is_meta_disk": true,
+      "bus": "sata",
+      "unit": 0
+     }
+    }
+   },
+   {
+    "id": "vdisk:ff8a106f-f063-439f-85e9-e21abb402ae1",
+    "type": "vdisk",
+    "parent": "vol:5e2c8d41-90ab-4c17-a3f6-7b1d0e94c258",
+    "name": "NAS01 disk 2",
+    "size_bytes": 2147483648000,
+    "allocated_bytes": 1400000000000,
+    "thin": true,
+    "path": "/volume1/@iSCSI/LUN/VDISK_BLUN/ff8a106f-f063-439f-85e9-e21abb402ae1",
+    "vm": {
+     "id": "vm:dead21af-c947-4f6a-9b25-1535ccd2dd75",
+     "name": "NAS01"
+    },
+    "attached": true,
+    "match": [
+     "uuid:ff8a106f-f063-439f-85e9-e21abb402ae1",
+     "vmmdisk:ff8a106f-f063-439f-85e9-e21abb402ae1"
+    ],
+    "platform": {
+     "synology": {
+      "devtype": 7,
+      "kind": "VDISK_BLUN",
+      "is_meta_disk": false,
+      "bus": "sata",
+      "unit": 1
+     }
+    }
+   }
+  ]
+ }
+}
