@@ -156,6 +156,18 @@ server keeps store detection, manifest verification, probing and Ollama.
 - Synology storage topology (note 03): `iscsi_lun.conf` and `@Repository`
   parsing, SAN LUNs, VMM disks and image-library templates, physical usage
   from `st_blocks` (never the 512 GiB `ROD` size).
+  - [x] Design: one generic hierarchy (disk, group, pool, volume, share, lun,
+    vdisk) with Synology first and Windows, Proxmox and TrueNAS as later
+    derivatives of the same layout, ids from platform-native keys, shares
+    that feed `ShareMap`: [storage-topology.md](storage-topology.md), the
+    `storage_topology` reply in [agent-protocol.md](agent-protocol.md), and
+    `filecat.topology` (dataclasses, validation, `share_entries`) with
+    fixtures in `tests/data`.
+  - [ ] Review the design (open questions at the end of the page), then:
+    `synology_storage.rs` brought into line, `AgentClient.storage_topology`
+    returning `Topology`, derived entries merged into `ShareMap` (config
+    wins), the `storage_topology` store (one document per host snapshot plus
+    history) and the viewer drill-down.
 - A `storage_pools` store and the storage hierarchy in the web viewer
   (note 04): pool and volume capacity bars, SAN/VM tiles behind a toggle,
   inspector cards for backup stores, block storage and rollups, and a jump

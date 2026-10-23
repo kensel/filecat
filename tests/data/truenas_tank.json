@@ -1,0 +1,327 @@
+{
+ "ok": true,
+ "topology": {
+  "version": 1,
+  "platform": "truenas",
+  "host": {
+   "name": "truenas",
+   "unc_server": "\\\\truenas",
+   "os": "TrueNAS SCALE 25.04"
+  },
+  "collected_at": "2026-10-21T18:10:00Z",
+  "nodes": [
+   {
+    "id": "disk:3GJ1A01",
+    "type": "disk",
+    "parent": null,
+    "serial": "3GJ1A01",
+    "model": "WDC WUH721818ALE6L4",
+    "media": "hdd",
+    "size_bytes": 18000207937536,
+    "health": "ok"
+   },
+   {
+    "id": "disk:3GJ2A02",
+    "type": "disk",
+    "parent": null,
+    "serial": "3GJ2A02",
+    "model": "WDC WUH721818ALE6L4",
+    "media": "hdd",
+    "size_bytes": 18000207937536,
+    "health": "ok"
+   },
+   {
+    "id": "disk:3GJ3A03",
+    "type": "disk",
+    "parent": null,
+    "serial": "3GJ3A03",
+    "model": "WDC WUH721818ALE6L4",
+    "media": "hdd",
+    "size_bytes": 18000207937536,
+    "health": "ok"
+   },
+   {
+    "id": "disk:3GJ4A04",
+    "type": "disk",
+    "parent": null,
+    "serial": "3GJ4A04",
+    "model": "WDC WUH721818ALE6L4",
+    "media": "hdd",
+    "size_bytes": 18000207937536,
+    "health": "ok"
+   },
+   {
+    "id": "disk:3GJ5A05",
+    "type": "disk",
+    "parent": null,
+    "serial": "3GJ5A05",
+    "model": "WDC WUH721818ALE6L4",
+    "media": "hdd",
+    "size_bytes": 18000207937536,
+    "health": "ok"
+   },
+   {
+    "id": "disk:3GJ6A06",
+    "type": "disk",
+    "parent": null,
+    "serial": "3GJ6A06",
+    "model": "WDC WUH721818ALE6L4",
+    "media": "hdd",
+    "size_bytes": 18000207937536,
+    "health": "ok"
+   },
+   {
+    "id": "disk:S5GXNX0N",
+    "type": "disk",
+    "parent": null,
+    "serial": "S5GXNX0N",
+    "model": "INTEL SSDPED1D480GA",
+    "media": "ssd",
+    "size_bytes": 400088457216,
+    "health": "ok"
+   },
+   {
+    "id": "disk:S4EVNE0M",
+    "type": "disk",
+    "parent": null,
+    "serial": "S4EVNE0M",
+    "model": "Samsung SSD 870 EVO 1TB",
+    "media": "ssd",
+    "size_bytes": 1000204886016,
+    "health": "ok"
+   },
+   {
+    "id": "disk:3GJ7A07",
+    "type": "disk",
+    "parent": null,
+    "serial": "3GJ7A07",
+    "model": "WDC WUH721818ALE6L4",
+    "media": "hdd",
+    "size_bytes": 18000207937536,
+    "health": "ok"
+   },
+   {
+    "id": "pool:14920311872935544719",
+    "type": "pool",
+    "parent": null,
+    "name": "tank",
+    "level": "zfs",
+    "size_bytes": 71999999000000,
+    "allocated_bytes": 40100000000000,
+    "free_bytes": 31899999000000,
+    "health": "ok",
+    "platform": {
+     "truenas": {
+      "guid": "14920311872935544719",
+      "ashift": 12,
+      "fragmentation": 9,
+      "dedup_ratio": "1.00x"
+     }
+    }
+   },
+   {
+    "id": "group:5521390000000001",
+    "type": "group",
+    "parent": "pool:14920311872935544719",
+    "name": "raidz1-0",
+    "role": "data",
+    "level": "raidz1",
+    "health": "ok",
+    "members": [
+     {
+      "disk": "disk:3GJ1A01",
+      "role": "data"
+     },
+     {
+      "disk": "disk:3GJ2A02",
+      "role": "data"
+     },
+     {
+      "disk": "disk:3GJ3A03",
+      "role": "data"
+     }
+    ],
+    "platform": {
+     "truenas": {
+      "guid": "5521390000000001"
+     }
+    }
+   },
+   {
+    "id": "group:5521390000000002",
+    "type": "group",
+    "parent": "pool:14920311872935544719",
+    "name": "raidz1-1",
+    "role": "data",
+    "level": "raidz1",
+    "health": "ok",
+    "members": [
+     {
+      "disk": "disk:3GJ4A04",
+      "role": "data"
+     },
+     {
+      "disk": "disk:3GJ5A05",
+      "role": "data"
+     },
+     {
+      "disk": "disk:3GJ6A06",
+      "role": "data"
+     }
+    ],
+    "platform": {
+     "truenas": {
+      "guid": "5521390000000002"
+     }
+    }
+   },
+   {
+    "id": "group:5521390000000003",
+    "type": "group",
+    "parent": "pool:14920311872935544719",
+    "name": "logs",
+    "role": "log",
+    "level": "single",
+    "health": "ok",
+    "members": [
+     {
+      "disk": "disk:S5GXNX0N",
+      "role": "log"
+     }
+    ],
+    "platform": {
+     "truenas": {
+      "guid": "5521390000000003"
+     }
+    }
+   },
+   {
+    "id": "group:5521390000000004",
+    "type": "group",
+    "parent": "pool:14920311872935544719",
+    "name": "cache",
+    "role": "cache",
+    "level": "single",
+    "health": "ok",
+    "members": [
+     {
+      "disk": "disk:S4EVNE0M",
+      "role": "cache"
+     }
+    ],
+    "platform": {
+     "truenas": {
+      "guid": "5521390000000004"
+     }
+    }
+   },
+   {
+    "id": "group:5521390000000005",
+    "type": "group",
+    "parent": "pool:14920311872935544719",
+    "name": "spares",
+    "role": "spare",
+    "level": "single",
+    "health": "ok",
+    "members": [
+     {
+      "disk": "disk:3GJ7A07",
+      "role": "spare"
+     }
+    ],
+    "platform": {
+     "truenas": {
+      "guid": "5521390000000005"
+     }
+    }
+   },
+   {
+    "id": "vol:9000000000000001",
+    "type": "volume",
+    "parent": "pool:14920311872935544719",
+    "name": "tank",
+    "mount": "/mnt/tank",
+    "device": "tank",
+    "fs_type": "zfs",
+    "used_bytes": 40100000000000,
+    "free_bytes": 31899999000000,
+    "size_bytes": 71999999000000,
+    "platform": {
+     "truenas": {
+      "compression": "lz4",
+      "recordsize": 131072
+     }
+    }
+   },
+   {
+    "id": "vol:9000000000000002",
+    "type": "volume",
+    "parent": "vol:9000000000000001",
+    "name": "tank/media",
+    "mount": "/mnt/tank/media",
+    "device": "tank/media",
+    "fs_type": "zfs",
+    "used_bytes": 22000000000000,
+    "free_bytes": 31899999000000,
+    "platform": {
+     "truenas": {
+      "compression": "zstd"
+     }
+    }
+   },
+   {
+    "id": "vol:9000000000000003",
+    "type": "volume",
+    "parent": "vol:9000000000000001",
+    "name": "tank/backups",
+    "mount": "/mnt/tank/backups",
+    "device": "tank/backups",
+    "fs_type": "zfs",
+    "used_bytes": 9000000000000,
+    "free_bytes": 31899999000000
+   },
+   {
+    "id": "share:media",
+    "type": "share",
+    "parent": "vol:9000000000000002",
+    "name": "media",
+    "path": "/mnt/tank/media",
+    "protocols": [
+     "smb"
+    ],
+    "unc": "\\\\truenas\\media",
+    "used_bytes": 22000000000000
+   },
+   {
+    "id": "share:backups",
+    "type": "share",
+    "parent": "vol:9000000000000003",
+    "name": "backups",
+    "path": "/mnt/tank/backups",
+    "protocols": [
+     "smb",
+     "nfs"
+    ],
+    "used_bytes": 9000000000000
+   },
+   {
+    "id": "lun:9000000000000010",
+    "type": "lun",
+    "parent": "vol:9000000000000001",
+    "name": "tank/esx-lun",
+    "kind": "zvol",
+    "thin": true,
+    "size_bytes": 2199023255552,
+    "allocated_bytes": 751619276800,
+    "path": "/dev/zvol/tank/esx-lun",
+    "platform": {
+     "truenas": {
+      "volblocksize": 16384,
+      "iscsi_target": "iqn.2005-10.org.freenas.ctl:esx",
+      "extent": "esx-lun"
+     }
+    }
+   }
+  ]
+ }
+}

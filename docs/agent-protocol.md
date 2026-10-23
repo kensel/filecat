@@ -294,17 +294,51 @@ timeout.
 
 ```json
 {"cmd": "storage_topology"}
-{"ok": true, "volumes": [{"mount_point": "/volume1", "device": "/dev/mapper/cachedev_0",
-   "fs_type": "btrfs", "total_bytes": 0, "used_bytes": 0, "free_bytes": 0,
-   "shares": ["Backup", "home"], "block_devices": [ ... ]}]}
+{"ok": true, "topology": {
+  "version": 1, "platform": "synology",
+  "host": {"name": "nas-main", "unc_server": "\\\\nas-main", "os": "DSM 7.2.2"},
+  "collected_at": "2026-10-21T18:00:00Z",
+  "nodes": [
+    {"id": "disk:ZR5A1B2C", "type": "disk", "parent": null, "serial": "ZR5A1B2C",
+     "slot": "1", "size_bytes": 16000900661248, "health": "ok"},
+    {"id": "pool:3f7c1d2a-...", "type": "pool", "parent": null, "name": "Storage Pool 1",
+     "level": "shr", "size_bytes": 64003602644992, "health": "ok"},
+    {"id": "group:8c1f6a40-...", "type": "group", "parent": "pool:3f7c1d2a-...", "name": "md2",
+     "role": "data", "level": "raid5", "members": [{"disk": "disk:ZR5A1B2C", "role": "data"}]},
+    {"id": "vol:5b0e9c77-...", "type": "volume", "parent": "pool:3f7c1d2a-...", "mount": "/volume1",
+     "fs_type": "btrfs", "size_bytes": 0, "used_bytes": 0, "free_bytes": 0},
+    {"id": "share:backup", "type": "share", "parent": "vol:5b0e9c77-...", "name": "Backup",
+     "path": "/volume1/Backup", "unc": "\\\\nas-main\\Backup", "protocols": ["smb"]},
+    {"id": "lun:f48f1514-...", "type": "lun", "parent": "vol:5b0e9c77-...", "kind": "iscsi",
+     "thin": true, "size_bytes": 11811160064000, "allocated_bytes": 12094627905536,
+     "platform": {"synology": {"devtype": 5}}}
+  ]}}
 ```
 
-The volumes, their shares, and Synology SAN LUNs and VMM disks, as in
-`synology_storage.rs` (`VolumeTopology`, `SynologyBlockDevice`) and note
-[03](research/03-synology-vmm-san-luns.md); `allocated_bytes` there is
-always `st_blocks * 512`, never the 512 GiB `st_size` of a `ROD` file. On a
-host that is not a Synology the list is empty. Fields may be added without
-a protocol bump, so clients keep unknown ones.
+The host's storage as one generic hierarchy (disk, group, pool, volume,
+share, lun, vdisk) rather than Synology-shaped volume records. The node
+types, fields, id scheme, `platform` extras and the per-platform mappings
+are specified in [storage-topology.md](storage-topology.md); the Python
+validator is `filecat.topology`. In short:
+
+- `nodes` is flat; `parent` is an id or `null` and forms a containment tree
+  (group in pool, volume in pool or volume, share in volume, lun or vdisk in
+  a volume or pool). Disks have no parent: groups, pools and volumes list
+  `members` (`{"disk": id, "role": ...}`).
+- `id` is `<type>:<platform-native key>` (pool GUID, disk serial, file
+  system UUID, LUN UUID), never an array index or a name like `md2`, so it
+  survives rescans.
+- Sizes are bytes. `size_bytes` is logical for a `lun`/`vdisk` and
+  `allocated_bytes` the physical `st_blocks * 512`, never the 512 GiB `st_size`
+  of a Synology `ROD` file. A value the agent cannot tell is left out, not 0.
+- Native detail goes in `platform`, keyed by platform name
+  (`{"synology": {...}}`).
+- `guest_server` is not set by the agent unless it knows the UNC name; the
+  central side links VMs to servers.
+- A host the agent has no reader for answers `nodes: []` with its
+  `platform` (`linux`). Fields may be added without a protocol bump, so
+  clients keep unknown ones. This replaces the draft's `volumes` reply, which
+  no client has depended on yet.
 
 ## Path mapping (client side)
 
@@ -374,6 +408,42 @@ What the Rust side changes to match this page:
    8 MiB (`read_line` in the draft grows without limit); every response is
    flushed after the write (`StreamOwned` buffers); errors map from
    `io::ErrorKind`/`raw_os_error` to a `code` through one function.
-9. **`storage_topology`** and the TLS code (`tls.rs`) are unchanged. Output
-   of `cert_sha256` stays as the lowercase hex printed at start; the client
-   also accepts `AA:BB:...`.
+9. **`storage_topology`** is rewritten to the generic reply above; the list of
+   changes to `synology_storage.rs` follows. The TLS code (`tls.rs`) is
+   unchanged. Output of `cert_sha256` stays as the lowercase hex printed at
+   start; the client also accepts `AA:BB:...`.
+
+### Changes to `synology_storage.rs`
+
+1. Replace `VolumeTopology` and `SynologyBlockDevice` with one `Node` struct
+   (the fields of storage-topology.md, `Option`s skipped when `None`,
+   `platform` a `serde_json::Value`) and return `Topology { version, platform,
+   host, collected_at, nodes }`.
+2. Ids: pool, volume and LUN ids from UUIDs (`blkid`, LVM VG, `mdadm`, the LUN
+   uuid), disk ids from serials; none from index or name. A node whose key
+   cannot be read is omitted and logged, not given an index.
+3. Add the layers the draft lacks: disks (`/sys/block`, serial, model, slot,
+   health), md arrays as `group`s from `/proc/mdstat` (`level`, `[UU_]` ->
+   `degraded`, `members`), the LVM VG as the `pool`, then `volume` with a
+   `parent` pool. The pool/volume link comes from the device mapper chain
+   under `/sys/block/dm-*/slaves`.
+4. `shares`: read the share definitions (name and `path`), not every
+   top-level folder, and emit `share` nodes with `path`, `unc`
+   (`\\<hostname>\<name>`) and `protocols`. The draft's `shares` held absolute
+   paths of any folder that did not start with `@` or `#`.
+5. `SynologyBlockDevice.kind` maps to `lun` (`san_blun`, `san_blun_thick`:
+   `thin` from devtype, `kind: "iscsi"`) or `vdisk` (`vmm_vdisk`:
+   `attached: true`, `vm`; `vmm_image`: `attached: false`). `provisioned_bytes`
+   becomes `size_bytes`; `allocated_bytes` keeps `st_blocks * 512`. `uuid`,
+   `lid`, devtype, `extent_files`, `is_meta_disk`, the `vguest.conf` fields move
+   into `platform.synology`. `root_volume` becomes `parent`; `backing_dir`
+   becomes `path`.
+6. `used_bytes` is `f_blocks - f_bfree` (what is in use), `free_bytes` is
+   `f_bavail` (what a user can take), `size_bytes` is `f_blocks`; the draft
+   derives `used` from `bavail`, which counts the reserve as used.
+7. Deterministic order (disks by slot, then pools, groups, volumes, shares,
+   luns, vdisks, each by id) so a rescan diffs cleanly; sizes as JSON integers.
+8. Leave `guest_server` empty. A host that is not a Synology answers with
+   `nodes: []` and `platform: "linux"` until a reader for it exists.
+9. Reads stay read-only and root-only paths that cannot be read produce a
+   `health: "unknown"` node with a `detail`, not a failed command.

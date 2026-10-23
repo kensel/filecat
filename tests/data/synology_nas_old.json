@@ -1,0 +1,112 @@
+{
+ "ok": true,
+ "topology": {
+  "version": 1,
+  "platform": "synology",
+  "host": {
+   "name": "nas-old",
+   "unc_server": "\\\\nas-old",
+   "os": "DSM 6.2.4"
+  },
+  "collected_at": "2026-10-21T18:05:00Z",
+  "nodes": [
+   {
+    "id": "disk:WD-WCC7K1AA",
+    "type": "disk",
+    "parent": null,
+    "serial": "WD-WCC7K1AA",
+    "model": "WD40EFRX",
+    "slot": "1",
+    "size_bytes": 4000787030016,
+    "media": "hdd",
+    "health": "ok"
+   },
+   {
+    "id": "disk:WD-WCC7K2BB",
+    "type": "disk",
+    "parent": null,
+    "serial": "WD-WCC7K2BB",
+    "model": "WD40EFRX",
+    "slot": "2",
+    "size_bytes": 4000787030016,
+    "media": "hdd",
+    "health": "warning",
+    "detail": "Reallocated sectors: 8"
+   },
+   {
+    "id": "group:6e0a2b19-44c1-4b7e-9d3f-aa10c2e75d08",
+    "type": "group",
+    "parent": "pool:6e0a2b19-44c1-4b7e-9d3f-aa10c2e75d08",
+    "name": "md2",
+    "role": "data",
+    "level": "raid1",
+    "raw_bytes": 8001574060032,
+    "size_bytes": 4000787030016,
+    "health": "ok",
+    "members": [
+     {
+      "disk": "disk:WD-WCC7K1AA",
+      "role": "data"
+     },
+     {
+      "disk": "disk:WD-WCC7K2BB",
+      "role": "data"
+     }
+    ],
+    "platform": {
+     "synology": {
+      "md": "/dev/md2",
+      "state": "[UU]"
+     }
+    }
+   },
+   {
+    "id": "pool:6e0a2b19-44c1-4b7e-9d3f-aa10c2e75d08",
+    "type": "pool",
+    "parent": null,
+    "name": "RAID Group 1",
+    "level": "raid1",
+    "raw_bytes": 8001574060032,
+    "size_bytes": 4000787030016,
+    "allocated_bytes": 3900787030016,
+    "health": "ok"
+   },
+   {
+    "id": "vol:b71d0f3c-2a58-49e1-8c64-0e9d3a5f1b77",
+    "type": "volume",
+    "parent": "pool:6e0a2b19-44c1-4b7e-9d3f-aa10c2e75d08",
+    "name": "volume1",
+    "mount": "/volume1",
+    "device": "/dev/md2",
+    "fs_type": "ext4",
+    "size_bytes": 3900000000000,
+    "used_bytes": 2100000000000,
+    "free_bytes": 1800000000000,
+    "health": "ok"
+   },
+   {
+    "id": "share:photo",
+    "type": "share",
+    "parent": "vol:b71d0f3c-2a58-49e1-8c64-0e9d3a5f1b77",
+    "name": "photo",
+    "path": "/volume1/photo",
+    "protocols": [
+     "smb"
+    ],
+    "used_bytes": 800000000000
+   },
+   {
+    "id": "share:video",
+    "type": "share",
+    "parent": "vol:b71d0f3c-2a58-49e1-8c64-0e9d3a5f1b77",
+    "name": "video",
+    "path": "/volume1/video",
+    "protocols": [
+     "smb",
+     "nfs"
+    ],
+    "used_bytes": 1200000000000
+   }
+  ]
+ }
+}
