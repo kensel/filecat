@@ -48,6 +48,8 @@ import re
 from datetime import datetime
 from typing import Any, Callable
 
+from .storefs import LOCAL, StoreFS
+
 READ = ("Backup.log", "prefs.js", "compatibility.ini", "times.json")
 _DATED = re.compile(r"^(?P<profile>.+)-(?P<date>\d{8})-(?P<time>\d{4})$")
 _MAILDIR = re.compile(r"^\d+\.M\d+P\d+Q\d+\.(?P<host>[^.]+)(\.eml)?$")
@@ -72,11 +74,11 @@ def _local_time(text: str) -> str | None:
     return None
 
 
-def read_log(path: str) -> dict[str, Any]:
+def read_log(path: str, fs: StoreFS = LOCAL) -> dict[str, Any]:
     """{"date": raw text, "saved": [original paths], "errors": [paths or messages]}."""
     out: dict[str, Any] = {"date": None, "saved": [], "errors": []}
     pending_error = False
-    with open(path, "r", encoding="utf-8", errors="replace") as f:
+    with fs.open(path, "r", encoding="utf-8", errors="replace") as f:
         for line in f:
             line = line.rstrip("\r\n")
             if out["date"] is None and line.startswith("Backup date: "):
@@ -149,7 +151,9 @@ def _split(path: str) -> list[str]:
     return [p for p in re.split(r"[\\/]", path) if p]
 
 
-def _os_listing(path: str) -> dict[str, int]:
+def _os_listing(path: str, fs: StoreFS = LOCAL) -> dict[str, int]:
+    if not fs.local:
+        return fs.sizes(path)
     out: dict[str, int] = {}
     for dirpath, _dirs, files in os.walk(path):
         rel = os.path.relpath(dirpath, path).replace(os.sep, "/")
@@ -172,10 +176,11 @@ class _ProfileBackup:
         return inner not in READ
 
     def summarize(self, path: str, names: set[str],
-                  listing: Callable[[], dict[str, int]] | None = None) -> dict[str, Any]:
-        folder = os.path.basename(os.path.normpath(path))
+                  listing: Callable[[], dict[str, int]] | None = None,
+                  fs: StoreFS = LOCAL) -> dict[str, Any]:
+        folder = fs.basename(path)
         dated = _DATED.match(folder)
-        log = read_log(os.path.join(path, "Backup.log"))
+        log = read_log(fs.join(path, "Backup.log"), fs)
         problems: list[str] = []
         out: dict[str, Any] = {"format": self.name, "made_by": "ImportExportTools NG",
                                "mode": "dated folder per run" if dated else "one folder, changed files only",
@@ -211,13 +216,17 @@ class _ProfileBackup:
 
         try:
             cp = configparser.ConfigParser(interpolation=None)
-            cp.read(os.path.join(path, "compatibility.ini"), encoding="utf-8")
+            try:
+                with fs.open(fs.join(path, "compatibility.ini"), "r", encoding="utf-8") as f:
+                    cp.read_file(f)
+            except OSError:
+                pass        # a copy without one, as ConfigParser.read
             version = cp.get("Compatibility", "LastVersion", fallback=None)
             out["thunderbird_version"] = version.split("_", 1)[0] if version else None
         except (OSError, configparser.Error):
             pass
 
-        on_disk = listing() if listing else _os_listing(path)
+        on_disk = listing() if listing else _os_listing(path, fs)
         logged: set[str] = set()
         external = {p for p in on_disk if p.startswith("ExternalMailFolders/")}
         missing = []
@@ -241,7 +250,7 @@ class _ProfileBackup:
         # accounts: from prefs.js when the copy has it (a mail-only run does not),
         # else one per folder under ImapMail/, Mail/ and ExternalMailFolders/
         try:
-            with open(os.path.join(path, "prefs.js"), "r", encoding="utf-8", errors="replace") as f:
+            with fs.open(fs.join(path, "prefs.js"), "r", encoding="utf-8", errors="replace") as f:
                 accounts = read_accounts(f.read())
         except OSError:
             accounts = []

@@ -279,7 +279,7 @@ def test_a_store_rolls_up_through_the_agent_with_sum_subtree(nas):
     assert sums[0].get("progress_ms") and sums[0].get("id")
     assert not [r for r in docs if r.startswith("NAS-LEGACY_1.hbk/Pool")]
     store = docs["NAS-LEGACY_1.hbk"]["probe"]
-    assert "manifest not read" in store["store_note"] and "backup" not in store
+    assert store["backup"]["format"] == "synology-hyperbackup" and "store_note" not in store
     assert docs["NAS-LEGACY_1.hbk/Config/version_info.db"]["kind"] == "data"
 
 

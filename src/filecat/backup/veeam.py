@@ -39,7 +39,7 @@ import zlib
 from datetime import datetime, timezone
 from typing import Any, Callable
 
-from .util import listdir
+from .storefs import LOCAL, StoreFS
 
 DATA_EXT = (".vbk", ".vib", ".vrb", ".vlb", ".vsb")
 _STAMPED = re.compile(r"\d{4}-\d{2}-\d{2}T\d{6}(_[0-9a-f]{4})?\.(vbk|vib|vrb)$", re.I)
@@ -76,15 +76,20 @@ def _xml(text: str | None) -> ET.Element | None:
         return None
 
 
-def _os_listing(path: str) -> dict[str, int]:
+def _os_listing(path: str, fs: StoreFS = LOCAL) -> dict[str, int]:
     out: dict[str, int] = {}
-    for name, e in listdir(path).items():
+    for name, e in fs.listdir(path).items():
         try:
             if e.is_file(follow_symlinks=False):
                 out[name] = e.stat(follow_symlinks=False).st_size
         except OSError:
             pass
     return out
+
+
+def _parse_xml(fs: StoreFS, path: str) -> ET.Element:
+    with fs.open(path, "rb") as f:
+        return ET.parse(f).getroot()
 
 
 class _Veeam:
@@ -106,10 +111,10 @@ class _Veeam:
 
     def summarize(self, path: str, names: set[str],
                   listing: Callable[[], dict[str, int]] | None = None,
-                  verify: bool = False) -> dict[str, Any]:
+                  verify: bool = False, fs: StoreFS = LOCAL) -> dict[str, Any]:
         out: dict[str, Any] = {"format": self.name}
         problems: list[str] = []
-        on_disk = {k: v for k, v in (listing() if listing else _os_listing(path)).items() if "/" not in k}
+        on_disk = {k: v for k, v in (listing() if listing else _os_listing(path, fs)).items() if "/" not in k}
         data_files = sorted(n for n in on_disk if n.lower().endswith(DATA_EXT))
 
         metas = sorted(n for n in on_disk if n.lower().endswith(".vbm"))
@@ -119,7 +124,7 @@ class _Veeam:
         machines: dict[str, dict[str, Any]] = {}
         for meta in metas:
             try:
-                root = ET.parse(os.path.join(path, meta)).getroot()
+                root = _parse_xml(fs, fs.join(path, meta))
             except (OSError, ET.ParseError) as e:
                 problems.append(f"{meta} unreadable: {type(e).__name__}: {e}")
                 continue
@@ -164,7 +169,7 @@ class _Veeam:
         if verify:
             checked = []
             for n in data_files:
-                info = check_file(os.path.join(path, n), on_disk[n])
+                info = check_file(fs.join(path, n), on_disk[n], fs)
                 checked.append({"file": n, **{k: v for k, v in info.items() if k != "problems"}})
                 problems += [f"{n}: {q}" for q in info["problems"]]
             out["verified"] = checked
@@ -283,13 +288,15 @@ def crc32c(data: bytes, crc: int = 0) -> int:
     return crc ^ 0xFFFFFFFF
 
 
-def check_file(path: str, size: int | None = None) -> dict[str, Any]:
+def check_file(path: str, size: int | None = None, fs: StoreFS = LOCAL) -> dict[str, Any]:
     """Header, snapshot slots and metadata banks of one .vbk/.vib/.vrb."""
     info: dict[str, Any] = {"problems": []}
     problems = info["problems"]
     try:
-        with open(path, "rb") as f:
-            size = os.fstat(f.fileno()).st_size if size is None else size
+        with fs.open(path, "rb") as f:
+            if size is None:
+                size = f.seek(0, os.SEEK_END)
+                f.seek(0)
             head = f.read(_PAGE)
             if len(head) < 0x110:
                 problems.append("too short for a Veeam header")

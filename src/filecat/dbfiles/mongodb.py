@@ -27,12 +27,11 @@ gives each its folder, or from MMAPv1 file names.
 """
 from __future__ import annotations
 
-import os
 import re
 import struct
 from typing import Any
 
-from ..backup.util import listdir
+from ..backup.storefs import LOCAL, StoreFS
 from . import Engine, add_totals, read_text, scan_tree
 
 _DATA_DIRS = {"journal", "diagnostic.data", "_tmp"}
@@ -105,9 +104,9 @@ class _MongoDB(Engine):
         return (len(parts) > 1 and parts[0] in _DATA_DIRS) or name.endswith(".wt") \
             or name in _LOCKS or bool(_WT_LOG.match(name)) or bool(_MMAP_FILE.match(name))
 
-    def summarize(self, path: str, names: set[str]) -> dict[str, Any]:
+    def summarize(self, path: str, names: set[str], fs: StoreFS = LOCAL) -> dict[str, Any]:
         wt_version = None
-        for line in (read_text(os.path.join(path, "WiredTiger")) or "").splitlines():
+        for line in (read_text(fs.join(path, "WiredTiger"), fs=fs) or "").splitlines():
             m = re.match(r"WiredTiger (\d[\w.\-]*)", line)
             if m:
                 wt_version = m.group(1)
@@ -115,18 +114,18 @@ class _MongoDB(Engine):
         options: dict[str, Any] = {}
         storage_engine = "wiredTiger" if "WiredTiger" in names else "mmapv1"
         try:
-            with open(os.path.join(path, "storage.bson"), "rb") as f:
+            with fs.open(fs.join(path, "storage.bson"), "rb") as f:
                 storage = read_bson(f.read(64 * 1024)).get("storage") or {}
             storage_engine = storage.get("engine") or storage_engine
             options = storage.get("options") or {}
         except OSError:
             pass
         try:
-            running = os.path.getsize(os.path.join(path, "mongod.lock")) > 0
+            running = fs.stat(fs.join(path, "mongod.lock")).st_size > 0
         except OSError:
             running = None
 
-        entries = listdir(path)
+        entries = fs.listdir(path)
         databases = []
         if storage_engine == "mmapv1":
             stems = sorted({m.group(1) for n in names if (m := _MMAP_FILE.match(n))})
@@ -134,35 +133,35 @@ class _MongoDB(Engine):
         elif options.get("directoryPerDB"):
             for name, e in sorted(entries.items()):
                 if e.is_dir(follow_symlinks=False) and name not in _DATA_DIRS and not name.startswith("_tmp"):
-                    t = scan_tree(e.path, depth=2)
+                    t = scan_tree(fs.join(path, name), depth=2, fs=fs)
                     databases.append({"name": name, "files": t["files"], "bytes": t["bytes"]})
 
         collections = indexes = 0
-        for _, e in self._wt_files(path, depth=3 if options.get("directoryPerDB") else 1):
+        for _, e in self._wt_files(path, depth=3 if options.get("directoryPerDB") else 1, fs=fs):
             if e.name.startswith("collection-"):
                 collections += 1
             elif e.name.startswith("index-"):
                 indexes += 1
-        tree = scan_tree(path, depth=3)
+        tree = scan_tree(path, depth=3, fs=fs)
         version = version_from_path(path)
         out: dict[str, Any] = {
             "engine": self.name, "version": version,
             **({"version_source": "folder"} if version else {}), "storage_engine": storage_engine,
             "wiredtiger_version": wt_version, "options": options, "running": running,
             "databases": databases, "collections": collections, "indexes": indexes,
-            "journal": scan_tree(os.path.join(path, "journal"))["files"] if "journal" in names else 0,
+            "journal": scan_tree(fs.join(path, "journal"), fs=fs)["files"] if "journal" in names else 0,
             "instance_keys": [], "problems": [],
         }
         return add_totals(out, tree, self)
 
-    def _wt_files(self, path: str, depth: int):
+    def _wt_files(self, path: str, depth: int, fs: StoreFS = LOCAL):
         stack = [(path, 1)]
         while stack:
             here, level = stack.pop()
-            for name, e in listdir(here).items():
+            for name, e in fs.listdir(here).items():
                 if e.is_dir(follow_symlinks=False):
                     if level < depth and name not in _DATA_DIRS:
-                        stack.append((e.path, level + 1))
+                        stack.append((fs.join(here, name), level + 1))
                 elif name.endswith(".wt"):
                     yield here, e
 

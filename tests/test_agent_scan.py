@@ -272,17 +272,19 @@ def test_x3_catalogue_sibling_is_found_through_the_agent(tree, agent):
     assert docs["01.dat"]["probe"]["format"] == "x3-dat"
 
 
-def test_store_folders_are_detected_but_their_manifest_is_not_read(tree, agent):
+def test_store_folders_are_detected_and_their_manifest_is_read(tree, agent):
     share = tree / "volume1" / "Backup" / "dup"
     share.mkdir()
     stamp = "duplicity-full.20260101T000000Z"
     (share / f"{stamp}.manifest").write_text("Hostname nas\n")
     (share / f"{stamp}.vol1.difftar.gz").write_bytes(b"x" * 100)
     _, docs, _ = scan_into(UNC, options(agent))
-    assert docs["dup"]["probe"]["store_note"].startswith("duplicity")
-    assert "backup" not in docs["dup"]["probe"]
+    assert docs["dup"]["probe"]["backup"]["format"] == "duplicity"
+    assert "store_note" not in docs["dup"]["probe"]
     assert docs[f"dup/{stamp}.vol1.difftar.gz"]["kind"] == "data"      # listed, never measured
-    assert not [p for p in measures(agent) if "difftar" in p]
+    # never hashed or read for its head; only stat'ed (hash "none") for the manifest's size check
+    assert not [r for r in agent.requests if r["cmd"] == "measure" and "difftar" in r["path"]
+                and r.get("hash") != "none"]
 
 
 # --- choosing and reaching the agent -------------------------------------------

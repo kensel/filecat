@@ -808,19 +808,26 @@ def walk_root(root: str, options: ScanOptions, backend: Backend, identifier: Any
         return info
 
     def _backup_summary(frame: _Frame, doc: dict[str, Any]) -> None:
-        if source is not None:
-            # the manifests are not read through the agent yet
-            doc.setdefault("probe", {})["store_note"] = (
-                f"{frame.store.format.name}: manifest not read; scanned through filecat-agent")
-            return
         names = (frame.store_names - frame.not_recorded) if frame.store_names else _recorded_names(frame)
+        fs = backup.storefs.for_store(source, frame.abs_path, plan.cfg.manifest_cap)
         try:
-            doc.setdefault("probe", {})[frame.store.probe_key] = backup.summarize(
+            summary = backup.summarize(
                 frame.store, frame.abs_path, names,
                 listing=lambda: _store_listing(frame), verify=options.verify_backups >= getattr(frame.store.format, "verify_level", 1),
-                rollup=_rollup_info(frame), level=options.verify_backups)
+                rollup=_rollup_info(frame), level=options.verify_backups, fs=fs)
         except Exception as e:  # a bad manifest must not stop the walk
-            record.add_error(doc, frame.store.probe_key, e)
+            summary = None
+            if not getattr(fs, "oversize", None):
+                record.add_error(doc, frame.store.probe_key, e)
+        oversize = getattr(fs, "oversize", None)
+        if oversize:
+            # a manifest over rollups.manifest_cap: the summary would be missing
+            # what it holds, so the store gets a note instead of probe.backup
+            doc.setdefault("probe", {})["store_note"] = (
+                f"{frame.store.format.name}: manifest not read through filecat-agent, "
+                f"over the manifest_cap limit: {', '.join(oversize)}")
+        elif summary is not None:
+            doc.setdefault("probe", {})[frame.store.probe_key] = summary
 
     def _manifest_stat(frame: _Frame, inner: str) -> list[int | None]:
         """[size, mtime_ns] of a file inside the store, [None, None] when it is not there."""

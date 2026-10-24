@@ -178,8 +178,9 @@ server keeps store detection, manifest verification, probing and Ollama.
     and 1 (`--verify-backups[=N]`, 2 and 3 refused), `filecat rollups
     migrate`, the `summary`, `roots`, `show` and `dupes` reporting, the
     treemap tiles and pins, and the web inspector card.
-  - [ ] Manifests of backup and database stores read through the agent
-    (`StoreFS`), replacing `probe.store_note`.
+  - [x] Manifests of backup and database stores read through the agent
+    (`StoreFS`, `backup/storefs.py`), replacing `probe.store_note` (kept only
+    for a SQLite manifest over `rollups.manifest_cap`).
   - [ ] Rust agent: rules matcher with the shared vectors, markers, the
     `redaction` HMAC and `folded`, rollups and `suggest` in `list_dir`,
     `sum_subtree` options, progress/deadline/`cancel`.

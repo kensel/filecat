@@ -130,9 +130,12 @@ Google Workspace have no bulk folder to roll up.
 
 The sum is `lstat` only. On a local or SMB scan Python sums (`--rollup-workers`
 threads); through an agent the store's folders go to `sum_subtree`, with
-progress lines and the deadline, so an hours-long sum is not a timeout. Until
-manifests are read through the agent too, an agent scan of a store records
-`probe.store_note` instead of `probe.backup`.
+progress lines and the deadline, so an hours-long sum is not a timeout.
+
+The manifests are read through the agent as well (SQLite ones copied to a temp
+file, up to `rollups.manifest_cap`, 256 MiB; docs/rollups.md 4.3): a store gets the
+same `probe.backup` / `probe.database` as on a local or SMB scan, or
+`probe.store_note` when a manifest is over the cap.
 
 **When it is summed again.** A `[BACKUP]` rollup carries a fingerprint (the
 store folder's mtime, the name, size and mtime of everything in it, the rolled
@@ -245,10 +248,7 @@ private-use character U+F700 + b (`fsource.to_storage`), which is valid in
 JSON and every database, and is turned back into the exact bytes when the
 path is sent to the agent.
 
-Not yet through the agent: a backup store's or database folder's manifest
-(`backup/`, `dbfiles/` read their folder with `os` calls), so such a folder
-is detected, its data files are listed only, and its record carries
-`probe.store_note` instead of `probe.backup` / `probe.database`; `enrich`;
+Not yet through the agent: `enrich`;
 the sibling-file probes other than X3's `.cat`/`.dat`.
 
 ### One share, two spellings

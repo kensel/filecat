@@ -50,12 +50,12 @@ from __future__ import annotations
 
 import configparser
 import json
-import os
 import re
 import zlib
 from typing import Any, Callable
 
-from .util import iso, listdir, read_json, sqlite_rows
+from .storefs import LOCAL, StoreFS
+from .util import iso
 
 KiB = 1024
 _FAILED = re.compile(r"fail|error|partial|broken", re.I)
@@ -86,23 +86,23 @@ def _value(raw: str) -> Any:
         return raw.strip('"')
 
 
-def read_conf(path: str) -> dict[str, dict[str, Any]]:
+def read_conf(path: str, fs: StoreFS = LOCAL) -> dict[str, dict[str, Any]]:
     """An INI file of Hyper Backup's (values JSON or "quoted"), by section."""
     parser = configparser.ConfigParser(interpolation=None, strict=False, delimiters=("=",))
     parser.optionxform = str
-    with open(path, "r", encoding="utf-8", errors="replace") as f:
+    with fs.open(path, "r", encoding="utf-8", errors="replace") as f:
         parser.read_file(f)
     return {s: {k: _value(v) for k, v in parser.items(s)} for s in parser.sections()}
 
 
-def _rows(path: str, sql: str) -> list[dict[str, Any]]:
+def _rows(path: str, sql: str, fs: StoreFS = LOCAL) -> list[dict[str, Any]]:
     """sqlite_rows, falling back to the *_dup copy Hyper Backup keeps of each database."""
     try:
-        return sqlite_rows(path, sql)
+        return fs.sqlite_rows(path, sql)
     except Exception:
-        if not os.path.isfile(f"{path}_dup"):
+        if not fs.isfile(f"{path}_dup"):
             raise
-        return sqlite_rows(f"{path}_dup", sql)
+        return fs.sqlite_rows(f"{path}_dup", sql)
 
 
 def _json(text: Any) -> Any:
@@ -112,27 +112,14 @@ def _json(text: Any) -> Any:
         return None
 
 
-def _os_listing(path: str) -> dict[str, int]:
+def _os_listing(path: str, fs: StoreFS = LOCAL) -> dict[str, int]:
     """{inner path: size} of every file beneath the store, read from disk."""
-    out: dict[str, int] = {}
-    stack = [""]
-    while stack:
-        rel = stack.pop()
-        for name, e in listdir(os.path.join(path, rel) if rel else path).items():
-            inner = f"{rel}/{name}" if rel else name
-            try:
-                if e.is_dir(follow_symlinks=False):
-                    stack.append(inner)
-                else:
-                    out[inner] = e.stat(follow_symlinks=False).st_size
-            except OSError:
-                pass
-    return out
+    return fs.sizes(path)
 
 
-def _crc32(path: str) -> int:
+def _crc32(path: str, fs: StoreFS = LOCAL) -> int:
     crc = 0
-    with open(path, "rb") as f:
+    with fs.open(path, "rb") as f:
         while block := f.read(_READ):
             crc = zlib.crc32(block, crc)
     return crc
@@ -159,12 +146,12 @@ class _HyperBackup:
     def summarize(self, path: str, names: set[str],
                   listing: Callable[[], dict[str, int]] | None = None,
                   verify: bool = False, rollup: dict[str, Any] | None = None,
-                  level: int = 0) -> dict[str, Any]:
+                  level: int = 0, fs: StoreFS = LOCAL) -> dict[str, Any]:
         out: dict[str, Any] = {"format": self.name}
         problems: list[str] = []
 
         try:
-            cfg = read_conf(os.path.join(path, "_Syno_TaskConfig")).get("task_config", {})
+            cfg = read_conf(fs.join(path, "_Syno_TaskConfig"), fs).get("task_config", {})
         except (OSError, configparser.Error) as e:
             cfg = {}
             problems.append(f"_Syno_TaskConfig unreadable: {type(e).__name__}: {e}")
@@ -181,7 +168,7 @@ class _HyperBackup:
         })
         out["machines"] = [cfg["host_name"]] if cfg.get("host_name") else []
 
-        versions = self._versions(path, problems)
+        versions = self._versions(path, problems, fs)
         out["version_list"] = versions
         out["versions"] = len(versions)
         out["latest"] = max((v["start"] for v in versions if v.get("start")), default=None)
@@ -191,7 +178,7 @@ class _HyperBackup:
         out["latest_complete"] = max((v["start"] for v in complete if v.get("start")), default=None)
 
         try:
-            last = read_conf(os.path.join(path, "last_status.conf")).get("last_backup") or {}
+            last = read_conf(fs.join(path, "last_status.conf"), fs).get("last_backup") or {}
             out["last_backup"] = {"start": iso(last.get("start")), "end": iso(last.get("end")),
                                   "version": (last.get("version") or [None])[0]}
         except (OSError, configparser.Error):
@@ -201,14 +188,14 @@ class _HyperBackup:
         if complete:
             storage["source_bytes"] = complete[-1].get("source_bytes")
         try:
-            target = _rows(os.path.join(path, "storage_statistics.db"),
-                           "SELECT target_size FROM target_table ORDER BY end_time DESC LIMIT 1")
+            target = _rows(fs.join(path, "storage_statistics.db"),
+                           "SELECT target_size FROM target_table ORDER BY end_time DESC LIMIT 1", fs)
             if target and target[0]["target_size"] is not None:
                 storage["target_bytes"] = int(target[0]["target_size"]) * KiB
         except Exception:
             pass
 
-        guard = self._guard(path, listing, problems, verify, rollup, level)
+        guard = self._guard(path, listing, problems, verify, rollup, level, fs)
         if rollup is not None:
             out["checked"] = "totals" if level >= 1 and not rollup.get("partial") else "none"
         if guard:
@@ -219,7 +206,7 @@ class _HyperBackup:
             storage["reduction_ratio"] = round(storage["source_bytes"] / used, 2)
         out["storage"] = storage
 
-        check = self._integrity_check(path)
+        check = self._integrity_check(path, fs)
         if check:
             out["integrity_check"] = check
             problems += [f"integrity check: {line}" for line in check.get("errors", [])]
@@ -232,11 +219,11 @@ class _HyperBackup:
         out["machine_keys"] = sorted(keys)
         return out
 
-    def _versions(self, path: str, problems: list[str]) -> list[dict[str, Any]]:
+    def _versions(self, path: str, problems: list[str], fs: StoreFS = LOCAL) -> list[dict[str, Any]]:
         try:
-            rows = _rows(os.path.join(path, "Config", "version_info.db"),
+            rows = _rows(fs.join(path, "Config", "version_info.db"),
                          "SELECT id, timestamp, status, locked, share, statistics, suspend_history"
-                         " FROM version_info ORDER BY id")
+                         " FROM version_info ORDER BY id", fs)
         except Exception as e:
             problems.append(f"Config/version_info.db unreadable: {type(e).__name__}: {e}")
             return []
@@ -268,15 +255,15 @@ class _HyperBackup:
 
     def _guard(self, path: str, listing: Callable[[], dict[str, int]] | None,
                problems: list[str], verify: bool = False, rollup: dict[str, Any] | None = None,
-               level: int = 0) -> dict[str, Any] | None:
+               level: int = 0, fs: StoreFS = LOCAL) -> dict[str, Any] | None:
         """Every file Guard's manifest lists, against the listing of the store
         (and, with verify, against Guard's CRC32 of its contents)."""
         expected: dict[str, int] = {}
         crcs: dict[str, bytes] = {}
         unknown = 0
         try:
-            for r in _rows(os.path.join(path, "Guard", "local_bucket.db"),
-                           "SELECT type, idx, size, crc FROM file_info"):
+            for r in _rows(fs.join(path, "Guard", "local_bucket.db"),
+                           "SELECT type, idx, size, crc FROM file_info", fs):
                 ext = _BUCKET_EXT.get(r["type"])
                 if ext is None:
                     unknown += 1
@@ -284,8 +271,8 @@ class _HyperBackup:
                 idx = r["idx"]
                 inner = f"Pool/0/{idx // 2048}/{idx % 2048}.{ext}"
                 expected[inner], crcs[inner] = r["size"], r["crc"]
-            for r in _rows(os.path.join(path, "Guard", "local_file.db"),
-                           "SELECT type, name, idx, size, crc FROM file_info"):
+            for r in _rows(fs.join(path, "Guard", "local_file.db"),
+                           "SELECT type, name, idx, size, crc FROM file_info", fs):
                 fn = _FILE_PATHS.get(r["type"])
                 if fn is None:
                     unknown += 1
@@ -300,7 +287,7 @@ class _HyperBackup:
         if unknown:
             guard["unknown_entries"] = unknown
         try:
-            guard["state"] = (read_json(os.path.join(path, "Guard", "config.json")) or {}).get("state")
+            guard["state"] = (fs.read_json(fs.join(path, "Guard", "config.json")) or {}).get("state")
         except (OSError, ValueError, AttributeError):
             pass
 
@@ -308,7 +295,7 @@ class _HyperBackup:
             self._check_rolled(guard, expected, listing, problems, rollup, level)
             return guard
 
-        on_disk = listing() if listing else _os_listing(path)
+        on_disk = listing() if listing else _os_listing(path, fs)
         missing = sorted(p for p in expected if p not in on_disk)
         differ = sorted(p for p, s in expected.items() if p in on_disk and s is not None and on_disk[p] != s)
         guard["missing"], guard["size_mismatch"] = len(missing), len(differ)
@@ -327,7 +314,7 @@ class _HyperBackup:
                 if p in skip or not isinstance(want, bytes) or len(want) != 4:
                     continue
                 try:
-                    got = _crc32(os.path.join(path, *p.split("/")))
+                    got = _crc32(fs.join(path, *p.split("/")), fs)
                 except OSError as e:
                     unreadable.append(f"{p} ({type(e).__name__}: {e})")
                     continue
@@ -381,10 +368,10 @@ class _HyperBackup:
                                 + ", ".join(f"{p} ({on_disk[p]} bytes, manifest {rest[p]})"
                                             for p in differ[:_MAX_EXAMPLES]))
 
-    def _integrity_check(self, path: str) -> dict[str, Any] | None:
+    def _integrity_check(self, path: str, fs: StoreFS = LOCAL) -> dict[str, Any] | None:
         out: dict[str, Any] = {}
         try:
-            prog = read_conf(os.path.join(path, "Guard", "detect.prog")).get("progress") or {}
+            prog = read_conf(fs.join(path, "Guard", "detect.prog"), fs).get("progress") or {}
         except (OSError, configparser.Error):
             prog = {}
         if prog:
@@ -398,8 +385,8 @@ class _HyperBackup:
                             "total_checked_bytes": data.get("total_checked_size"),
                             "total_bytes": data.get("total_size")})
         try:
-            with open(os.path.join(path, "Guard", "detect", "error.log"), encoding="utf-8",
-                      errors="replace") as f:
+            with fs.open(fs.join(path, "Guard", "detect", "error.log"), "r", encoding="utf-8",
+                         errors="replace") as f:
                 lines = [ln.strip() for ln in f]
             out["errors"] = [ln for ln in lines
                              if ln and not ln.startswith(("Error Detect Start", "Error Detect Finish"))]

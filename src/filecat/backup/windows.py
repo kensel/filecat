@@ -29,11 +29,11 @@ Checks: each Backup folder has at least one .vhd/.vhdx, and Catalog is there.
 from __future__ import annotations
 
 import html
-import os
 import re
 from typing import Any
 
-from .util import iso_from_name, listdir
+from .storefs import LOCAL, StoreFS
+from .util import iso_from_name
 
 _SET = re.compile(r"^Backup Set (\d{4}-\d{2}-\d{2} \d{6})$", re.I)
 _FILES = re.compile(r"^Backup Files (\d{4}-\d{2}-\d{2} \d{6})$", re.I)
@@ -43,16 +43,16 @@ _IMAGE = re.compile(r"^Backup (\d{4}-\d{2}-\d{2} \d{6})$", re.I)
 _STAMP = "%Y-%m-%d %H%M%S"
 
 
-def _media_id(path: str) -> str | None:
+def _media_id(path: str, fs: StoreFS = LOCAL) -> str | None:
     try:
-        with open(path, "rb") as f:
+        with fs.open(path, "rb") as f:
             data = f.read(64)
     except OSError:
         return None
     return data[:16].hex() if len(data) >= 16 else None
 
 
-def _size(entry: os.DirEntry) -> int:
+def _size(entry: Any) -> int:
     try:
         return entry.stat().st_size
     except OSError:
@@ -72,19 +72,19 @@ class _FileBackup:
         return bool(len(parts) == 3 and _FILES.match(parts[1]) and _ZIP.match(parts[2])) \
             or parts[-1].lower().endswith((".wbcat", ".wbverify"))
 
-    def summarize(self, path: str, names: set[str]) -> dict[str, Any]:
-        machine = os.path.basename(path.rstrip("\\/"))
+    def summarize(self, path: str, names: set[str], fs: StoreFS = LOCAL) -> dict[str, Any]:
+        machine = fs.basename(path)
         problems: list[str] = []
         sets = []
         for set_name in sorted(n for n in names if _SET.match(n)):
-            set_path = os.path.join(path, set_name)
-            entries = listdir(set_path)
+            set_path = fs.join(path, set_name)
+            entries = fs.listdir(set_path)
             parts = []
             for files_name in sorted(n for n in entries if _FILES.match(n)):
-                files_path = os.path.join(set_path, files_name)
+                files_path = fs.join(set_path, files_name)
                 zips = {int(_ZIP.match(n).group(1)): _size(e)
-                        for n, e in listdir(files_path).items() if _ZIP.match(n)}
-                cats = {int(m.group(1)) for n in listdir(os.path.join(files_path, "Catalogs"))
+                        for n, e in fs.listdir(files_path).items() if _ZIP.match(n)}
+                cats = {int(m.group(1)) for n in fs.listdir(fs.join(files_path, "Catalogs"))
                         if (m := _ZIP_CATALOG.match(n))}
                 part = {"folder": files_name,
                         "time": iso_from_name(_FILES.match(files_name).group(1), _STAMP),
@@ -101,13 +101,13 @@ class _FileBackup:
                 if uncataloged:
                     problems.append(f"{where}: no Catalogs/Backup files {_ranges(uncataloged)}.wbcat")
                 parts.append(part)
-            catalog = os.path.join(set_path, "Catalogs", "GlobalCatalog.wbcat")
-            if not os.path.isfile(catalog):
+            catalog = fs.join(set_path, "Catalogs", "GlobalCatalog.wbcat")
+            if not fs.isfile(catalog):
                 problems.append(f"{set_name}: Catalogs/GlobalCatalog.wbcat missing")
             sets.append({"folder": set_name,
                          "time": iso_from_name(_SET.match(set_name).group(1), _STAMP),
                          "parts": parts, "bytes": sum(p["bytes"] for p in parts)})
-        media = _media_id(os.path.join(path, "MediaID.bin"))
+        media = _media_id(fs.join(path, "MediaID.bin"), fs)
         times = [p["time"] for s in sets for p in s["parts"] if p["time"]]
         return {
             "format": self.name, "machines": [machine], "media_id": media,
@@ -129,14 +129,14 @@ class _ImageBackup:
         return len(parts) == 2 and bool(_IMAGE.match(parts[0])) \
             and parts[1].lower().endswith((".vhd", ".vhdx"))
 
-    def summarize(self, path: str, names: set[str]) -> dict[str, Any]:
-        folder_machine = os.path.basename(path.rstrip("\\/"))
+    def summarize(self, path: str, names: set[str], fs: StoreFS = LOCAL) -> dict[str, Any]:
+        folder_machine = fs.basename(path)
         problems: list[str] = []
         if "Catalog" not in names:
             problems.append("Catalog folder missing")
         versions = []
         for name in sorted(n for n in names if _IMAGE.match(n)):
-            entries = listdir(os.path.join(path, name))
+            entries = fs.listdir(fs.join(path, name))
             disks = [{"file": n, "bytes": _size(e)} for n, e in sorted(entries.items())
                      if n.lower().endswith((".vhd", ".vhdx"))]
             ver: dict[str, Any] = {"folder": name,
@@ -144,7 +144,7 @@ class _ImageBackup:
                                    "disks": disks, "bytes": sum(d["bytes"] for d in disks)}
             comp = next((n for n in entries if n.endswith("_Components.xml")), None)
             if comp:
-                ver.update(_components(os.path.join(path, name, comp)))
+                ver.update(_components(fs.join(path, name, comp), fs))
             if not disks:
                 problems.append(f"{name}: no .vhd/.vhdx disk image")
             versions.append(ver)
@@ -152,7 +152,7 @@ class _ImageBackup:
         machines = sorted({v["machine"] for v in versions if v.get("machine")} or {folder_machine})
         return {
             "format": self.name, "machines": machines,
-            "media_id": _media_id(os.path.join(path, "MediaId")),
+            "media_id": _media_id(fs.join(path, "MediaId"), fs),
             "images": versions, "versions": len(versions),
             "latest": max((v["time"] for v in versions if v["time"]), default=None),
             "problems": problems,
@@ -161,11 +161,11 @@ class _ImageBackup:
         }
 
 
-def _components(path: str) -> dict[str, Any]:
+def _components(path: str, fs: StoreFS = LOCAL) -> dict[str, Any]:
     """Machine name and OS version from <guid>_Components.xml (UTF-16 with
     or without a BOM; the ASR metadata inside is escaped XML)."""
     try:
-        with open(path, "rb") as f:
+        with fs.open(path, "rb") as f:
             raw = f.read(256 * 1024)
     except OSError:
         return {}

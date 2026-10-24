@@ -47,6 +47,7 @@ from pathlib import Path
 from typing import Any
 
 from ..backup import Store
+from ..backup.storefs import LOCAL, StoreFS
 from ..backup.util import iso
 
 # WinError 32 (sharing violation) and 33 (lock violation): the server has it open.
@@ -134,26 +135,28 @@ def settle_in_use(doc: dict[str, Any]) -> dict[str, Any]:
 
 # --- small listing helpers shared by the engines ----------------------------
 
-def scan_tree(path: str, depth: int = 1) -> dict[str, Any]:
+def scan_tree(path: str, depth: int = 1, fs: StoreFS = LOCAL) -> dict[str, Any]:
     """{"files", "bytes", "newest_ns"} of the regular files under `path`,
     `depth` folder levels down (1 = the folder's own files). Links and
-    junctions are not followed."""
+    junctions are not followed. A folder an agent listed as a rollup counts
+    for the totals the agent summed."""
     out = {"files": 0, "bytes": 0, "newest_ns": 0}
     stack = [(path, 1)]
     while stack:
         here, level = stack.pop()
-        try:
-            with os.scandir(here) as it:
-                entries = list(it)
-        except OSError:
-            continue
-        for e in entries:
+        for name, e in fs.listdir(here).items():
             try:
                 if e.is_symlink():
                     continue
+                if getattr(e, "rollup", None) is not None:
+                    r = e.rollup
+                    out["files"] += r.get("total_files", 0)
+                    out["bytes"] += r.get("total_size", 0)
+                    out["newest_ns"] = max(out["newest_ns"], r.get("newest_mtime_ns", 0))
+                    continue
                 if e.is_dir(follow_symlinks=False):
                     if level < depth:
-                        stack.append((e.path, level + 1))
+                        stack.append((fs.join(here, name), level + 1))
                     continue
                 st = e.stat(follow_symlinks=False)
             except OSError:
@@ -179,9 +182,9 @@ def merge_trees(*trees: dict[str, Any]) -> dict[str, Any]:
             "newest_ns": max((t["newest_ns"] for t in trees), default=0)}
 
 
-def read_text(path: str, limit: int = 64 * 1024) -> str | None:
+def read_text(path: str, limit: int = 64 * 1024, fs: StoreFS = LOCAL) -> str | None:
     try:
-        with open(path, "rb") as f:
+        with fs.open(path, "rb") as f:
             return f.read(limit).decode("utf-8", errors="replace")
     except OSError:
         return None

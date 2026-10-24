@@ -48,7 +48,9 @@ class Format(Protocol):
 
     def summarize(self, path: str, names: set[str]) -> dict[str, Any]:
         """probe.backup for the store at OS path `path`. May raise; the
-        walker records that as a `backup`-stage error."""
+        walker records that as a `backup`-stage error. Every format also takes
+        `fs` (storefs.StoreFS, default LOCAL): the file system it reads its
+        manifests through; never os.* or open() on `path` directly."""
 
     # A format may set `uses_listing = True`: summarize() then also takes
     # `listing`, a callable returning {inner path: size} of every file the
@@ -150,14 +152,17 @@ def detect(rel_path: str, dir_name: str, names: set[str]) -> Store | None:
 
 def summarize(store: Store, path: str, names: set[str],
               listing: Callable[[], dict[str, int]] | None = None, verify: bool = False,
-              rollup: dict[str, Any] | None = None, level: int = 0) -> dict[str, Any]:
+              rollup: dict[str, Any] | None = None, level: int = 0, fs: Any = None) -> dict[str, Any]:
     """probe.backup / probe.database of a store. With `rollup` (the store's
     bulk folders are a rollup: {"children": [names], "files", "bytes",
     "partial", "complete"}) the walk's listing does not hold them: a format
     that checks against the listing (`uses_rollup`) compares the rollup's
     totals instead, at verify `level` 1. A rolled backup store's
     `checked` says what was compared: "none" (level 0, or a format with
-    nothing to compare against) or "totals"."""
+    nothing to compare against) or "totals". `fs` is the storefs.StoreFS the
+    manifests are read through (default: the local disk or share, `path` an OS
+    path; an agent scan passes storefs.AgentFS and `path` the catalog's UNC
+    path)."""
     kwargs: dict[str, Any] = {}
     if getattr(store.format, "uses_listing", False):
         kwargs["listing"] = listing
@@ -165,6 +170,8 @@ def summarize(store: Store, path: str, names: set[str],
         kwargs["verify"] = True
     if rollup is not None and getattr(store.format, "uses_rollup", False):
         kwargs["rollup"], kwargs["level"] = rollup, level
+    if fs is not None and not fs.local:
+        kwargs["fs"] = fs
     out = store.format.summarize(path, names, **kwargs)
     out.setdefault("format", store.format.name)
     out.setdefault("problems", [])

@@ -281,7 +281,7 @@ A scan evaluates each entry in this order and the first match decides:
 ```toml
 [rollups]
 store_resum  = "30d"    # at most this long a store's rollup is carried forward when its fingerprint is unchanged
-manifest_cap = "256MiB" # largest manifest file copied through an agent (section 4)
+manifest_cap = "256MiB" # largest SQLite manifest copied through an agent (section 4.3)
 
 [[rollups.rule]]
 tag   = "[REDACTED]"
@@ -806,27 +806,54 @@ set.
 
 ### 4.3 Manifests through the agent
 
-Today an agent scan records `probe.store_note` ("manifest not read") because the
-format modules call `open`/`os.listdir` on a local path. For rollups to be
-useful over an agent the manifests must be read there too. Python abstracts
-the store's file system: `StoreFS` with `listdir`, `exists`, `size`,
-`open_binary` and `sqlite_copy(path) -> local temp path`; the local
-implementation is `os`, the agent one uses `fsource.fopen` / `sibling` /
-`RemoteFileProxy` (`read_range`, 4 MiB per request). A SQLite manifest
-(`target.db`, `file_map.db`, `storage.cache` is JSON) is copied through
-`read_range` into a temp file in the system temp directory, together with its
-`-wal` and `-journal` sidecars when `list_dir` shows them, up to
-`rollups.manifest_cap` (256 MiB), then opened read-only; the size and mtime
-from `measure(hash="none", head_bytes=0)` are compared before and after the
-copy and the copy is retried once when they moved. The temp file is deleted
-at once; a manifest over the cap is skipped with a `problems` entry.
+Implemented (`backup/storefs.py`). The format modules in `backup/` and the
+engines in `dbfiles/` no longer call `os.*` / `open` / `sqlite3.connect` on a
+path: `summarize(path, names, ..., fs=)` takes a `StoreFS`, the file system the
+manifests are read through (the walker passes it only for an agent scan; the
+default is the local one, so local and SMB scans run the same code as before).
 
-**What the agent must provide: nothing new.** `list_dir`, `measure` (as a
-`stat`: `hash: "none"`, `head_bytes: 0`) and `read_range` already do it. The
-work is Python's: every `backup/*.py` and `dbfiles/*.py` `summarize()` takes a
-`StoreFS` instead of an OS path. That is a separate step from the rollup
-itself and can follow it (the rollup works without it; the record then keeps
-`probe.store_note`).
+    join(base, *parts)  basename(path)  listdir(path) -> {name: entry}
+    stat(path)  exists  isfile  isdir  file_size  open(path, mode)  read_json
+    readlink(path, entry)  sizes(path) -> {inner path: size}  lpath(path)
+    sqlite_rows(path, sql, params)  sqlite_many(path, [(sql, params), ...])
+
+`LocalFS` is `os` (an OS path or an SMB UNC path). `AgentFS(source, root, cap)`
+works on the catalog's UNC paths and uses `list_dir` (an entry quacks like
+`os.DirEntry`), `measure(hash="none", head_bytes=0)` as `stat`, and
+`fsource.RemotePath.open` (`open_remote`, `read_range`) for `open`. Every
+thread gets its own agent connection as usual (`AgentSource.client()`).
+
+A SQLite manifest (`target.db`, `file_map.db`, Hyper Backup's `*.db`, ABG's
+`*.sqlite`) is copied through `read_range` (4 MiB per request) into a folder
+in the system temp directory (prefix `filecat-backup-`), together with its
+`-wal` / `-journal` when they exist and are not empty, then queried and the
+folder deleted whatever happens (an error mid-copy, a bad file, a failed
+query). A copy with no sidecar is opened read-only (`mode=ro`); with one it is
+opened normally, because SQLite has to replay the log, which writes to the
+copy and never to the NAS. The size and mtime of the file and its sidecars are
+checked after the copy and the copy is retried once if they moved; a manifest
+still moving fails with a `problems` entry (`changed while being copied`). The
+queries of one file (ABB's `target.db` has three) share one copy.
+
+`rollups.manifest_cap` is the most one manifest (with its sidecars) may be:
+default 256 MiB. A manifest over it is not copied: `AgentFS.oversize` records
+which one (its path inside the store, never the full path), and the walker
+records `probe.store_note` ("<format>: manifest not read through
+filecat-agent, over the manifest_cap limit: <inner path> (<n> bytes, limit
+<cap>)") in place of `probe.backup` / `probe.database`, no error. `rollups
+migrate` reads `probe.store_note` as before, so such a store still migrates.
+
+Differences from a local scan, all small: error texts inside `problems` name
+the agent's errors, not the OS's; a database engine's tree totals (`files`,
+`bytes`) come from one `list_dir` per folder instead of one `scandir`, so a
+huge cluster costs a round trip per folder; and where the agent folded
+children into a rollup entry, the totals it summed stand in for them.
+
+Nothing here logs a path. A store inside a redacted folder is never listed, so
+it is never reached, and the messages above name only paths inside a store.
+
+**What the agent must provide: nothing new.** `list_dir`, `measure` and
+`read_range` do it.
 
 ### 4.4 Migrating existing catalogs
 
@@ -1363,7 +1390,7 @@ privacy test; (6) `rollups list|suggest|redacted`.
   batches of phase 2, before phase 3), resume, twice, `--dry-run`; readers
   (summary, roots, browse filters, `subtree`, treemap tile and pin diff,
   `dupes` line, the SQL and in-memory backends in `test_backend_contract.py`).
-- Later: `StoreFS` (manifests through the agent, section 4.3).
+- `StoreFS` (manifests through the agent, section 4.3) followed as its own step; see there.
 
 **Stage B is implemented.** Where it differs from the list above:
 

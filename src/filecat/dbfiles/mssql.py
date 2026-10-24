@@ -21,12 +21,12 @@ modified for an hour.
 """
 from __future__ import annotations
 
-import os
 import re
 import time
 from typing import Any
 
-from ..backup.util import iso, listdir
+from ..backup.storefs import LOCAL, StoreFS
+from ..backup.util import iso
 from . import Engine, add_totals
 
 _DATA_EXT = (".mdf", ".ndf", ".ldf")
@@ -82,11 +82,11 @@ class _MSSQL(Engine):
     def opaque(self, inner: str) -> bool:
         return "/" not in inner and inner.lower().endswith(_DATA_EXT) and inner.lower() not in self.skip
 
-    def summarize(self, path: str, names: set[str]) -> dict[str, Any]:
+    def summarize(self, path: str, names: set[str], fs: StoreFS = LOCAL) -> dict[str, Any]:
         files: dict[str, dict[str, Any]] = {}
         tree = {"files": 0, "bytes": 0, "newest_ns": 0}
         now = time.time()
-        for name, e in listdir(path).items():
+        for name, e in fs.listdir(path).items():
             if not (e.is_file(follow_symlinks=False) and self.opaque(name)):
                 continue
             try:
