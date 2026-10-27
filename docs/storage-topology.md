@@ -5,11 +5,13 @@ disks up to the shares, LUNs and VM disks that hold the files filecat
 catalogs, and how hosts are built on each other (a LUN that is a VM's disk
 that is another NAS's pool). Synology is the first implementation; Windows,
 Proxmox and TrueNAS are derivatives of the same layout, not new layouts. The code is
-`src/filecat/topology.py`; the wire form is the `storage_topology` command of
-[agent-protocol.md](agent-protocol.md); the inputs are notes
-[03](research/03-synology-vmm-san-luns.md) and
-[04](research/04-web-viewer-storage-hierarchy.md). Nothing here is stored yet
-(section 7 is the proposal to review).
+`src/filecat/topology.py`. It is **built in Python**: the agent only reads raw
+sources (`read_file`, `list_dir`, `statfs`, `sum_subtree`, allowlisted `run`;
+[agent-protocol.md](agent-protocol.md), [agent-allowlist.md](agent-allowlist.md))
+and the collectors in `src/filecat/topology_collect/` turn them into this
+hierarchy (section 3a). It is stored by `filecat storage collect` (section 7).
+The inputs are notes [03](research/03-synology-vmm-san-luns.md) and
+[04](research/04-web-viewer-storage-hierarchy.md).
 
 ## 1. The hierarchy
 
@@ -181,8 +183,8 @@ authority=0
   `f48f1514-6072-4193-989e-9e7bfbe6d0e1` gives `6001405f48f1514d6072d4193d989ed9`
   (`topology.naa_from_unit_serial`, tested on exactly this pair). It is not the uuid
   with the hyphens stripped, which is what this page first guessed. `vpd_unit_serial`
-  equals the uuid on every LUN seen, but the agent reads it and does not assume it.
-  The agent records the serial in `platform.synology.vpd_unit_serial` and the result as
+  equals the uuid on every LUN seen, but the collector reads it and does not assume it.
+  The collector records the serial in `platform.synology.vpd_unit_serial` and the result as
   a `naa:` match; a LUN reported without one is still matched, by deriving the id from
   its `vpd_unit_serial` or else its `uuid:` key.
 - **ACL.** `initiators` is one entry per ACL stanza: `{"iqn": <initiator>, "authority":
@@ -256,6 +258,45 @@ Where a platform cannot say something (a `Get-StoragePool` has no physical
 usage per volume) the field is absent. No platform needs a node type or a
 parent rule the seven types do not have.
 
+## 3a. Where the parsing happens: collectors over a source
+
+The agent does no parsing. A **collector** is a function `collect(source, ...)
+-> Topology` in `src/filecat/topology_collect/`, one module per platform
+(`synology.py`, `linux.py`; TrueNAS and Proxmox follow the same pattern). It
+reads through a small **source fetcher** interface (`Source`: `read_file`,
+`list_dir`, `statfs`, `sum_subtree`, `run`, `has`):
+
+- `AgentSource(client)` is a live filecat-agent;
+- `RecordedSource(dir)` serves recorded raw outputs, so tests and bug reports
+  feed a collector what a real host printed, without an agent
+  (`tests/data/raw/nas3/`: the files as read, `run/<id>.stdout`, `statfs.json`,
+  `subtree.json`).
+
+A source that cannot be read leaves its nodes or fields out and adds a note
+to the snapshot (`collector.notes`); a collection never fails for a missing
+tool. `collect()` picks the collector by `detect_platform` (a DSM host has
+`/etc/VERSION` with a `productversion`) or `--platform`.
+
+**Synology sources** (the code is `topology_collect/synology.py`):
+
+| Node | Read from | Notes |
+|---|---|---|
+| host `os` | `/etc/VERSION` | `DSM 7.2.2` |
+| disk | `/sys/block/{sataN,sasN,nvmeNnM}/{size,queue/rotational,device/model}`; `smartctl --json -i /dev/sataN` (`run` `smartctl_info_json`, then `_sat`, then the text form) | serial is the id; no serial: WWN, then device name, flagged `id_unstable` |
+| group | `/proc/mdstat`, `mdadm --detail --scan` (`mdadm_detail_scan`), `/sys/block/mdN/size`, member partition sizes | md0 (system) and md1 (swap) are skipped: only arrays under a VG or a mounted volume count; `[UU_]` or `(F)` is `degraded` |
+| pool | `/etc/lvm/backup/vgN` (VG id, PVs, LVs) | no LVM: the array is its own pool. `level` is the array level; several arrays in one VG is `shr`. *Verify on DSM:* SHR with equal disks looks like a plain RAID 5 in md and LVM; a pool-type file (`/etc/space/space_table`?) would settle it |
+| volume | `/proc/mounts` (`/volumeN`), `statfs`, the device-mapper chain (`/sys/block/dm-*/dm/name`, `slaves/`) from `cachedev_0` to the LV to the array, file system uuid from `/sys/fs/btrfs/<uuid>/devices` (else `/dev/disk/by-uuid`, else `blkid`) | `used` is `total - free`, `free` is `avail`; `ro` mount is `warning` |
+| share | `/etc/samba/smb.conf` or `/usr/syno/etc/smb.conf`; `/etc/exports` for NFS | *Verify on DSM:* which file lists the shares. Fallback, flagged in the notes: every top-level folder of the volume not starting with `@`, `#`, `$` or `.`. `used_bytes` only with `--measure-shares` (`sum_subtree`, minutes on a big share) |
+| lun, vdisk | `iscsi_lun.conf`, `iscsi_lun_acl.conf`, `iscsi_target.conf` + `iscsi_mapping.conf` in `<volume>/@iSCSI/LUN/` | the NAA id is `topology.naa_from_unit_serial`; targets: *verify on DSM*, the two file names and keys are assumed and a host without them gets no `target` |
+| lun/vdisk `allocated_bytes` | `sum_subtree` of `<volume>/@iSCSI/LUN/<BLUN|BLUN_THICK|VDISK_BLUN>/<uuid>`, `total_allocated_size` | `st_blocks * 512`, never `total_size`: the sparse `ROD` file in each directory is 512 GiB |
+| vm | `<volume>/@Repository/<vm>/vguest.conf`, `vdisk.conf` | a vdisk naming a VM that has no folder gets a `[ORPHANED_VDISK]` vm |
+
+*Also verify on DSM:* that `lsblk` is absent (the collector does not need
+it), the smartmontools version and whether `-d sat` is required, and that
+`/sys/block/sataN` is how the disks appear on every model. LUN `health`, VM
+`health` and the per-LUN `detail` are not collected: nothing readable says
+them.
+
 ## 4. Shares and path mapping
 
 A share node knows two names for one folder: `path` (`/volume1/Backup`) on
@@ -269,11 +310,11 @@ explicit `unc`). The UNC root is the share's `unc`; without one it is
 
 Wiring (not done; `ShareMap` is untouched):
 
-1. `AgentClient.storage_topology()` returns the parsed `Topology`
-   (`from_response`) instead of a raw list. A reply without `topology` (an
-   older agent) gives an empty result, not an error.
-2. When a scan or `agents test` opens an agent, it asks for the topology
-   once, ignores failure, and builds the map:
+1. The topology comes from the stored snapshot (`filecat storage collect`,
+   section 7) or a collector run (section 3a); `AgentClient.storage_topology()`
+   no longer exists.
+2. When a scan opens an agent, it reads the stored snapshot of that host
+   (or collects once), ignores failure, and builds the map:
    `ShareMap(alias, merge_share_maps(share_entries(topo, alias), cfg.shares), cfg.volume)`.
 3. **Config wins.** `merge_share_maps` drops a derived entry whose POSIX
    prefix *or* UNC root (case-insensitively) a configured entry also has, so
@@ -517,25 +558,38 @@ are counted, since nothing else holds them, and listed in
 `unresolved_disk_bytes`. Thin provisioning is not unwound: a thin LUN counts
 as the NAS volume's used bytes, not as its provisioned size.
 
-## 7. Storage in the catalog (proposal)
+## 7. Storage in the catalog
 
 **One document per host snapshot**, in a `storage_topology` store (replacing
 note 04's per-volume `storage_pools` document, whose pool/volume/LUN/VM lists
 are all nodes here):
 
 ```json
-{"_id": "nas-main", "host": "nas-main", "platform": "synology",
- "scanned_at": "...", "agent": {"version": "...", "protocol": 1},
- "topology": { ...the response... },
+{"key": "nas-main", "host": "nas-main", "platform": "synology",
+ "scanned_at": "...", "agent": {"name": "nas-main", "version": "...", "protocol": 1,
+                                "allowlist_sha256": "..."},
+ "topology": { ...the generic topology... },
  "unc_roots": ["\\\\nas-main\\Backup", ...],
- "attached_to": ["nas3"],
+ "guest_servers": ["\\\\nas01"],       // servers whose disks are made of this host's nodes
+ "attached_to": ["nas3"],             // hosts whose nodes this host's disks are made of
  "structure_hash": "<sha256 of the nodes without usage fields>"}
 ```
 
-Plus a `storage_topology_history` store with one row `(host, scanned_at, ...)`
-written only when `structure_hash` changes, or when used bytes moved by more
-than a threshold (to be decided), so the history stays small.
-
+(`key` is the lowercased host name.) `guest_servers` and `attached_to` are
+derived from the links between the stored snapshots and recomputed for every
+stored host whenever one is saved. Plus a `storage_topology_history` store with
+one row `(host, scanned_at, structure_hash, previous_hash, diff, topology)`
+written **only when `structure_hash` changes**; used, free and allocated bytes
+(and per-node `detail`) are not part of the hash, so usage moving rewrites the
+snapshot and writes no row. The row carries the added, removed and changed node
+ids and the topology itself, so any two rows can be diffed. Every backend has
+both stores (memory, JSONL file and directory, SQLite, PostgreSQL, MySQL, SQL
+Server, MongoDB; `topology_store.py`, contract test in
+`test_backend_contract.py`). Hosts written by hand in `filecat.toml` stay in the
+config and are merged at read time (a stored snapshot of the same name replaces
+them). Commands: `filecat storage collect [--agent NAME]`, `storage show [HOST]
+[--json]`, and `storage links`, which resolves over the stored snapshots when no
+`--snapshot` file is given. The web viewer is not wired yet.
 Why not a document per node:
 
 - A topology is small (tens, at most a few hundred nodes) and always read
@@ -550,7 +604,7 @@ Why not a document per node:
   usage growth per volume). With per-node rows, history is per-node
   versioning plus reassembly.
 - The cross-host queries are few, and covered by the denormalized
-  `unc_roots` and `attached_to` arrays (indexed): share -> root, root ->
+  `unc_roots`, `guest_servers` and `attached_to` arrays: share -> root, root ->
   host, guest -> provider hosts. The links themselves are not stored: they are
   recomputed from the latest snapshots with `resolve_links`, so a replaced
   host re-links without a rewrite. Anything else (search by disk serial) scans a
@@ -589,7 +643,7 @@ into their own store, since they are already keyed by root.
 6. Thin provisioning is not unwound in the physical total; a LUN that is
    thin on the NAS and ZFS-formatted in the guest counts as what the NAS
    volume holds.
-7. History: keep every changed structure forever, or a fixed number per host;
+7. History (rows are written on a structure change only; decided): keep every changed structure forever, or a fixed number per host;
    what usage movement counts as a change.
 8. Windows: its agent (if any) needs drive-letter path mapping before shares
    derive; until then Windows hosts stay on SMB scans.

@@ -39,6 +39,19 @@ DATA = Path(__file__).parent / "data"
 CERT = DATA / "agent.crt"
 KEY = DATA / "agent.key"
 MAX_READ = 4 * 1024 * 1024
+READ_FILE_DEFAULT = 256 * 1024
+MAX_STDOUT = 4 * 1024 * 1024
+MAX_STDERR = 64 * 1024
+# The compiled-in allowlist of docs/agent-allowlist.md (the entries the tests need): id -> argument
+# kind (None: the request carries no `arg`). The real table is Rust; this one is the contract.
+ALLOWLIST: dict[str, str | None] = {
+    "lsblk_json": None, "lsblk_json_legacy": None, "lsblk_pairs": None, "blkid_export": None,
+    "findmnt_json": None, "btrfs_show": None, "btrfs_usage": "btrfs_mount",
+    "mdadm_detail_scan": None, "mdadm_detail": "md_device",
+    "smartctl_info_json": "block_device", "smartctl_info_json_sat": "block_device",
+    "smartctl_info": "block_device", "smartctl_all_json": "block_device",
+    "zpool_list": None, "zpool_status": None, "zfs_list": None, "zpool_get": None,
+}
 MAX_RULES = 1024
 MAX_PATTERN_BYTES = 4096
 MAX_PATTERNS_BYTES = 64 * 1024
@@ -159,6 +172,11 @@ class FakeAgent:
         self.progress_always = False                    # send a progress line whenever progress_ms is set
         self.max_sums = 4                               # concurrent long sums before `busy`
         self.cancelled: list[str] = []                  # ids of requests a cancel stopped
+        self.run_outputs: dict[str, dict[str, Any]] = {}    # "id" or "id@arg" -> {"stdout", "stderr", "exit_code", ...}
+        self.unavailable: set[str] = set()              # allowlist ids whose binary is missing on this host
+        self.statfs_data: dict[str, dict[str, Any]] = {}    # path -> the statfs reply fields
+        self.subtree_overrides: dict[str, dict[str, Any]] = {}  # path -> a recorded sum_subtree reply (paths a test machine cannot have: a 512 GiB ROD)
+        self.ran: list[tuple[str, str | None]] = []     # (id, arg) of every command the agent ran
         self._ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
         self._ctx.load_cert_chain(cert, key)
         self._listener = socket.create_server(("127.0.0.1", 0))
@@ -327,12 +345,15 @@ class FakeAgent:
             return self._read_range(req)
         if cmd == "sum_subtree":
             return self._sum_subtree(req, policy, send)
-        if cmd == "storage_topology":
-            return {"ok": True, "volumes": [{"mount_point": "/volume1", "device": "/dev/vg1/volume_1",
-                                             "fs_type": "btrfs", "total_bytes": 10, "used_bytes": 4,
-                                             "free_bytes": 6, "shares": ["Backup"],
-                                             "block_devices": []}]}
-        raise _Fail("bad_request", f"unknown cmd {cmd!r}")
+        if cmd == "read_file":
+            return self._read_file(req)
+        if cmd == "statfs":
+            return self._statfs(req)
+        if cmd == "run":
+            return self._run(req)
+        if cmd == "capabilities":
+            return self._capabilities()
+        raise _Fail("bad_request", f"unknown cmd {cmd!r}")     # storage_topology and wmi included
 
     @staticmethod
     def _numbers(st: os.stat_result) -> dict[str, int]:
@@ -598,6 +619,12 @@ class FakeAgent:
             return
 
     def _sum_subtree(self, req: dict[str, Any], policy: _Policy, send: Any) -> dict[str, Any]:
+        if req.get("path") in self.subtree_overrides:
+            row = self.subtree_overrides[req["path"]]
+            resp = {"ok": True, "total_files": 0, "total_dirs": 1, "newest_mtime_ns": 0, "errors": 0,
+                    "error_codes": {}, "vanished": 0, "skipped_mounts": 0, "complete": True,
+                    "path": req["path"], **row}
+            return resp
         top = self.real(req)
         if not top.is_dir():
             raise _Fail("bad_request", "not a directory")
@@ -623,6 +650,119 @@ class FakeAgent:
         if not private:
             resp["path"] = req.get("path")
         return resp
+
+    def load_recording(self, rec: Path) -> None:
+        """Serve a recorded host (tests/data/raw/<host>, see filecat.topology_collect.source):
+        its files become the served tree, its run/ outputs the allowlist replies, statfs.json
+        and subtree.json the recorded answers."""
+        import shutil
+        from urllib.parse import unquote
+        shutil.copytree(rec / "files", self.root, dirs_exist_ok=True)
+        for f in sorted((rec / "run").glob("*.stdout")):
+            stem = f.name[:-len(".stdout")]
+            entry, _, arg = stem.partition("@")
+            key = entry if not arg else f"{entry}@{unquote(arg)}"
+            code = f.with_suffix(".exit")
+            self.run_outputs[key] = {"stdout": f.read_text(encoding="utf-8"),
+                                     "exit_code": int(code.read_text()) if code.is_file() else 0}
+        if (rec / "statfs.json").is_file():
+            self.statfs_data.update(json.loads((rec / "statfs.json").read_text(encoding="utf-8")))
+        if (rec / "subtree.json").is_file():
+            self.subtree_overrides.update(json.loads((rec / "subtree.json").read_text(encoding="utf-8")))
+
+    # --- read_file, statfs, run, capabilities ---
+    def _read_file(self, req: dict[str, Any]) -> dict[str, Any]:
+        maximum = req.get("max", READ_FILE_DEFAULT)
+        if not isinstance(maximum, int) or isinstance(maximum, bool) or maximum < 1 or maximum > MAX_READ:
+            raise _Fail("bad_request", f"max must be 1 to {MAX_READ}")
+        path = self.real(req)
+        if path.is_symlink() or not path.is_file():
+            raise _Fail("bad_request", "not a regular file")
+        with open(path, "rb") as f:
+            data = f.read(maximum + 1)
+        return {"ok": True, "data_b64": base64.b64encode(data[:maximum]).decode(), "truncated": len(data) > maximum}
+
+    def _statfs(self, req: dict[str, Any]) -> dict[str, Any]:
+        path = self.real(req)
+        row = self.statfs_data.get(self._posix(path))
+        if row is None:
+            import shutil
+            usage = shutil.disk_usage(path)
+            row = {"total_bytes": usage.total, "free_bytes": usage.free, "avail_bytes": usage.free,
+                   "block_size": 4096}
+        return {"ok": True, "files": 0, "files_free": 0, "flags": 0, **row}
+
+    def _mounts_text(self) -> str:
+        out = ""
+        for name in ("proc/self/mountinfo", "proc/mounts"):
+            f = self.root / name
+            if f.is_file():
+                out += f.read_text(encoding="utf-8", errors="replace") + "\n"
+        return out
+
+    def _validate_arg(self, kind: str, arg: Any) -> None:
+        """The agent's own check of an argument kind, against the host's live state."""
+        if (not isinstance(arg, str) or not arg.startswith("/") or arg.startswith("-") or "\n" in arg
+                or "\0" in arg or "//" in arg or "/./" in arg or "/../" in arg or arg.endswith("/") and arg != "/"):
+            raise _Fail("refused", f"{kind}: {arg!r} is not an acceptable argument")
+        if kind == "block_device":
+            name = arg[len("/dev/"):] if arg.startswith("/dev/") else ""
+            sysblock = self.root / "sys" / "block"
+            if (not re.fullmatch(r"[A-Za-z0-9._-]+", name or "/") or re.match(r"(loop|ram)", name)
+                    or not (sysblock / name).is_dir()):
+                raise _Fail("refused", f"block_device: {arg} is not a whole disk of /sys/block")
+        elif kind == "btrfs_mount":
+            listed = {parts[1] for line in self._mounts_text().splitlines()
+                      if len(parts := line.split()) >= 3 and parts[2] == "btrfs"}
+            if arg not in listed:
+                raise _Fail("refused", f"btrfs_mount: {arg} is not a btrfs mount point")
+        elif kind == "md_device":
+            mdstat = self.root / "proc" / "mdstat"
+            text = mdstat.read_text(encoding="utf-8") if mdstat.is_file() else ""
+            if not (arg.startswith("/dev/md") and re.search(rf"^{re.escape(arg[5:])} :", text, re.M)):
+                raise _Fail("refused", f"md_device: {arg} is not an array of /proc/mdstat")
+        else:
+            raise _Fail("refused", f"unknown argument kind {kind!r}")
+
+    def _run(self, req: dict[str, Any]) -> dict[str, Any]:
+        entry = req.get("id")
+        if not isinstance(entry, str) or entry not in ALLOWLIST:
+            raise _Fail("bad_request", f"unknown allowlist id {entry!r}")
+        kind = ALLOWLIST[entry]
+        arg = req.get("arg")
+        if kind is None and arg is not None:
+            raise _Fail("bad_request", f"{entry} takes no argument")
+        if kind is not None:
+            if arg is None:
+                raise _Fail("bad_request", f"{entry} needs an argument ({kind})")
+            self._validate_arg(kind, arg)
+        if entry in self.unavailable:
+            raise _Fail("not_found", f"no binary for {entry}")
+        out = self.run_outputs.get(entry if arg is None else f"{entry}@{arg}")
+        if out is None:
+            raise _Fail("not_found", f"no binary for {entry}")
+        self.ran.append((entry, arg))
+        stdout, stderr = out.get("stdout", ""), out.get("stderr", "")
+        resp: dict[str, Any] = {
+            "ok": True, "id": entry, "binary": f"/usr/bin/{entry.split('_')[0]}",
+            "exit_code": out.get("exit_code", 0), "timed_out": bool(out.get("timed_out")),
+            "stdout": stdout[:MAX_STDOUT], "stderr": stderr[:MAX_STDERR],
+            "stdout_truncated": len(stdout) > MAX_STDOUT, "stderr_truncated": len(stderr) > MAX_STDERR,
+            "duration_ms": 3}
+        if resp["timed_out"]:
+            resp["exit_code"] = None
+        return resp
+
+    def _capabilities(self) -> dict[str, Any]:
+        entries = []
+        for entry, kind in sorted(ALLOWLIST.items()):
+            ok = entry not in self.unavailable and any(
+                k == entry or k.startswith(entry + "@") for k in self.run_outputs)
+            entries.append({"id": entry, "available": ok, "binary": f"/usr/bin/{entry.split('_')[0]}" if ok else None,
+                            "version": None, "arg_kind": kind})
+        digest = hashlib.sha256("\0".join(f"{e}={k}" for e, k in sorted(ALLOWLIST.items())).encode()).hexdigest()
+        return {"ok": True, "allowlist_version": 1, "allowlist_sha256": digest, "platform": "linux",
+                "entries": entries}
 
     def _measure(self, req: dict[str, Any]) -> dict[str, Any]:
         policy = req.get("hash", "auto")

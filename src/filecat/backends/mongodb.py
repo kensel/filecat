@@ -125,6 +125,10 @@ class MongoBackend(Backend):
         self.redaction_docs = self.db["redactions"]
         self.redaction_docs.create_index("id", unique=True)
         self.redaction_docs.create_index([("root_id", 1), ("path_hash", 1)], unique=True)
+        self.topology_docs = {store: self.db[store] for store in self.TOPOLOGY_STORES}
+        for coll in self.topology_docs.values():
+            coll.create_index("key", unique=True)
+        self.topology_docs["storage_topology_history"].create_index([("host", 1), ("scanned_at", 1)])
         self.dropped.create_index("dropped_at")
         self.dropped.create_index([("root_id", 1), ("rel_path", 1)])
         self.agg_meta.create_index("root_id", unique=True)
@@ -416,6 +420,16 @@ class MongoBackend(Backend):
 
     def _redaction_remove(self, entry: Document) -> None:
         self.redaction_docs.delete_one({"id": entry["id"]})
+
+    # --- storage topology ------------------------------------------------
+    def _topology_rows(self, store: str) -> list[Document]:
+        return list(self.topology_docs[store].find({}, {"_id": 0}))
+
+    def _topology_put(self, store: str, doc: Document) -> None:
+        self.topology_docs[store].replace_one({"key": doc["key"]}, _bson_safe(dict(doc)), upsert=True)
+
+    def _topology_remove(self, store: str, key: str) -> None:
+        self.topology_docs[store].delete_one({"key": key})
 
     # --- root index ----------------------------------------------------
     def put_root_info(self, info: Document) -> None:

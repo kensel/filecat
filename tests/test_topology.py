@@ -341,7 +341,7 @@ def test_lab_nodes_are_what_the_lab_is():
     nas3 = topology.parse(lab_docs()["nas3"])
     luns = nas3.of_type("lun")
     assert [n.name for n in luns] == [f"LUN-{i}" for i in range(1, 8)]
-    assert {n.health for n in luns} == {"ok"} and {n.parent for n in luns} == {n.parent for n in luns[:1]}
+    assert {n.parent for n in luns} == {n.parent for n in luns[:1]}     # LUN health is not collected (nothing readable says it)
     thin = {n.name: n.thin for n in luns}
     assert thin["LUN-1"] is True and thin["LUN-2"] is False and luns[1].size_bytes == luns[1].allocated_bytes
     assert luns[0].allocated_bytes == 0 and luns[0].size_bytes == 10 * 2 ** 30

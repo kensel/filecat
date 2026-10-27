@@ -22,6 +22,11 @@ read the rules differently and the connection is refused. A request may carry
 `progress_ms`; the agent then sends `{"progress": ...}` lines before the
 response, and the read timeout restarts with each.
 
+Besides scanning, the client reads raw storage sources for the topology collectors
+(`filecat.topology_collect`): `read_file` (files with no size: /proc, /sys, configuration),
+`statfs`, `run` (a command of the agent's hardcoded allowlist, docs/agent-allowlist.md),
+`capabilities` and, on Windows agents, `wmi`. The agent parses none of it.
+
 `ShareMap` maps the agent's POSIX paths to the UNC paths an SMB scan of the
 same share records, and back, so the two kinds of scan give the same roots
 and rel_paths.
@@ -50,6 +55,8 @@ if TYPE_CHECKING:
 PROTOCOL = 1
 DEFAULT_PORT = 9876
 MAX_READ = 4 * MiB                  # largest `len` the agent accepts in one read_range
+READ_FILE_MAX = 4 * MiB             # largest `max` of read_file; the default is READ_FILE_DEFAULT
+READ_FILE_DEFAULT = 256 * 1024
 CONNECT_TIMEOUT = 30.0
 IO_TIMEOUT = 120.0
 SUBTREE_TIMEOUT = 3600.0            # sum_subtree walks a whole tree
@@ -168,6 +175,79 @@ class SubtreeSummary:
     hardlink_names: int | None = None
     complete: bool = True
     path: str | None = None
+
+
+@dataclass(frozen=True)
+class FileData:
+    """What `read_file` returned: the bytes from the start of the file, at most
+    `max` of them; `truncated` when the file goes on."""
+    data: bytes
+    truncated: bool = False
+
+    def text(self) -> str:
+        return self.data.decode("utf-8", "replace")
+
+
+@dataclass(frozen=True)
+class StatFs:
+    """`statfs` of the file system that holds a path. `used_bytes` is what is in
+    use (`total - free`); `avail_bytes` is what an ordinary user can still take.
+    `fs_type_id` is the file system's magic number (None on Windows)."""
+    total_bytes: int
+    free_bytes: int
+    avail_bytes: int
+    block_size: int
+    fs_type_id: int | None = None
+    flags: int = 0
+    files: int = 0
+    files_free: int = 0
+
+    @property
+    def used_bytes(self) -> int:
+        return max(self.total_bytes - self.free_bytes, 0)
+
+    @property
+    def read_only(self) -> bool:
+        return bool(self.flags & 1)         # ST_RDONLY
+
+
+@dataclass(frozen=True)
+class RunResult:
+    """A command of the agent's allowlist, run. A non-zero `exit_code` is the
+    command's own answer (smartctl's is a bit mask), not an agent error;
+    `timed_out` leaves `exit_code` None and whatever was printed so far."""
+    id: str
+    binary: str
+    exit_code: int | None
+    stdout: str
+    stderr: str = ""
+    timed_out: bool = False
+    stdout_truncated: bool = False
+    stderr_truncated: bool = False
+    duration_ms: int = 0
+    signal: int | None = None
+
+
+@dataclass(frozen=True)
+class Capability:
+    """One allowlist entry as `capabilities` reports it on this host."""
+    id: str
+    available: bool
+    binary: str | None = None
+    version: str | None = None
+    arg_kind: str | None = None
+
+
+@dataclass(frozen=True)
+class Capabilities:
+    allowlist_version: int
+    allowlist_sha256: str | None
+    platform: str
+    entries: dict[str, Capability]
+
+    def has(self, entry_id: str) -> bool:
+        cap = self.entries.get(entry_id)
+        return bool(cap and cap.available)
 
 
 # --- wire helpers ----------------------------------------------------------
@@ -510,8 +590,57 @@ class AgentClient:
         finally:
             other.close()
 
-    def storage_topology(self) -> list[dict[str, Any]]:
-        return self._call({"cmd": "storage_topology"}).get("volumes", [])
+    def read_file(self, path: str | bytes, max: int = READ_FILE_DEFAULT) -> FileData:
+        """A file of unknown size (/proc, /sys, small configuration files) from its start,
+        at most `max` bytes (the agent's ceiling is READ_FILE_MAX)."""
+        if not 0 < max <= READ_FILE_MAX:
+            raise ValueError(f"max must be 1 to {READ_FILE_MAX}")
+        resp = self._call({"cmd": "read_file", **path_fields(path), "max": max})
+        return FileData(base64.b64decode(resp.get("data_b64") or ""), bool(resp.get("truncated")))
+
+    def statfs(self, path: str | bytes) -> StatFs:
+        resp = self._call({"cmd": "statfs", **path_fields(path)})
+        return StatFs(resp["total_bytes"], resp["free_bytes"], resp["avail_bytes"],
+                      resp.get("block_size", 0), resp.get("fs_type_id"), resp.get("flags", 0),
+                      resp.get("files", 0), resp.get("files_free", 0))
+
+    def run(self, entry_id: str, arg: str | None = None, timeout: float | None = None) -> RunResult:
+        """Run a command of the agent's allowlist (docs/agent-allowlist.md). `arg` only for an
+        entry that has an argument kind; the agent validates it and answers `refused`
+        otherwise. The command's own exit status is in the result (not an error); an agent
+        error (unknown id, refused, not_found, busy) raises AgentError."""
+        payload: dict[str, Any] = {"cmd": "run", "id": entry_id}
+        if arg is not None:
+            payload["arg"] = arg
+        resp = self._call(payload, timeout)
+        return RunResult(
+            id=str(resp.get("id") or entry_id), binary=str(resp.get("binary") or ""),
+            exit_code=resp.get("exit_code"), stdout=_text(resp, "stdout") or "",
+            stderr=_text(resp, "stderr") or "", timed_out=bool(resp.get("timed_out")),
+            stdout_truncated=bool(resp.get("stdout_truncated")),
+            stderr_truncated=bool(resp.get("stderr_truncated")),
+            duration_ms=int(resp.get("duration_ms") or 0), signal=resp.get("signal"))
+
+    def capabilities(self) -> Capabilities:
+        resp = self._call({"cmd": "capabilities"})
+        entries = {}
+        for e in resp.get("entries", []):
+            entries[e["id"]] = Capability(e["id"], bool(e.get("available")), e.get("binary"),
+                                          e.get("version"), e.get("arg_kind"))
+        return Capabilities(int(resp.get("allowlist_version") or 0), resp.get("allowlist_sha256"),
+                            str(resp.get("platform") or ""), entries)
+
+    def wmi(self, entry_id: str, timeout: float | None = None) -> list[dict[str, Any]]:
+        """The rows of an allowlisted WMI query (Windows agents only; any other agent answers
+        bad_request). Values are WMI's own: 64-bit integers arrive as decimal strings."""
+        return list(self._call({"cmd": "wmi", "id": entry_id}, timeout).get("rows") or [])
+
+    def storage_topology(self) -> Any:
+        """Removed: the agent no longer builds the topology. Collect it in Python from the raw
+        sources (`filecat.topology_collect`, `filecat storage collect`)."""
+        raise AgentError("moved", "storage_topology is not an agent command any more: the topology "
+                                  "is built in Python from read_file, statfs and run "
+                                  "(filecat.topology_collect; `filecat storage collect`)")
 
     @staticmethod
     def child(parent: str | bytes, entry: DirEntry) -> str:

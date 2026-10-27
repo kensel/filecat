@@ -1,6 +1,6 @@
 # 03 - Synology VMM & SAN LUN Storage Discovery Research
 
-This document records the reverse-engineered layout of Synology SAN Manager (iSCSI) and Virtual Machine Manager (VMM) on NAS-MAIN, explaining the ~19.1 TB gap between SMB file shares (29.7 TB) and physical Volume 1 usage (48.6 TB / 55.8 TB). The Rust implementation is in **rust-agent/synology_storage.rs**.
+This document records the reverse-engineered layout of Synology SAN Manager (iSCSI) and Virtual Machine Manager (VMM) on NAS-MAIN, explaining the ~19.1 TB gap between SMB file shares (29.7 TB) and physical Volume 1 usage (48.6 TB / 55.8 TB). The parsing now lives in Python (`src/filecat/topology_collect/synology.py`; the Rust draft `synology_storage.rs` was deleted).
 
 ## 1. Key Architectural Findings on DSM 7.x
 

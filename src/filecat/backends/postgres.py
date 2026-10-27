@@ -141,6 +141,20 @@ CREATE TABLE IF NOT EXISTS redactions (
     document JSONB NOT NULL,
     UNIQUE (root_id, path_hash)
 );
+
+CREATE TABLE IF NOT EXISTS storage_topology (
+    doc_key TEXT PRIMARY KEY,
+    host TEXT NOT NULL,
+    scanned_at TEXT,
+    document JSONB NOT NULL
+);
+CREATE TABLE IF NOT EXISTS storage_topology_history (
+    doc_key TEXT PRIMARY KEY,
+    host TEXT NOT NULL,
+    scanned_at TEXT,
+    document JSONB NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_storage_history_host ON storage_topology_history(host, scanned_at);
 """
 
 _UPSERT_SQL = """
@@ -488,6 +502,31 @@ class PostgresBackend(Backend):
     def _redaction_remove(self, entry: Document) -> None:
         with self.conn.cursor() as cur:
             cur.execute("DELETE FROM redactions WHERE id=%s", (entry["id"],))
+        self.conn.commit()
+
+    # --- storage topology ------------------------------------------------
+    def _topology_rows(self, store: str) -> list[Document]:
+        assert store in self.TOPOLOGY_STORES
+        with self.conn.cursor() as cur:
+            cur.execute(f"SELECT document FROM {store}")
+            rows = cur.fetchall()
+        self.conn.commit()
+        return [d if isinstance(d, dict) else json.loads(d) for (d,) in rows]
+
+    def _topology_put(self, store: str, doc: Document) -> None:
+        assert store in self.TOPOLOGY_STORES
+        with self.conn.cursor() as cur:
+            cur.execute(
+                f"INSERT INTO {store} (doc_key, host, scanned_at, document) VALUES (%s, %s, %s, %s::jsonb) "
+                "ON CONFLICT (doc_key) DO UPDATE SET host=excluded.host, "
+                "scanned_at=excluded.scanned_at, document=excluded.document",
+                (doc["key"], doc["host"], doc.get("scanned_at"), json.dumps(doc, ensure_ascii=False)))
+        self.conn.commit()
+
+    def _topology_remove(self, store: str, key: str) -> None:
+        assert store in self.TOPOLOGY_STORES
+        with self.conn.cursor() as cur:
+            cur.execute(f"DELETE FROM {store} WHERE doc_key=%s", (key,))
         self.conn.commit()
 
     # --- root index ----------------------------------------------------

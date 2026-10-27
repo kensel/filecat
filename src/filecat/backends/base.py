@@ -521,6 +521,52 @@ class Backend(ABC):
             if row["id"] == entry_id:
                 self._redaction_remove(row)
 
+    # --- storage topology (filecat/topology_store.py) -------------------------
+    # Two small stores of whole documents, each keyed by a string "key" inside the document:
+    # "storage_topology" (one document per host snapshot, key = the lowercased host name) and
+    # "storage_topology_history" (one row per structure change, key = "<host>@<scanned_at>").
+    # A backend implements the three row primitives; the rest is written on top of them.
+    # Hosts written by hand in filecat.toml are not stored here (they are merged at read time).
+    TOPOLOGY_STORES = ("storage_topology", "storage_topology_history")
+
+    def _topology_rows(self, store: str) -> list[Document]:
+        """Every document of `store` (one of TOPOLOGY_STORES)."""
+        raise NotImplementedError(f"{self.name} backend does not store the storage topology")
+
+    def _topology_put(self, store: str, doc: Document) -> None:
+        """Insert or replace the document of `store` with this doc["key"]."""
+        raise NotImplementedError(f"{self.name} backend does not store the storage topology")
+
+    def _topology_remove(self, store: str, key: str) -> None:
+        raise NotImplementedError(f"{self.name} backend does not store the storage topology")
+
+    def put_topology(self, doc: Document) -> None:
+        """Add or replace the snapshot of doc["host"]; its key is the lowercased host."""
+        self._topology_put("storage_topology", {**doc, "key": doc["host"].lower()})
+
+    def topologies(self) -> list[Document]:
+        """The stored snapshot documents, by host."""
+        return sorted(self._topology_rows("storage_topology"), key=lambda d: d["key"])
+
+    def get_topology(self, host: str) -> Document | None:
+        return next((d for d in self._topology_rows("storage_topology") if d["key"] == host.lower()), None)
+
+    def delete_topology(self, host: str) -> None:
+        """Forget a host's snapshot (its history rows stay)."""
+        self._topology_remove("storage_topology", host.lower())
+
+    def add_topology_history(self, row: Document) -> None:
+        """A history row {"host", "scanned_at", ...}; one per (host, scanned_at)."""
+        self._topology_put("storage_topology_history",
+                           {**row, "key": f"{row['host'].lower()}@{row['scanned_at']}"})
+
+    def topology_history(self, host: str | None = None) -> list[Document]:
+        """History rows, oldest first, optionally of one host."""
+        rows = self._topology_rows("storage_topology_history")
+        if host is not None:
+            rows = [r for r in rows if r["host"].lower() == host.lower()]
+        return sorted(rows, key=lambda r: (r["scanned_at"], r["key"]))
+
     # --- lifecycle -----------------------------------------------------
     def scrub(self) -> None:
         """After a purge: make the storage forget what was deleted, where it

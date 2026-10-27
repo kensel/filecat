@@ -29,7 +29,8 @@ in `<stem>.programs.jsonl`, both per the spec. Records moved out by
 `drop()` (their file vanished) are appended to `<stem>.dropped.jsonl`.
 Treemap snapshots of the web viewer's Graph view are kept in
 `<stem>.treemaps.json`, rewritten whole like the root index, and the sticky
-redactions (a few small entries, no names) in `<stem>.redactions.json`.
+redactions (a few small entries, no names) in `<stem>.redactions.json`. The storage
+topology snapshots and their history are in `<stem>.storage.json`.
 """
 from __future__ import annotations
 
@@ -90,6 +91,31 @@ def put_program(path: Path, record: Document) -> None:
                 pass
 
 
+def read_topology(path: Path) -> dict[str, dict[str, Document]]:
+    """The storage topology stores of a `*.storage.json` file: {store: {key: document}}
+    (shared with the per-root directory layout in jsonl_dir.py)."""
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            return json.load(f)
+    except (OSError, json.JSONDecodeError):
+        return {}
+
+
+def write_topology(path: Path, data: dict[str, dict[str, Document]]) -> None:
+    """Rewrite the file whole and atomically (a few dozen small documents)."""
+    tmp_path = path.parent / (path.name + f".tmp{os.getpid()}")
+    try:
+        with open(tmp_path, "w", encoding="utf-8", newline="\n") as f:
+            json.dump(data, f, ensure_ascii=False, indent=1)
+        _replace(tmp_path, path)
+    finally:
+        if tmp_path.exists():
+            try:
+                tmp_path.unlink()
+            except OSError:
+                pass
+
+
 class JsonlBackend(Backend):
     name = "jsonl"
 
@@ -105,6 +131,7 @@ class JsonlBackend(Backend):
         self.dropped_path = self.path.with_name(self.path.stem + ".dropped.jsonl")
         self.treemaps_path = self.path.with_name(self.path.stem + ".treemaps.json")
         self.redactions_path = self.path.with_name(self.path.stem + ".redactions.json")
+        self.storage_path = self.path.with_name(self.path.stem + ".storage.json")
         self._member_keys: set[tuple[str, str]] | None = None
         self._buffer: list[Document] = []
         self._last_flush = time.monotonic()
@@ -618,6 +645,20 @@ class JsonlBackend(Backend):
         entries = self._read_redactions()
         if entries.pop(entry["id"], None) is not None:
             self._write_redactions(entries)
+
+    # --- storage topology ------------------------------------------------
+    def _topology_rows(self, store: str) -> list[Document]:
+        return list(read_topology(self.storage_path).get(store, {}).values())
+
+    def _topology_put(self, store: str, doc: Document) -> None:
+        data = read_topology(self.storage_path)
+        data.setdefault(store, {})[doc["key"]] = doc
+        write_topology(self.storage_path, data)
+
+    def _topology_remove(self, store: str, key: str) -> None:
+        data = read_topology(self.storage_path)
+        if data.get(store, {}).pop(key, None) is not None:
+            write_topology(self.storage_path, data)
 
     # --- installed programs -------------------------------------------
     def put_program(self, record: Document) -> None:

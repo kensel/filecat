@@ -1,0 +1,12 @@
+{
+ "/volume1": {
+  "total_bytes": 47000187830272,
+  "free_bytes": 6006599999488,
+  "avail_bytes": 6006599999488,
+  "block_size": 4096,
+  "fs_type_id": 2435016766,
+  "flags": 4096,
+  "files": 0,
+  "files_free": 0
+ }
+}

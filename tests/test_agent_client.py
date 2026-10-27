@@ -247,10 +247,16 @@ def test_sum_subtree(agent, tree):
         assert err.value.code == "bad_request"
 
 
-def test_storage_topology(agent):
+def test_storage_topology_moved_to_python(agent):
     with client_for(agent) as c:
-        volumes = c.storage_topology()
-    assert volumes[0]["mount_point"] == "/volume1" and volumes[0]["shares"] == ["Backup"]
+        with pytest.raises(AgentError) as err:
+            c.storage_topology()
+        assert err.value.code == "moved" and "Python" in str(err.value)
+        assert not any(r["cmd"] == "storage_topology" for r in agent.requests)
+        # an agent asked for it anyway does not know the command
+        with pytest.raises(AgentError) as err:
+            c._call({"cmd": "storage_topology"})
+        assert err.value.code == "bad_request"
 
 
 def test_policy_exclude_and_rollup(agent, tree):

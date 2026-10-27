@@ -6,8 +6,7 @@
   "host": {
    "name": "nas3",
    "unc_server": "\\\\nas3",
-   "os": "DSM 7.2.2",
-   "iscsi_sessions": 3
+   "os": "DSM 7.2.2"
   },
   "collected_at": "2026-10-22T09:00:00Z",
   "nodes": [
@@ -25,7 +24,7 @@
     "platform": {
      "synology": {
       "device": "/dev/sata1",
-      "smart": "normal"
+      "wwn": "500c500c5a0b1c21"
      }
     }
    },
@@ -43,7 +42,7 @@
     "platform": {
      "synology": {
       "device": "/dev/sata2",
-      "smart": "normal"
+      "wwn": "500c500c5a0b1c22"
      }
     }
    },
@@ -61,7 +60,7 @@
     "platform": {
      "synology": {
       "device": "/dev/sata3",
-      "smart": "normal"
+      "wwn": "500c500c5a0b1c23"
      }
     }
    },
@@ -79,34 +78,34 @@
     "platform": {
      "synology": {
       "device": "/dev/sata4",
-      "smart": "normal"
+      "wwn": "500c500c5a0b1c24"
      }
     }
    },
    {
-    "id": "pool:7a1d3c5e-2b8f-4e96-8d40-1c6a9f0b3e72",
+    "id": "pool:Xw3kLp-9aVt-QmR2-uYb7-Hn4d-Zc8e-Ft6Sgj",
     "type": "pool",
     "parent": null,
     "name": "Storage Pool 1",
     "health": "ok",
-    "size_bytes": 48002701983744,
-    "allocated_bytes": 47000000000000,
-    "raw_bytes": 64003602644992,
-    "level": "shr",
+    "size_bytes": 47970078687232,
+    "allocated_bytes": 47000187830272,
+    "raw_bytes": 63960644583424,
+    "level": "raid5",
     "platform": {
      "synology": {
-      "vg": "vg1",
-      "shr": "SHR-1 (1-disk fault tolerance)"
+      "vg": "vg1"
      }
     }
    },
    {
     "id": "group:c40e7b19-6d25-4f83-a1b0-93e8d52f7a46",
     "type": "group",
-    "parent": "pool:7a1d3c5e-2b8f-4e96-8d40-1c6a9f0b3e72",
+    "parent": "pool:Xw3kLp-9aVt-QmR2-uYb7-Hn4d-Zc8e-Ft6Sgj",
     "name": "md2",
-    "size_bytes": 48002701983744,
-    "raw_bytes": 64003602644992,
+    "health": "ok",
+    "size_bytes": 47970080784384,
+    "raw_bytes": 63960644583424,
     "role": "data",
     "level": "raid5",
     "members": [
@@ -126,18 +125,23 @@
       "disk": "disk:ZR6N3A04",
       "role": "data"
      }
-    ]
+    ],
+    "platform": {
+     "synology": {
+      "md": "md2"
+     }
+    }
    },
    {
     "id": "vol:5e2c8d41-90ab-4c17-a3f6-7b1d0e94c258",
     "type": "volume",
-    "parent": "pool:7a1d3c5e-2b8f-4e96-8d40-1c6a9f0b3e72",
+    "parent": "pool:Xw3kLp-9aVt-QmR2-uYb7-Hn4d-Zc8e-Ft6Sgj",
     "name": "Volume 1",
     "health": "ok",
     "detail": "87.22% used",
-    "size_bytes": 47000000000000,
-    "used_bytes": 40993400000000,
-    "free_bytes": 6006600000000,
+    "size_bytes": 47000187830272,
+    "used_bytes": 40993587830784,
+    "free_bytes": 6006599999488,
     "mount": "/volume1",
     "fs_type": "btrfs",
     "device": "/dev/mapper/cachedev_0"
@@ -183,14 +187,19 @@
     "type": "lun",
     "parent": "vol:5e2c8d41-90ab-4c17-a3f6-7b1d0e94c258",
     "name": "LUN-1",
-    "health": "ok",
-    "detail": "Healthy",
     "size_bytes": 10737418240,
     "allocated_bytes": 0,
     "thin": true,
     "kind": "iscsi",
     "path": "/volume1/@iSCSI/LUN/BLUN/7949c2d0-3b1e-4f58-9a6d-0e5c8b1f2a33",
     "target": "Synology iSCSI Target",
+    "initiators": [
+     {
+      "iqn": "iqn.2000-01.com.synology:default.acl",
+      "authority": 0,
+      "default": true
+     }
+    ],
     "match": [
      "naa:60014057949c2d0d3b1ed4f58d9a6dd0",
      "uuid:7949c2d0-3b1e-4f58-9a6d-0e5c8b1f2a33"
@@ -201,28 +210,26 @@
       "lid": 1,
       "vpd_unit_serial": "7949c2d0-3b1e-4f58-9a6d-0e5c8b1f2a33"
      }
-    },
-    "initiators": [
-     {
-      "iqn": "iqn.2000-01.com.synology:default.acl",
-      "authority": 0,
-      "default": true
-     }
-    ]
+    }
    },
    {
     "id": "lun:47f5d7a8-5444-4932-93e3-c712f6aa0130",
     "type": "lun",
     "parent": "vol:5e2c8d41-90ab-4c17-a3f6-7b1d0e94c258",
     "name": "LUN-2",
-    "health": "ok",
-    "detail": "Healthy",
     "size_bytes": 1073741824000,
     "allocated_bytes": 1073741824000,
     "thin": false,
     "kind": "iscsi",
     "path": "/volume1/@iSCSI/LUN/BLUN_THICK/47f5d7a8-5444-4932-93e3-c712f6aa0130",
     "target": "Synology iSCSI Target",
+    "initiators": [
+     {
+      "iqn": "iqn.2000-01.com.synology:default.acl",
+      "authority": 0,
+      "default": true
+     }
+    ],
     "match": [
      "naa:600140547f5d7a8d5444d4932d93e3dc",
      "uuid:47f5d7a8-5444-4932-93e3-c712f6aa0130"
@@ -233,24 +240,15 @@
       "lid": 2,
       "vpd_unit_serial": "47f5d7a8-5444-4932-93e3-c712f6aa0130"
      }
-    },
-    "initiators": [
-     {
-      "iqn": "iqn.2000-01.com.synology:default.acl",
-      "authority": 0,
-      "default": true
-     }
-    ]
+    }
    },
    {
     "id": "lun:f48f1514-6072-4193-989e-9e7bfbe6d0e1",
     "type": "lun",
     "parent": "vol:5e2c8d41-90ab-4c17-a3f6-7b1d0e94c258",
     "name": "LUN-3",
-    "health": "ok",
-    "detail": "Healthy",
     "size_bytes": 11811160064000,
-    "allocated_bytes": 11215018603315,
+    "allocated_bytes": 11215018602496,
     "thin": true,
     "kind": "iscsi",
     "path": "/volume1/@iSCSI/LUN/BLUN/f48f1514-6072-4193-989e-9e7bfbe6d0e1",
@@ -287,10 +285,8 @@
     "type": "lun",
     "parent": "vol:5e2c8d41-90ab-4c17-a3f6-7b1d0e94c258",
     "name": "LUN-4",
-    "health": "ok",
-    "detail": "Healthy",
     "size_bytes": 107374182400,
-    "allocated_bytes": 89335319756,
+    "allocated_bytes": 89335316480,
     "thin": true,
     "kind": "iscsi",
     "path": "/volume1/@iSCSI/LUN/BLUN/2a93d1c8-71e4-4b60-8c25-5f0e9a6b7d14",
@@ -323,10 +319,8 @@
     "type": "lun",
     "parent": "vol:5e2c8d41-90ab-4c17-a3f6-7b1d0e94c258",
     "name": "LUN-5",
-    "health": "ok",
-    "detail": "Healthy",
     "size_bytes": 107374182400,
-    "allocated_bytes": 674339225,
+    "allocated_bytes": 674336768,
     "thin": true,
     "kind": "iscsi",
     "path": "/volume1/@iSCSI/LUN/BLUN/a0061b7e-4c92-4d83-b5f1-26d8e3c90a57",
@@ -359,10 +353,8 @@
     "type": "lun",
     "parent": "vol:5e2c8d41-90ab-4c17-a3f6-7b1d0e94c258",
     "name": "LUN-6",
-    "health": "ok",
-    "detail": "Healthy",
     "size_bytes": 107374182400,
-    "allocated_bytes": 12992276070,
+    "allocated_bytes": 12992274432,
     "thin": true,
     "kind": "iscsi",
     "path": "/volume1/@iSCSI/LUN/BLUN/83a1e4f6-0d57-4a29-9c3b-b71f58e2d640",
@@ -395,8 +387,6 @@
     "type": "lun",
     "parent": "vol:5e2c8d41-90ab-4c17-a3f6-7b1d0e94c258",
     "name": "LUN-7",
-    "health": "ok",
-    "detail": "Healthy",
     "size_bytes": 1073741824000,
     "allocated_bytes": 1000190509056,
     "thin": true,
@@ -431,7 +421,6 @@
     "type": "vm",
     "parent": null,
     "name": "NAS01",
-    "health": "ok",
     "platform": {
      "synology": {
       "is_general_vm": false,

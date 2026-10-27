@@ -1,0 +1,34 @@
+{
+  "json_format_version": [
+    1,
+    0
+  ],
+  "smartctl": {
+    "version": [
+      7,
+      2
+    ],
+    "exit_status": 64
+  },
+  "device": {
+    "name": "/dev/sata2",
+    "info_name": "/dev/sata2 [SAT]",
+    "type": "sat",
+    "protocol": "ATA"
+  },
+  "model_name": "ST16000NM001G",
+  "serial_number": "ZR6N3A02",
+  "wwn": {
+    "naa": 5,
+    "oui": 50432,
+    "id": 53050285090
+  },
+  "firmware_version": "SN03",
+  "user_capacity": {
+    "blocks": 31251759104,
+    "bytes": 16000900661248
+  },
+  "logical_block_size": 512,
+  "physical_block_size": 4096,
+  "rotation_rate": 7200
+}

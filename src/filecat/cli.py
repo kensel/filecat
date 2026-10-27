@@ -397,15 +397,33 @@ def build_parser() -> argparse.ArgumentParser:
     r.add_argument("--yes", action="store_true", help="do not ask (required without a terminal)")
     _storage(r)
 
-    p = sub.add_parser("storage", help="storage written by hand in filecat.toml: hosts with no agent "
-                                       "and the links between hosts")
+    p = sub.add_parser("storage", help="the storage topology of the hosts: collect it through the agents, "
+                                       "show what is stored, check the links between hosts")
     ssub = p.add_subparsers(dest="action", required=True)
-    s = ssub.add_parser("links", help="the [[storage.hosts]] and [[storage.links]]; with --snapshot, "
-                                      "resolve them and report each link; exit 1 if one is unresolved "
+    s = ssub.add_parser("collect", help="read each [[agents]] host's raw storage sources, build the "
+                                        "topology in Python and store it in the catalog (a history row "
+                                        "when the structure changed); exit 1 if an agent fails")
+    s.add_argument("--agent", metavar="NAME", help="only this [[agents]] host")
+    s.add_argument("--platform", choices=("synology", "linux"),
+                   help="collector to use (default: detected from the host)")
+    s.add_argument("--measure-shares", dest="measure_shares", action="store_true",
+                   help="also sum each share with the agent for its used bytes (minutes on a big share)")
+    s.add_argument("--dry-run", dest="dry_run", action="store_true", help="collect and validate, store nothing")
+    s.add_argument("--json", action="store_true", help="one JSON object per agent")
+    _storage(s)
+    s = ssub.add_parser("show", help="the stored snapshots and the hosts written by hand; with a host, "
+                                     "its hierarchy from the disks up to the shares and LUNs")
+    s.add_argument("host", nargs="?", metavar="HOST")
+    s.add_argument("--json", action="store_true", help="JSON instead of text")
+    _storage(s)
+    s = ssub.add_parser("links", help="the [[storage.hosts]] and [[storage.links]], resolved over the stored "
+                                      "snapshots (or --snapshot files); exit 1 if a link is unresolved "
                                       "or in conflict")
     s.add_argument("--snapshot", action="append", metavar="FILE",
-                   help="a saved storage_topology reply (or bare topology); repeat for each host")
+                   help="a saved topology (or a reply holding one); repeat for each host; used instead "
+                        "of the stored snapshots")
     s.add_argument("--json", action="store_true", help="one JSON object")
+    _storage(s)
 
     p = sub.add_parser("serve", help="web viewer: browse the summary and drill into the records")
     _storage(p)

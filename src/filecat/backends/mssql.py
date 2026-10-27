@@ -132,6 +132,22 @@ _TABLES = {
             UNIQUE (root_id, path_hash)
         )
     """,
+    "storage_topology": """
+        CREATE TABLE storage_topology (
+            doc_key NVARCHAR(400) PRIMARY KEY,
+            host NVARCHAR(400) NOT NULL,
+            scanned_at VARCHAR(40),
+            document NVARCHAR(MAX) NOT NULL
+        )
+    """,
+    "storage_topology_history": """
+        CREATE TABLE storage_topology_history (
+            doc_key NVARCHAR(400) PRIMARY KEY,
+            host NVARCHAR(400) NOT NULL,
+            scanned_at VARCHAR(40),
+            document NVARCHAR(MAX) NOT NULL
+        )
+    """,
     "samples": """
         CREATE TABLE samples (
             sample_id VARCHAR(64) PRIMARY KEY,
@@ -569,6 +585,31 @@ class MssqlBackend(Backend):
     def _redaction_remove(self, entry: Document) -> None:
         cur = self.conn.cursor()
         cur.execute("DELETE FROM redactions WHERE id=?", (entry["id"],))
+        self.conn.commit()
+
+    # --- storage topology ------------------------------------------------
+    def _topology_rows(self, store: str) -> list[Document]:
+        assert store in self.TOPOLOGY_STORES
+        cur = self.conn.cursor()
+        cur.execute(f"SELECT document FROM {store}")
+        return [json.loads(d) for (d,) in cur.fetchall()]
+
+    def _topology_put(self, store: str, doc: Document) -> None:
+        assert store in self.TOPOLOGY_STORES
+        text = json.dumps(doc, ensure_ascii=False)
+        cur = self.conn.cursor()
+        cur.execute(
+            f"MERGE {store} AS target USING (SELECT ? AS doc_key) AS src ON target.doc_key = src.doc_key "
+            "WHEN MATCHED THEN UPDATE SET host=?, scanned_at=?, document=? "
+            "WHEN NOT MATCHED THEN INSERT (doc_key, host, scanned_at, document) VALUES (?, ?, ?, ?);",
+            (doc["key"], doc["host"], doc.get("scanned_at"), text,
+             doc["key"], doc["host"], doc.get("scanned_at"), text))
+        self.conn.commit()
+
+    def _topology_remove(self, store: str, key: str) -> None:
+        assert store in self.TOPOLOGY_STORES
+        cur = self.conn.cursor()
+        cur.execute(f"DELETE FROM {store} WHERE doc_key=?", (key,))
         self.conn.commit()
 
     # --- root index ----------------------------------------------------

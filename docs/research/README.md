@@ -13,8 +13,8 @@ the code and the requirements win.
 | [04 - Web viewer and storage hierarchy](04-web-viewer-storage-hierarchy.md) | `storage_pools` collection, pool → volume → LUN/VM → guest server hierarchy, inspector cards in `filecat serve` |
 | [05 - Catalog tuning and agent boundary](05-catalog-tuning-agent-boundary.md) | Compound documents vs. archives in `members`, content-keyed `samples`, zstd and partial indexes, what runs in the agent vs. Python |
 
-The wire protocol that came out of note 02 is [agent-protocol.md](../agent-protocol.md).
+The wire protocol that came out of note 02 is [agent-protocol.md](../agent-protocol.md); the commands the agent may run and the native crates it links, for review before it is built, are in [agent-allowlist.md](../agent-allowlist.md). Storage topology is built in Python, not in the agent ([storage-topology.md](../storage-topology.md)).
 
 [`rust-agent/`](rust-agent/) holds the draft agent sources referenced by notes
-02 and 03 (`Cargo.toml`, `main.rs`, `tls.rs`, `synology_storage.rs`). They are
+02 and 03 (`Cargo.toml`, `main.rs`, `tls.rs`; `synology_storage.rs` was deleted, its logic is Python now). They are
 not part of the build.

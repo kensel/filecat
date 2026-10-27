@@ -10,8 +10,12 @@ listed at the end). Where this page and the draft disagree, this page wins.
 
 The agent is a fast, dumb syscall and byte-range engine (note
 [05, section 3](research/05-catalog-tuning-agent-boundary.md)): it lists,
-stats, hashes, sums and reads. Store detection, probing and every manifest
-parser stay in Python.
+stats, hashes, sums and reads, reports file system totals (`statfs`), reads
+files that have no size (`read_file`), and runs the read-only commands of a
+hardcoded allowlist (`run`; on Windows `wmi`) without interpreting what they
+print. Store detection, probing, every manifest parser and the whole storage
+topology stay in Python: new rules, formats and platforms never need an agent
+rebuild.
 
 ## Transport
 
@@ -57,7 +61,8 @@ A request is `{"cmd": "...", ...}`. A response is either
 | `permission_denied` | `EACCES` or `EPERM` |
 | `io` | any other failure reading the file system, including a file that changed while it was read |
 | `cancelled` | the request was stopped by `cancel` (**new**; only when the connection is still open) |
-| `busy` | the agent is already running its maximum number of long sums; retry later (**new**) |
+| `busy` | the agent is already running its maximum number of long sums, or of `run` commands; retry later (**new**) |
+| `refused` | a `run` argument failed the validation of its argument kind, so nothing was run (**new**) |
 
 `error` is for people; clients branch on `code`. A client that meets an
 unknown code treats it as `io`.
@@ -430,74 +435,208 @@ request has that `id` (it already ended).
 The agent runs at most 4 long sums (`list_dir` with rollups, `sum_subtree`) at
 once, in total; the next gets `busy` and the client retries after a pause.
 
-### `storage_topology`
+### `read_file`
+
+**New.** Reads one file from its start to its end, up to `max` bytes, when the
+size is not known beforehand. It exists for `/proc` and `/sys`, whose files
+report `st_size` 0 (or 4096) and so cannot be read with `read_range`'s
+offset-and-length contract, and for small configuration files
+(`/etc/VERSION`, `iscsi_lun.conf`) where one round trip is better than a
+`measure` followed by a `read_range`.
 
 ```json
-{"cmd": "storage_topology"}
-{"ok": true, "topology": {
-  "version": 1, "platform": "synology",
-  "host": {"name": "nas-main", "unc_server": "\\\\nas-main", "os": "DSM 7.2.2"},
-  "collected_at": "2026-10-21T18:00:00Z",
-  "nodes": [
-    {"id": "disk:ZR5A1B2C", "type": "disk", "parent": null, "serial": "ZR5A1B2C",
-     "slot": "1", "size_bytes": 16000900661248, "health": "ok"},
-    {"id": "pool:3f7c1d2a-...", "type": "pool", "parent": null, "name": "Storage Pool 1",
-     "level": "shr", "size_bytes": 64003602644992, "health": "ok"},
-    {"id": "group:8c1f6a40-...", "type": "group", "parent": "pool:3f7c1d2a-...", "name": "md2",
-     "role": "data", "level": "raid5", "members": [{"disk": "disk:ZR5A1B2C", "role": "data"}]},
-    {"id": "vol:5b0e9c77-...", "type": "volume", "parent": "pool:3f7c1d2a-...", "mount": "/volume1",
-     "fs_type": "btrfs", "size_bytes": 0, "used_bytes": 0, "free_bytes": 0},
-    {"id": "share:backup", "type": "share", "parent": "vol:5b0e9c77-...", "name": "Backup",
-     "path": "/volume1/Backup", "unc": "\\\\nas-main\\Backup", "protocols": ["smb"]},
-    {"id": "lun:f48f1514-...", "type": "lun", "parent": "vol:5b0e9c77-...", "kind": "iscsi",
-     "thin": true, "size_bytes": 11811160064000, "allocated_bytes": 12094627905536,
-     "target": "PVEC",
-     "initiators": [{"iqn": "iqn.1993-08.org.debian:01:pve2", "authority": 3},
-                    {"iqn": "iqn.2000-01.com.synology:default.acl", "authority": 0, "default": true}],
-     "match": ["uuid:f48f1514-6072-4193-989e-9e7bfbe6d0e1", "naa:6001405f48f1514d6072d4193d989ed9"],
-     "platform": {"synology": {"devtype": 5, "vpd_unit_serial": "f48f1514-6072-4193-989e-9e7bfbe6d0e1"}}}
-  ]}}
+{"cmd": "read_file", "path": "/proc/mdstat", "max": 65536}
+{"ok": true, "data_b64": "UGVyc29uYWxpdGllcyA6...", "truncated": false}
 ```
 
-The host's storage as one generic hierarchy (disk, group, pool, volume,
-share, lun, vdisk, plus `vm` on a hypervisor) rather than Synology-shaped volume records. The node
-types, fields, id scheme, `platform` extras and the per-platform mappings
-are specified in [storage-topology.md](storage-topology.md); the Python
-validator is `filecat.topology`. In short:
+- `max` is optional: default 262144 (256 KiB), at most 4 MiB (4194304); a
+  larger value is `bad_request`, checked before anything is allocated. This
+  is the cap: the agent reads at most `max + 1` bytes (to know whether the
+  file goes on), returns at most `max`, and sets `truncated: true` when it
+  did. A client that needs more reads the file with `read_range`.
+- The path rules are those of every command (absolute, canonical, no `..`).
+  The final component is opened with `O_NOFOLLOW`, as in `measure`. The
+  file must be a regular file: procfs and sysfs files are, a directory, a
+  link, a device, a FIFO or a socket is `bad_request` (a FIFO would hang the
+  read). The read has a deadline of 10 seconds (a sysfs attribute of a dying
+  disk can block); on expiry the answer is `io`.
+- The reply is the bytes read, as `data_b64`. There is no `eof` field: a
+  `read_file` reply that is not `truncated` is the whole file.
+- It reaches no further than `read_range` and `measure` already do (any
+  file the agent's user can read). It is not a new privilege, only a new way
+  to read files that have no size.
 
-- `nodes` is flat; `parent` is an id or `null` and forms a containment tree
-  (group in pool, volume in pool or volume, share in volume, lun or vdisk in
-  a volume or pool). Disks have no parent: groups, pools and volumes list
-  `members` (`{"disk": id, "role": ...}`).
-- `id` is `<type>:<platform-native key>` (pool GUID, disk serial, file
-  system UUID, LUN UUID), never an array index or a name like `md2`, so it
-  survives rescans.
-- Sizes are bytes. `size_bytes` is logical for a `lun`/`vdisk` and
-  `allocated_bytes` the physical `st_blocks * 512`, never the 512 GiB `st_size`
-  of a Synology `ROD` file. A value the agent cannot tell is left out, not 0.
-- Native detail goes in `platform`, keyed by platform name
-  (`{"synology": {...}}`).
-- Hosts are linked through their disks, not through a server field. The agent
-  reports what it can see and the central side joins the snapshots of many
-  hosts (`topology.resolve_links`, storage-topology.md section 5):
-  - `match`, identifiers as `kind:value`: a LUN's `uuid:`; the NAA/WWN of a
-    disk an initiator sees (`naa:`, from the SCSI id; Windows `UniqueId`,
-    Linux `/dev/disk/by-id/scsi-3...`); a guest disk's `serial:`; a
-    hypervisor vdisk's `vmserial:` (the `serial=` of its VM config) and
-    `volid:` (`PVEC:0.0.1.scsi-...`); a VMM vdisk's `vmmdisk:`.
-  - `virtual: true` on a disk the host knows is provided by something else
-    (model `QEMU HARDDISK`, `Virtual disk`, an iSCSI disk).
-  - `backing: {host, id}` only when the agent really knows the other node.
-  - A `lun` reports its `target` and `initiators` (the LUN's ACL as `{iqn, authority}`); a
-    `vdisk` its `vm`, the id of a `vm` node. A hypervisor reports `vm` nodes
-    (Proxmox `vm:<vmid>`, Synology VMM `vm:<guest uuid>`).
-  - A Proxmox node adds `host.cluster` and may return the cluster's own
-    snapshot (shared storage; `host.kind: "cluster"`) as `cluster_topology`
-    next to `topology`.
-- A host the agent has no reader for answers `nodes: []` with its
-  `platform` (`linux`). Fields may be added without a protocol bump, so
-  clients keep unknown ones. This replaces the draft's `volumes` reply, which
-  no client has depended on yet.
+### `statfs`
+
+**New.** File system totals for the file system that holds `path`, from
+`statvfs(3)` and `statfs(2)`. It replaces the `statvfs` calls and the `df -T
+-B1` of the old `synology_storage.rs`.
+
+```json
+{"cmd": "statfs", "path": "/volume1"}
+{"ok": true, "total_bytes": 47000000000000, "free_bytes": 6006600000000,
+ "avail_bytes": 6006600000000, "block_size": 4096, "fs_type_id": 2435016766,
+ "flags": 4096, "files": 0, "files_free": 0}
+```
+
+| Field | Meaning |
+|---|---|
+| `total_bytes` | `f_blocks * f_frsize` |
+| `free_bytes` | `f_bfree * f_frsize`: free including the root-only reserve |
+| `avail_bytes` | `f_bavail * f_frsize`: what an ordinary user can still take |
+| `block_size` | `f_frsize` (the fundamental block size, not `f_bsize`) |
+| `fs_type_id` | `f_type` from `statfs(2)`, the file system's magic number as an integer (`0x9123683E` = 2435016766 is btrfs, `0xEF53` ext4, `0x58465342` xfs, `0x2FC12FC1` zfs); Python maps the number to a name |
+| `flags` | `f_flag` of `statvfs(3)` as the kernel's `ST_*` bit mask (`ST_RDONLY` 1, `ST_NOSUID` 2, `ST_NODEV` 4, `ST_NOEXEC` 8, `ST_NOATIME` 1024, ...); the agent passes the number through and Python names the bits |
+| `files`, `files_free` | `f_files`, `f_ffree`; 0 when the file system has no inode count (btrfs) |
+
+`path` may be any existing path (a file, a directory; it is followed, since
+`statfs` describes the mount that holds it). Used bytes are `total_bytes -
+free_bytes`; that is the client's arithmetic. A Windows agent answers from
+`GetDiskFreeSpaceExW` and leaves `fs_type_id` and `flags` out.
+
+### `run`
+
+**New.** Runs one command from a **hardcoded allowlist compiled into the
+agent**, and returns what it printed. It is the only way the agent starts a
+process, and the table of commands is the reviewable surface of that:
+[agent-allowlist.md](agent-allowlist.md).
+
+```json
+{"cmd": "run", "id": "lsblk_json"}
+{"ok": true, "id": "lsblk_json", "binary": "/bin/lsblk", "exit_code": 0, "timed_out": false,
+ "stdout": "{\"blockdevices\": [...]}", "stderr": "", "stdout_truncated": false,
+ "stderr_truncated": false, "duration_ms": 41}
+
+{"cmd": "run", "id": "btrfs_usage", "arg": "/volume1"}
+{"cmd": "run", "id": "smartctl_info_json", "arg": "/dev/sata1"}
+```
+
+- `id` is the entry's name in the allowlist (`lsblk_json`, `zpool_list`,
+  `btrfs_usage`, ...). An id the agent does not have is `bad_request`. The
+  field is called `id` for the same reason `list_dir`'s is: it names a thing
+  the client chose from a fixed vocabulary; a `run` is not cancellable and
+  takes no `progress_ms`.
+- **Nothing else comes from the network.** The agent builds the command line
+  from the entry: an absolute path to the binary and a fixed argument
+  vector. There is no shell, no `sh -c`, no globbing, no environment
+  expansion, no free-form argument. An entry may declare one **argument
+  kind**, and then, and only then, the request carries `arg`, which the agent
+  validates itself against live host state before using it as the last
+  argument:
+
+  | Kind | `arg` must be | Checked against |
+  |---|---|---|
+  | `btrfs_mount` | an absolute path | `/proc/self/mountinfo` or `/proc/mounts` at that moment lists it as a mount point whose type is `btrfs` |
+  | `block_device` | `/dev/<name>` | `<name>` is a whole disk listed in `/sys/block` (not a partition, not `loop*` or `ram*`) |
+  | `md_device` | `/dev/mdN` | `mdN` is listed in `/proc/mdstat` |
+  | `zfs_pool` | a pool name | the name is a pool in `zpool list -H -o name` (the agent asks the same way it runs entries) |
+
+  An `arg` that fails its check is refused (`code: "refused"`), and nothing
+  is run. An `arg` sent for an entry without a kind, or missing for one with a
+  kind, is `bad_request`. A kind's rule never allows a leading `-`, a
+  newline, a NUL, or a path that is not canonical. New kinds are code in the
+  agent, so adding one is a rebuild; that is on purpose.
+- **Environment.** The child gets an empty environment except `LC_ALL=C`,
+  `LANG=C` and a fixed `PATH=/usr/sbin:/usr/bin:/sbin:/bin`. Standard input is
+  `/dev/null`, the working directory `/`. Output is therefore the C
+  locale's: stable, untranslated, parsed by Python.
+- **Binary.** Each entry lists absolute candidate paths (`/bin`, `/sbin`,
+  `/usr/bin`, `/usr/sbin`, `/usr/local/bin`, `/usr/local/sbin`, and on
+  Synology `/usr/syno/bin`, `/usr/syno/sbin`: DSM, TrueNAS and Proxmox put the
+  same tool in different places). The first that exists and is executable is
+  used; none is `not_found`. The reply says which one ran (`binary`).
+- **Limits.** `stdout` is capped at 4 MiB and `stderr` at 64 KiB
+  (`stdout_truncated`, `stderr_truncated`; the rest is read and thrown away
+  so the child does not block). Each entry has a timeout, 20 seconds unless
+  it says otherwise; at the deadline the agent kills the child's process group
+  and answers `ok: true` with `timed_out: true`, `exit_code: null` and what
+  was printed so far. At most 2 commands run at once on the agent; a third
+  gets `busy`.
+- **Exit status.** A command that ran is `ok: true` whatever it returned:
+  `exit_code` is the child's, `null` with `signal` when a signal ended it.
+  `smartctl` returns a bit mask that is non-zero for a failing disk, and
+  `zpool status` and `lsblk` fail on a missing device while still printing,
+  so the client decides. `ok: false` is for requests the agent did not run.
+- **Text.** `stdout` and `stderr` follow the byte-string rule: the text with
+  invalid sequences replaced and, only when the bytes are not UTF-8, also
+  `stdout_b64` / `stderr_b64` with the exact bytes.
+- Read-only by construction: the table holds no command that writes, mounts,
+  repairs, scrubs, snapshots or changes a setting. Anything that could go in
+  the table is reviewed against that, in [agent-allowlist.md](agent-allowlist.md).
+
+### `capabilities`
+
+**New.** Which allowlist entries are usable on this host, so the client does
+not try each one and read errors.
+
+```json
+{"cmd": "capabilities"}
+{"ok": true, "allowlist_version": 1, "allowlist_sha256": "5c0e...64 hex digits...",
+ "platform": "linux",
+ "entries": [
+   {"id": "lsblk_json", "available": true, "binary": "/bin/lsblk", "version": "2.38.1",
+    "arg_kind": null},
+   {"id": "btrfs_usage", "available": true, "binary": "/sbin/btrfs", "version": "4.0",
+    "arg_kind": "btrfs_mount"},
+   {"id": "zpool_list", "available": false, "binary": null, "version": null, "arg_kind": null}]}
+```
+
+- `entries` has one element per allowlist entry the agent was built with
+  (and on Windows, per `wmi` entry, with `class` instead of `binary`),
+  `available: false` when no candidate path exists or is executable.
+- `version` is filled where it is cheap: an entry that declares a version
+  probe (a fixed `--version` vector, 3-second timeout) is run once, the first
+  number it prints returned as text, and the answer cached for the life of
+  the agent process; `null` otherwise, and when the probe fails. It is
+  informative: whether a feature exists is for the client to know from the
+  version (`lsblk -J` needs util-linux 2.27) or from trying the command.
+- `allowlist_version` is a number the agent bumps when entries are added or
+  changed; `allowlist_sha256` is the SHA-256 of the allowlist as compiled
+  (each entry's id, candidate paths, argument vector, argument kind, timeout,
+  joined in id order with NUL separators). A client can record it per agent
+  version, so a binary that was patched to run something else shows up as a
+  different hash. Neither is a secret and neither is secured against an agent
+  that lies: it is an audit aid, with the review of the table the real control.
+
+### `wmi`
+
+**New, Windows agents only.** Runs one allowlisted WMI query and returns the
+raw property maps; everything else (classification, joining a disk to its
+pool) is Python's, as everywhere. On any other platform the answer is
+`bad_request`.
+
+```json
+{"cmd": "wmi", "id": "storage_physical_disk"}
+{"ok": true, "id": "storage_physical_disk", "namespace": "root\\Microsoft\\Windows\\Storage",
+ "class": "MSFT_PhysicalDisk", "duration_ms": 120,
+ "rows": [{"UniqueId": "{...}", "FriendlyName": "Samsung SSD 990", "SerialNumber": "S6Z...",
+           "Size": "1000204886016", "MediaType": 4, "HealthStatus": 0, "BusType": 17}]}
+```
+
+- The table (id, namespace, class, the property list, a fixed `WHERE`-less
+  query) is compiled in, like `run`'s; the request carries no query text, no
+  property names and no argument. The agent issues `SELECT <fixed properties>
+  FROM <class>` through WMI's COM API (the Rust `wmi` crate), read-only.
+- Values are WMI's, unconverted: strings stay strings, booleans and 32-bit
+  numbers are JSON numbers and booleans, 64-bit integers are **decimal
+  strings** (WMI itself marshals `uint64` that way), dates keep the CIM
+  datetime text (`20261022090000.000000+000`), arrays are arrays, an embedded
+  object is left out. Python converts.
+- `capabilities` lists the `wmi` ids with `available` (the class exists in the
+  namespace on this Windows version) in place of `binary`. Timeout 30 seconds,
+  then `io`.
+
+### Storage topology is built in Python
+
+There is no `storage_topology` command (the first drafts had one that
+returned Synology volumes, and the version of this page before this change had
+one that returned the generic hierarchy). The agent does not parse
+`iscsi_lun.conf`, `/proc/mdstat`, `zpool status` or anything else for the
+topology: Python asks for the raw sources with `read_file`, `list_dir`,
+`statfs`, `sum_subtree` and `run`, and builds the generic hierarchy
+(`filecat.topology_collect`, [storage-topology.md](storage-topology.md)), so
+a new rule, file format or platform never needs an agent rebuild. A client
+that sends `storage_topology` to this agent gets `bad_request`.
 
 ## Path mapping (client side)
 
@@ -590,68 +729,56 @@ What the Rust side changes to match this page:
    8 MiB (`read_line` in the draft grows without limit); every response is
    flushed after the write (`StreamOwned` buffers); errors map from
    `io::ErrorKind`/`raw_os_error` to a `code` through one function.
-9. **`storage_topology`** is rewritten to the generic reply above; the list of
-   changes to `synology_storage.rs` follows. The TLS code (`tls.rs`) is
-   unchanged. Output of `cert_sha256` stays as the lowercase hex printed at
-   start; the client also accepts `AA:BB:...`.
+9. **`storage_topology` is gone** (the draft's reply, and the generic
+   hierarchy this page described for a while). The agent no longer parses
+   anything for the topology; see [Storage topology is built in
+   Python](#storage-topology-is-built-in-python). `synology_storage.rs` is
+   deleted ([below](#what-synology_storagers-becomes)). The TLS code
+   (`tls.rs`) is unchanged. Output of `cert_sha256` stays as the lowercase
+   hex printed at start; the client also accepts `AA:BB:...`.
+10. **New generic primitives**, none of which interprets a file system or a
+    tool's output:
+    - `read_file {path, max}`: to EOF up to `max` bytes (default 256 KiB,
+      at most 4 MiB), for `/proc` and `/sys` files that report size 0.
+      `O_NOFOLLOW`, regular files only.
+    - `statfs {path}`: `statvfs(3)` and `statfs(2)` totals, block size, file
+      system magic number, mount flags (replaces the draft's inline `statvfs`).
+    - `run {id[, arg]}`: a command from the **compiled-in allowlist**
+      ([agent-allowlist.md](agent-allowlist.md)): fixed absolute candidate
+      paths, fixed argument vector, no shell, `LC_ALL=C`, fixed `PATH`,
+      stdout and stderr capped, a timeout, exit code and binary path in the
+      reply. Its only variable input is an `arg` of a declared kind that the
+      agent validates itself (`btrfs_mount`: a path `/proc` currently lists as
+      btrfs). New error code `refused`.
+    - `capabilities`: which allowlist entries exist here, with the resolved
+      binary path, a cached version where cheap, and `allowlist_version` /
+      `allowlist_sha256` for audit.
+    - `wmi {id}` (Windows agents only): an allowlisted WMI query, raw
+      property maps back, through the Rust `wmi` crate.
+    All five are additive: `protocol` stays 1.
+11. **`run` and the argument rule.** The agent never builds a command from
+    request text. If the table gains a command that needs an argument, the
+    change is a new argument kind in the agent's source and a new row, both
+    reviewed, not a configuration.
 
-### Changes to `synology_storage.rs`
+### What `synology_storage.rs` becomes
 
-1. Replace `VolumeTopology` and `SynologyBlockDevice` with one `Node` struct
-   (the fields of storage-topology.md, `Option`s skipped when `None`,
-   `platform` a `serde_json::Value`) and return `Topology { version, platform,
-   host, collected_at, nodes }`.
-2. Ids: pool, volume and LUN ids from UUIDs (`blkid`, LVM VG, `mdadm`, the LUN
-   uuid), disk ids from serials; none from index or name. A node whose key
-   cannot be read is omitted and logged, not given an index.
-3. Add the layers the draft lacks: disks (`/sys/block`, serial, model, slot,
-   health), md arrays as `group`s from `/proc/mdstat` (`level`, `[UU_]` ->
-   `degraded`, `members`), the LVM VG as the `pool`, then `volume` with a
-   `parent` pool. The pool/volume link comes from the device mapper chain
-   under `/sys/block/dm-*/slaves`.
-4. `shares`: read the share definitions (name and `path`), not every
-   top-level folder, and emit `share` nodes with `path`, `unc`
-   (`\\<hostname>\<name>`) and `protocols`. The draft's `shares` held absolute
-   paths of any folder that did not start with `@` or `#`.
-5. `SynologyBlockDevice.kind` maps to `lun` (`san_blun`, `san_blun_thick`:
-   `thin` from devtype, `kind: "iscsi"`) or `vdisk` (`vmm_vdisk`:
-   `attached: true`, `vm`; `vmm_image`: `attached: false`). `provisioned_bytes`
-   becomes `size_bytes`; `allocated_bytes` keeps `st_blocks * 512`. `uuid`,
-   `lid`, devtype, `extent_files`, `is_meta_disk`, the `vguest.conf` fields move
-   into `platform.synology`. `root_volume` becomes `parent`; `backing_dir`
-   becomes `path`.
-6. `used_bytes` is `f_blocks - f_bfree` (what is in use), `free_bytes` is
-   `f_bavail` (what a user can take), `size_bytes` is `f_blocks`; the draft
-   derives `used` from `bavail`, which counts the reserve as used.
-7. Deterministic order (disks by slot, then pools, groups, volumes, shares,
-   luns, vdisks, each by id) so a rescan diffs cleanly; sizes as JSON integers.
-8. Links: for each LUN, `target` (the iSCSI target name) and
-   `match: ["uuid:<uuid>", "naa:<derived>"]`. Read `vpd_unit_serial` from the
-   LUN's stanza in `/volume1/@iSCSI/LUN/iscsi_lun.conf`, keep it in
-   `platform.synology.vpd_unit_serial` and derive the NAA id from it: `6001405`
-   plus the first 25 characters of the serial, every character that is not a
-   hex digit replaced by the hex digit of `ord(c) & 0xF` (`-` becomes `d`),
-   lowercase. `f48f1514-6072-4193-989e-9e7bfbe6d0e1` gives
-   `6001405f48f1514d6072d4193d989ed9`, which Proxmox shows as
-   `scsi-36001405f48f1514d6072d4193d989ed9` (confirmed on nas3;
-   `topology.naa_from_unit_serial` is the reference). Parse
-   `/volume1/@iSCSI/LUN/iscsi_lun_acl.conf` into each LUN's `initiators`: one
-   stanza per (LUN, initiator), keyed by `lun_uuid`, each giving
-   `{"iqn": <initiator>, "authority": <integer, as written>}`; the stanza whose
-   initiator is `iqn.2000-01.com.synology:default.acl` is the default for
-   initiators not listed, recorded as an entry with `"default": true`. Do not
-   interpret `authority` (0 and 3 are seen; 0 = no access and 3 = read/write is
-   a guess to verify). For each VMM vdisk,
-   `match: ["uuid:<uuid>", "vmmdisk:<uuid>"]` and `vm` pointing at a new `vm`
-   node per `@Repository/<vm_uuid>` (`vm:<uuid>`, name, `is_general_vm`, vCPU,
-   RAM). When the agent runs inside a Virtual DSM, mark its disks
-   `virtual: true` and report the VMM vdisk uuid as `vmmdisk:` if it can
-   see one. Leave `backing` empty. A host that is not a Synology answers
-   with `nodes: []` and `platform: "linux"` until a reader for it exists.
-9. Later agents: Proxmox needs disk serial and WWN (`lsblk -o SERIAL,WWN`),
-   `qm config` (`vm` nodes, `serial=` and volume ids on each vdisk), and the
-   cluster's shared storages; Windows needs `Get-Disk`'s `UniqueId` (NAA id)
-   and `SerialNumber` for each disk and `Get-InitiatorPort` for the host's
-   IQN; TrueNAS needs the disk serial (`lsblk`, `zpool status -P`).
-10. Reads stay read-only and root-only paths that cannot be read produce a
-   `health: "unknown"` node with a `detail`, not a failed command.
+Deleted, with the `mod synology_storage;` and the `StorageTopology` branch of
+`main.rs`. Its logic moves to Python, where it is a collector over raw
+sources (`src/filecat/topology_collect/synology.py`):
+
+| In `synology_storage.rs` | Now |
+|---|---|
+| `/proc/mounts` parsing, `statvfs` per `/volume*` | `read_file /proc/mounts` (or `/proc/self/mountinfo`), `statfs <mount>`; the volume node is built in Python |
+| shares = every top-level folder not starting with `@` or `#` | read the share definitions (Samba and NFS configuration, with the folder scan only as a flagged fallback) |
+| `iscsi_lun.conf` stanza parser, `devtype` to kind, `bytes=` | `read_file` of the same files; the parser is Python |
+| allocated bytes = `read_dir` + `st_blocks * 512` per LUN directory, `ROD` aside | `sum_subtree` of the LUN directory, `total_allocated_size` (never `total_size`: the 512 GiB `ROD`) |
+| `@Repository/<vm>/vguest.conf` and `vdisk.conf` (`serde_json`) | `read_file` and `json.loads` |
+| (none) disks, md arrays, LVM, NAA id, ACL, targets | `/sys/block`, `/proc/mdstat`, `/etc/lvm/backup`, `topology.naa_from_unit_serial`, `iscsi_lun_acl.conf`, all read through `read_file`, `list_dir` and the `mdadm_detail_scan`, `smartctl_info_json` entries of `run` |
+
+The order, ids and fields of the nodes the collector produces are the
+contract of [storage-topology.md](storage-topology.md) and are tested against
+recorded raw sources (`tests/data/raw`). Reads stay read-only; a source that
+cannot be read (a root-only file, a missing tool) leaves its nodes or fields
+out and puts a note in the snapshot's `collector.notes`, never a failed
+collection.

@@ -711,3 +711,33 @@ def test_redactions_contract(backend, backend_name):
     finally:
         for e in list(backend.redactions(root)) + list(backend.redactions(other)):
             backend.delete_redaction(e["id"])
+
+
+# --- storage topology store (filecat/topology_store.py) ----------------------------------
+
+def test_storage_topology_contract(backend, backend_name):
+    import uuid
+    h = f"contract-{uuid.uuid4().hex[:8]}"
+    doc = {"host": h.upper(), "platform": "synology", "scanned_at": "2026-10-22T09:00:00Z",
+           "topology": {"nodes": [{"id": "disk:Zé1", "type": "disk", "size_bytes": 2 ** 62}]}, "structure_hash": "a"}
+    try:
+        backend.put_topology(copy.deepcopy(doc))
+        got = backend.get_topology(h)                       # keyed by the lowercased host
+        assert got == {**doc, "key": h} and backend.get_topology(h.upper()) == got
+        backend.put_topology({**doc, "structure_hash": "b"})        # replaced, not added
+        assert [d["structure_hash"] for d in backend.topologies() if d["key"] == h] == ["b"]
+        for at in ("2026-10-22T09:00:00Z", "2026-10-21T09:00:00Z"):
+            backend.add_topology_history({"host": h, "scanned_at": at, "structure_hash": at, "diff": {"added": []}})
+        backend.add_topology_history({"host": h, "scanned_at": "2026-10-21T09:00:00Z", "structure_hash": "again"})
+        rows = backend.topology_history(h)
+        assert [r["scanned_at"] for r in rows] == ["2026-10-21T09:00:00Z", "2026-10-22T09:00:00Z"]
+        assert rows[0]["structure_hash"] == "again"         # one row per (host, scanned_at)
+        assert backend.topology_history("nobody-" + h) == []
+        assert list(backend.list(root=ROOT)) == [] and list(backend.list_dropped()) == []
+        backend.delete_topology(h)
+        backend.delete_topology(h)                          # absent: no error
+        assert backend.get_topology(h) is None and len(backend.topology_history(h)) == 2
+    finally:
+        backend.delete_topology(h)
+        for r in backend.topology_history(h):
+            backend._topology_remove("storage_topology_history", r["key"])

@@ -25,6 +25,7 @@ class MemoryBackend(Backend):
         self.member_sets: dict[str, Document] = {}
         self.set_rows: dict[str, list[Document]] = {}
         self._redactions: dict[str, Document] = {}
+        self._topology: dict[str, dict[str, Document]] = {s: {} for s in self.TOPOLOGY_STORES}
 
     def put(self, document: Document) -> None:
         self.docs[(document["root_id"], document["rel_path"])] = copy.deepcopy(document)
@@ -130,6 +131,15 @@ class MemoryBackend(Backend):
 
     def _redaction_remove(self, entry: Document) -> None:
         self._redactions.pop(entry["id"], None)
+
+    def _topology_rows(self, store: str) -> list[Document]:
+        return [copy.deepcopy(d) for d in self._topology[store].values()]
+
+    def _topology_put(self, store: str, doc: Document) -> None:
+        self._topology[store][doc["key"]] = copy.deepcopy(doc)
+
+    def _topology_remove(self, store: str, key: str) -> None:
+        self._topology[store].pop(key, None)
 
     def put_program(self, record: Document) -> None:
         self.programs[record["program_id"]] = copy.deepcopy(record)

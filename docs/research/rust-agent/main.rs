@@ -1,4 +1,3 @@
-mod synology_storage;
 mod tls;
 
 use base64::{engine::general_purpose::STANDARD as B64, Engine};
@@ -26,7 +25,6 @@ pub struct WalkPolicy {
 #[serde(tag = "cmd", rename_all = "snake_case")]
 enum Request {
     Auth { token: String },
-    StorageTopology,
     ConfigurePolicy { policy: WalkPolicy },
     ListDir { path: String },
     Measure {
@@ -349,10 +347,6 @@ fn handle_client(stream: TcpStream, tls_cfg: std::sync::Arc<rustls::ServerConfig
                 }
             }
             Ok(_) if !authed => serde_json::json!({"ok": false, "error": "unauthorized"}),
-            Ok(Request::StorageTopology) => {
-                let volumes = synology_storage::discover_all_volumes();
-                serde_json::json!({"ok": true, "volumes": volumes})
-            }
             Ok(Request::ConfigurePolicy { policy: new_policy }) => {
                 policy = new_policy;
                 serde_json::json!({"ok": true})

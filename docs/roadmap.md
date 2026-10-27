@@ -211,12 +211,21 @@ server keeps store detection, manifest verification, probing and Ollama.
   - [ ] Still to verify: what the ACL `authority` values mean (0 and 3 seen),
     and whether Virtual DSM sees its VMM vdisk uuid. Then Proxmox and TrueNAS
     readers, so truenas2's hand-written entry can go.
-  - [ ] Review the design (open questions at the end of the page), then:
-    `synology_storage.rs` brought into line, `AgentClient.storage_topology`
-    returning `Topology`, derived entries merged into `ShareMap` (config
-    wins), the `storage_topology` store (one document per host snapshot plus
-    history) and the viewer drill-down.
-- A `storage_pools` store and the storage hierarchy in the web viewer
+  - [x] Topology moves to Python: the agent keeps no parser. Protocol additions
+    `read_file`, `statfs`, `run` (hardcoded allowlist, validated argument kinds),
+    `capabilities`, `wmi` (Windows); `storage_topology` removed from the agent and
+    `synology_storage.rs` deleted ([agent-protocol.md](agent-protocol.md)). Python
+    collectors over a source fetcher (`topology_collect`: Synology DSM 7, generic
+    Linux; `RecordedSource` tests on `tests/data/raw/nas3`); the `storage_topology`
+    and `storage_topology_history` stores in every backend; `filecat storage
+    collect|show|links`.
+  - [ ] **Review [agent-allowlist.md](agent-allowlist.md) before the Rust agent is
+    built** (53 entries, 9 for v0.2.0; argument kinds, `midclt`, `pvesh`, `read_file`
+    scope, `allowlist_sha256`), and verify on a DSM host the items marked
+    "verify on DSM" in [storage-topology.md](storage-topology.md) section 3a.
+  - [ ] Then: the Rust agent with `read_file`, `statfs`, `run`, `capabilities`;
+    derived share entries merged into `ShareMap` (config wins); the viewer
+    drill-down; Proxmox and TrueNAS collectors.- A `storage_pools` store and the storage hierarchy in the web viewer
   (note 04): pool and volume capacity bars, SAN/VM tiles behind a toggle,
   inspector cards for backup stores, block storage and rollups, and a jump
   from a VM disk to its guest server's shares.

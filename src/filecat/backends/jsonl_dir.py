@@ -12,6 +12,7 @@ the single-file layout of jsonl.py. Inside DIR:
     <slug>.<root_id>.treemaps.json   its Graph view snapshots (filecat serve)
     <slug>.<root_id>.redactions.json its sticky redactions (no names)
     programs.jsonl                   installed-programs records
+    storage.json                     storage topology snapshots and their history
 
 Each root's three files are exactly a single-file jsonl catalog holding
 one root, managed by a JsonlBackend, so the format (one document per line,
@@ -36,7 +37,7 @@ from typing import Any, Iterable, Iterator
 
 from ..record import root_id
 from .base import Backend, Document
-from .jsonl import JsonlBackend, put_program, read_programs
+from .jsonl import JsonlBackend, put_program, read_programs, read_topology, write_topology
 
 # <slug>.<16 hex root_id>.jsonl -- the members file (".members.jsonl"),
 # summaries (".json") and temp files ("...jsonl.tmpNNN") do not match.
@@ -64,6 +65,7 @@ class JsonlDirBackend(Backend):
         self.path = Path(path)
         self.path.mkdir(parents=True, exist_ok=True)
         self.programs_path = self.path / "programs.jsonl"
+        self.storage_path = self.path / "storage.json"
         self._parts: dict[str, JsonlBackend] = {}  # root_id -> that root's catalog
 
     # --- per-root files ------------------------------------------------
@@ -237,6 +239,20 @@ class JsonlDirBackend(Backend):
         part = self._part(entry["root"], create=False)
         if part:
             part._redaction_remove(entry)
+
+    # --- storage topology: not per root, one file in the directory -----------
+    def _topology_rows(self, store: str) -> list[Document]:
+        return list(read_topology(self.storage_path).get(store, {}).values())
+
+    def _topology_put(self, store: str, doc: Document) -> None:
+        data = read_topology(self.storage_path)
+        data.setdefault(store, {})[doc["key"]] = doc
+        write_topology(self.storage_path, data)
+
+    def _topology_remove(self, store: str, key: str) -> None:
+        data = read_topology(self.storage_path)
+        if data.get(store, {}).pop(key, None) is not None:
+            write_topology(self.storage_path, data)
 
     # --- installed programs -------------------------------------------
     def put_program(self, record: Document) -> None:
