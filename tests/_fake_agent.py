@@ -68,8 +68,12 @@ SIGNATURE_WINDOW = 256
 KEY_SIGNATURES = (rb"-----BEGIN [^\n]*PRIVATE KEY-----[ \t\r]*(?:\n|\Z)",
                   rb"-----BEGIN PGP PRIVATE KEY BLOCK-----", rb"---- BEGIN SSH2 ENCRYPTED PRIVATE KEY ----",
                   rb"PuTTY-User-Key-File-")
-DENY_SHA256 = hashlib.sha256("\n".join(
-    DENY_POSIX + ENV_ALLOWED + DENY_WINDOWS + tuple(s.decode() for s in KEY_SIGNATURES)).encode()).hexdigest()
+# What deny_sha256 covers: the path rules, the env-file exceptions, the Windows rules and the key
+# signatures as docs/agent-protocol.md and secretfiles.SIGNATURES spell them, one per line (no
+# trailing newline). The Rust agent computes the same bytes (agent/src/scope.rs `deny_sha256`).
+SIGNATURE_LINES = ("-----BEGIN *PRIVATE KEY-----", "-----BEGIN PGP PRIVATE KEY BLOCK-----",
+                   "---- BEGIN SSH2 ENCRYPTED PRIVATE KEY ----", "PuTTY-User-Key-File-")
+DENY_SHA256 = hashlib.sha256("\n".join(DENY_POSIX + ENV_ALLOWED + DENY_WINDOWS + SIGNATURE_LINES).encode()).hexdigest()
 # Files the agent serves with credentials blanked (read_file only): path -> keys whose value becomes
 # REDACTED. A table in the binary so a file can be added; not configurable.
 REDACTED = b"<filecat-redacted>"
@@ -970,3 +974,9 @@ def _path_glob(pattern: str) -> str:
         else:
             out += _glob_re(c) + ("/" if i < len(comps) - 1 else "")
     return out
+
+
+if os.environ.get("FILECAT_TEST_AGENT_BIN"):
+    # Conformance run: every test that builds a FakeAgent gets the real Rust agent instead
+    # (tests/_real_agent.py, agent/README.md). The helpers above stay the executable specification.
+    from _real_agent import RealAgent as FakeAgent  # noqa: E402,F811
