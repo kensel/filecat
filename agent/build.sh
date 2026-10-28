@@ -16,11 +16,12 @@
 # the host gcc; the ARM targets use the Debian/Ubuntu cross compilers (`apt-get install
 # gcc-arm-linux-gnueabihf gcc-aarch64-linux-gnu`), which are also the linker driver (rustc supplies
 # the self-contained musl crt and libc.a, so the result is fully static). `qemu-user-static` runs the
-# ARM tests. Output stays in $CARGO_TARGET_DIR (default ~/.cache/filecat-agent-target), never in the
-# repository, so nothing needs committing or ignoring.
+# ARM tests. Output goes to $CARGO_TARGET_DIR (default agent/target, which is gitignored; on WSL set it to a path
+# on the Linux filesystem, e.g. ~/.cache/filecat-agent-target, which is much faster than /mnt/c).
+# The conformance build goes to $CARGO_TARGET_DIR-conformance (agent/target-conformance, ignored too).
 set -eu
 cd "$(dirname "$0")"
-export CARGO_TARGET_DIR="${CARGO_TARGET_DIR:-$HOME/.cache/filecat-agent-target}"
+export CARGO_TARGET_DIR="${CARGO_TARGET_DIR:-$PWD/target}"
 [ -f "$HOME/.cargo/env" ] && . "$HOME/.cargo/env"
 
 triple() {

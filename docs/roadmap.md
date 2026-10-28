@@ -160,6 +160,15 @@ server keeps store detection, manifest verification, probing and Ollama.
   - [x] The armv7 (`armv7-unknown-linux-musleabihf`) and aarch64 (`aarch64-unknown-linux-musl`)
     builds: `agent/build.sh armv7|aarch64|all`, fully static, cargo tests pass under qemu-user
     ([agent/README.md](../agent/README.md)). Not yet run on a real ARM NAS.
+  - [x] `filecat server` follow-ups: jobs wait for their first slot (`run_on_start` opts out), an
+    atomic lease per backend, a **Run now** button behind a password login with rate limiting
+    ([agent-server.md](agent-server.md#run-now-and-the-login-it-needs)), `agents enroll --token`.
+  - [x] GitHub Actions for the agent: clippy, cargo tests (including the allowlist/deny hash check),
+    the three static musl builds with a static-link check, checksums and artifacts, the ARM tests
+    under qemu on pushes to main, and the Python agent tests against the real binary on Linux.
+    Still to do: `cargo fmt` (the sources are not rustfmt-formatted: about 180 hunks, reformat in
+    one commit and then add `cargo fmt --check`); make the conformance job gating once its first
+    GitHub runs show which of the Linux failures seen in a root WSL checkout are real.
   - [ ] The Windows agent (phase 2: `wmi`, cloud placeholders, `ProductType` roots, Windows
     deny paths).
 - RPCs: list a directory (lstat, inode, `st_blocks`), measure (hash plus

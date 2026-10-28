@@ -85,7 +85,7 @@ jobs:
         with:
           python-version: "3.13"
       - run: uv sync --all-extras
-      - run: uv run pytest -q -rs tests/test_backend_contract.py tests/test_browse.py tests/test_config.py tests/test_mongo_rebuild.py
+      - run: uv run pytest -q -rs tests/test_backend_contract.py tests/test_lease_contract.py tests/test_browse.py tests/test_config.py tests/test_mongo_rebuild.py
 
   smb:
     name: SMB share
@@ -118,3 +118,110 @@ jobs:
           python-version: "3.13"
       - run: uv sync --all-extras
       - run: uv run pytest -q -rs tests/test_smb.py
+
+  agent:
+    name: agent (Rust)
+    runs-on: ubuntu-latest
+    env:
+      RUST_TOOLCHAIN: "1.98.0"
+    defaults:
+      run:
+        working-directory: agent
+    steps:
+      - uses: actions/checkout@v5
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: ${{ env.RUST_TOOLCHAIN }}
+          components: clippy
+          targets: x86_64-unknown-linux-musl,armv7-unknown-linux-musleabihf,aarch64-unknown-linux-musl
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: agent
+      - name: Cross compilers for the ARM builds (ring compiles a little C)
+        run: sudo apt-get update && sudo apt-get install -y gcc-arm-linux-gnueabihf gcc-aarch64-linux-gnu
+      # cargo fmt is not checked: the sources are not rustfmt-formatted yet (docs/roadmap.md)
+      - name: clippy
+        run: cargo clippy --all-targets -- -D warnings
+      - name: Expected allowlist/deny hashes match src/filecat/data/agent_expected.json
+        run: cargo test expected_json_matches_this_build
+      - name: cargo test (native x86_64, glibc)
+        run: cargo test
+      - name: Build the static musl agents (x86_64, armv7, aarch64)
+        run: ./build.sh all
+      - name: Each artefact is statically linked; checksums
+        run: |
+          mkdir -p dist
+          for pair in x86_64:x86_64-unknown-linux-musl armv7:armv7-unknown-linux-musleabihf aarch64:aarch64-unknown-linux-musl; do
+            short=${pair%%:*}; triple=${pair#*:}
+            bin="target/$triple/release/filecat-agent"
+            desc=$(file -b "$bin"); echo "$short: $desc"
+            echo "$desc" | grep -Eq 'statically linked|static-pie linked' || { echo "::error::$short is not static"; exit 1; }
+            cp "$bin" "dist/filecat-agent-$short"
+          done
+          (cd dist && sha256sum filecat-agent-* | tee SHA256SUMS)
+      - uses: actions/upload-artifact@v4
+        with:
+          name: filecat-agent-linux-static
+          path: |
+            agent/dist/filecat-agent-*
+            agent/dist/SHA256SUMS
+          if-no-files-found: error
+
+  agent-arm-tests:
+    # The ARM unit tests run under qemu-user and take 3-4 minutes each: not on every pull request.
+    name: agent tests under qemu (${{ matrix.target }})
+    if: github.event_name == 'push' || github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    strategy:
+      fail-fast: false
+      matrix:
+        target: [armv7, aarch64]
+    defaults:
+      run:
+        working-directory: agent
+    steps:
+      - uses: actions/checkout@v5
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: "1.98.0"
+          targets: armv7-unknown-linux-musleabihf,aarch64-unknown-linux-musl
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: agent
+          key: arm-${{ matrix.target }}
+      - run: sudo apt-get update && sudo apt-get install -y gcc-arm-linux-gnueabihf gcc-aarch64-linux-gnu qemu-user-static
+      - run: ./build.sh test ${{ matrix.target }}
+
+  agent-conformance:
+    # The Python agent tests against the real agent (tests/_real_agent.py starts the binary directly on Linux)
+    name: agent conformance (Python tests against the real agent)
+    runs-on: ubuntu-latest
+    # The first runs on GitHub decide whether this can gate: in a root WSL checkout a few of these
+    # fail for reasons still to be looked at (docs/agent-deploy.md, "Conformance in CI").
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@v5
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: "1.98.0"
+          targets: x86_64-unknown-linux-musl
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: agent
+          key: conformance
+      - name: Build the conformance agent (feature test-root)
+        id: build
+        run: echo "bin=$(cd agent && ./build.sh conformance | tail -n1)" >> "$GITHUB_OUTPUT"
+      - uses: astral-sh/setup-uv@v7
+        with:
+          python-version: "3.13"
+      - run: uv sync --all-extras
+      - name: Python agent tests against the real agent
+        env:
+          FILECAT_TEST_AGENT_BIN: ${{ steps.build.outputs.bin }}
+        run: >
+          uv run pytest -q -rs tests/test_agent_client.py tests/test_agent_scan.py
+          tests/test_rollup_privacy.py tests/test_rollup_stores.py tests/test_rollup_walk.py
+          tests/test_secret_files.py tests/test_store_fs.py tests/test_synology_space.py
+          tests/test_topology_collect.py

@@ -273,7 +273,7 @@ impl SumOpts<'_> {
         SumOpts { one_fs: true, patterns: &[], policy: None, top_vpath: Vec::new() }
     }
     fn needs_rel(&self) -> bool {
-        !self.patterns.is_empty() || self.policy.map_or(false, |p| !p.exclude.is_empty())
+        !self.patterns.is_empty() || self.policy.is_some_and(|p| !p.exclude.is_empty())
     }
 }
 
@@ -879,7 +879,7 @@ mod tests {
         std::fs::create_dir_all(f.root.join("t/locked")).unwrap();
         std::fs::write(f.root.join("t/locked/f"), b"x").unwrap();
         use std::os::unix::fs::PermissionsExt;
-        std::fs::set_permissions(f.root.join("t/locked"), std::fs::Permissions::from_mode(0)).unwrap();
+        std::fs::set_permissions(f.root.join("t/locked"), std::fs::Permissions::from_mode(0o0)).unwrap();
         let t = f.root.join("t");
         let r = sum_subtree(&f.scope, &Policy::default(), &Sums::default(), &req(json!({"path": t.to_string_lossy()})), &mut nosend()).unwrap();
         std::fs::set_permissions(f.root.join("t/locked"), std::fs::Permissions::from_mode(0o755)).unwrap();

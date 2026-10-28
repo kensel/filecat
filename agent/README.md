@@ -38,7 +38,7 @@ rustup target add x86_64-unknown-linux-musl     # once
 ```
 
 Run the agent by hand: `FILECAT_AGENT_TOKEN=secret ./filecat-agent --listen 127.0.0.1:9876`.
-Output goes to `$CARGO_TARGET_DIR` (default `~/.cache/filecat-agent-target`); a build inside a
+Output goes to `$CARGO_TARGET_DIR` (default `agent/target`, gitignored; on WSL set `CARGO_TARGET_DIR=~/.cache/filecat-agent-target`); a build inside a
 Windows-mounted checkout is slow otherwise. Cargo does not build on Windows hosts with Application
 Control; use WSL.
 
@@ -103,8 +103,11 @@ records `requests` and `wire` and presents the test certificate. Tests that need
 (simulated Windows attributes, planted unreadable files, canned `run` output, forced progress
 lines, recordings) are skipped with the hook's name; a few that assert the fake's own constants are
 listed in `NOT_AGAINST_THE_REAL_AGENT` in `_real_agent.py` with the reason. On a Linux machine the
-same variable with a local path runs the binary directly. Without the variable the tests use the
-fake, as always.
+same variable with a local path runs the binary directly (`FILECAT_TEST_AGENT_BIN=$(./build.sh
+conformance | tail -n1) python -m pytest tests/test_agent_client.py ...`); CI does exactly that
+(`agent-conformance` in `.github/workflows/ci.yml`; `agent` there runs clippy, `cargo test` and the
+static builds). Without the variable the tests use the fake, as always. `cargo clippy --all-targets
+-- -D warnings` is clean; `cargo fmt --check` is not (the sources predate rustfmt).
 
 ## Deciding things for the next phase
 

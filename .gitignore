@@ -234,6 +234,7 @@ tests/_fixtures/
 /filecat.toml
 /sanitize-aliases.local.toml
 
-# the Rust agent (build.sh writes to $CARGO_TARGET_DIR outside the repo; these cover a plain cargo build)
+# the Rust agent (build.sh writes to $CARGO_TARGET_DIR, default agent/target)
 /agent/target/
+/agent/target-conformance/
 /agent/dist/

@@ -212,7 +212,7 @@ fn whole_disk_name(arg: &str) -> Option<&str> {
 }
 
 fn mdstat_has(text: &str, name: &str) -> bool {
-    text.lines().any(|l| l.strip_prefix(name).map_or(false, |r| r.starts_with(" :")))
+    text.lines().any(|l| l.strip_prefix(name).is_some_and(|r| r.starts_with(" :")))
 }
 
 fn zfs_pool_name(arg: &str) -> bool {
