@@ -61,7 +61,53 @@ DENY_POSIX = ("/etc/shadow", "/etc/shadow-", "/etc/gshadow", "/etc/gshadow-", "/
               "/etc/sudoers.d", "/etc/ssh/ssh_host_*_key", "/etc/ssl/private", "/var/log", "/var/logs")
 ENV_ALLOWED = (".env.example", ".env.sample", ".env.template")
 DENY_WINDOWS = (r"%SystemRoot%\system32\config", r"%SystemRoot%\ntds")
-DENY_SHA256 = hashlib.sha256("\n".join(DENY_POSIX + ENV_ALLOWED + DENY_WINDOWS).encode()).hexdigest()
+# Private keys are denied by content: the head of the file (first SIGNATURE_WINDOW bytes, after an
+# optional UTF-8 BOM and leading ASCII whitespace) decides, whatever the name. A regex per rule,
+# written from docs/agent-protocol.md and not from filecat.secretfiles.
+SIGNATURE_WINDOW = 256
+KEY_SIGNATURES = (rb"-----BEGIN [^\n]*PRIVATE KEY-----[ \t\r]*(?:\n|\Z)",
+                  rb"-----BEGIN PGP PRIVATE KEY BLOCK-----", rb"---- BEGIN SSH2 ENCRYPTED PRIVATE KEY ----",
+                  rb"PuTTY-User-Key-File-")
+DENY_SHA256 = hashlib.sha256("\n".join(
+    DENY_POSIX + ENV_ALLOWED + DENY_WINDOWS + tuple(s.decode() for s in KEY_SIGNATURES)).encode()).hexdigest()
+# Files the agent serves with credentials blanked (read_file only): path -> keys whose value becomes
+# REDACTED. A table in the binary so a file can be added; not configurable.
+REDACTED = b"<filecat-redacted>"
+REDACT_FILES: dict[str, tuple[bytes, ...]] = {
+    "/usr/syno/etc/iscsi_target.conf": (b"username", b"password", b"mutual_username", b"mutual_password"),
+}
+# Windows file attributes of a file that is not on the device (filecat.cloudfiles): never opened.
+RECALL_ON_DATA_ACCESS, RECALL_ON_OPEN, OFFLINE = 0x400000, 0x40000, 0x1000
+NOT_LOCAL = RECALL_ON_DATA_ACCESS | RECALL_ON_OPEN | OFFLINE
+ARCHIVE = 0x20
+
+
+def private_key_head(head: bytes) -> bool:
+    """The deny list's content rule on the first bytes of a file."""
+    h = re.sub(rb"\A(?:\xef\xbb\xbf)?[ \t\r\n]*", b"", head[:SIGNATURE_WINDOW])
+    return any(re.match(sig, h) for sig in KEY_SIGNATURES)
+
+
+def redact_credentials(data: bytes, keys: tuple[bytes, ...]) -> bytes:
+    """Every `key=value` line whose key is in `keys` gets the marker as its value."""
+    out = []
+    for line in data.splitlines(keepends=True):
+        key, eq, rest = line.partition(b"=")
+        if eq and key.strip() in keys:
+            body = rest.rstrip(b"\r\n")
+            line = key + eq + REDACTED + rest[len(body):]
+        out.append(line)
+    return b"".join(out)
+
+
+def default_windows_roots(product_type: int, system_drive: str, fixed_volumes: list[str],
+                          disk_shares: list[str]) -> list[str]:
+    """The default allowed roots of a Windows agent: every local fixed volume, the system drive only
+    on a client (Win32_OperatingSystem.ProductType 1: Windows 10/11; 2 domain controller and 3
+    server leave it out, and so does an unknown type), plus the path of each disk share not already
+    under one of them."""
+    volumes = [v for v in fixed_volumes if product_type == 1 or v.lower() != system_drive.lower()]
+    return volumes + [s for s in disk_shares if not any(under(v, s, "\\", True) for v in volumes)]
 
 
 def _comp_match(pattern: str, name: str, fold: bool = False) -> bool:
@@ -239,6 +285,8 @@ class FakeAgent:
         self.statfs_data: dict[str, dict[str, Any]] = {}    # path -> the statfs reply fields
         self.subtree_overrides: dict[str, dict[str, Any]] = {}  # path -> a recorded sum_subtree reply (paths a test machine cannot have: a 512 GiB ROD)
         self.ran: list[tuple[str, str | None]] = []     # (id, arg) of every command the agent ran
+        self.attributes_after_list: dict[str, int] = {}     # served path -> attributes at read time, when they changed since list_dir
+        self.windows_attributes: dict[str, int] | None = None   # a Windows agent: served path -> file attribute bits (default ARCHIVE); None: POSIX
         self._ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
         self._ctx.load_cert_chain(cert, key)
         self._listener = socket.create_server(("127.0.0.1", 0))
@@ -381,7 +429,7 @@ class FakeAgent:
         return _Policy(raw)
 
     # --- commands ---
-    def real(self, req: dict[str, Any], content: bool = False) -> Path:
+    def real(self, req: dict[str, Any], content: bool | str = False) -> Path:
         """The served file of a request. The scope is checked on the canonical path (symlinks
         resolved), before the file is looked up, so a path outside gets `refused` whether or not
         it exists: the allowed roots for every command, the deny list for those that return content."""
@@ -404,7 +452,20 @@ class FakeAgent:
         if content and denied(canon):
             raise _Fail("refused", f"{path}: denied by agent policy")
         real.lstat()                    # FileNotFoundError -> not_found
+        if content and content is True and self._attributes(canon) & NOT_LOCAL:
+            raise _Fail("refused", f"{path}: not on this device (cloud placeholder), not read")
         return real
+
+    def _attributes(self, posix: str, listing: bool = False) -> int:
+        if self.windows_attributes is None:
+            return 0
+        if not listing and posix in self.attributes_after_list:
+            return self.attributes_after_list[posix]
+        return self.windows_attributes.get(posix, ARCHIVE)
+
+    def _head_is_key(self, path: Path) -> bool:
+        with open(path, "rb") as f:
+            return private_key_head(f.read(SIGNATURE_WINDOW))
 
     def _posix(self, real: Path) -> str:
         rel = real.relative_to(self.root).as_posix()
@@ -526,6 +587,8 @@ class FakeAgent:
                 entry["kind"] = "dir"
             elif not child.is_file(follow_symlinks=False):
                 entry["kind"] = "other"
+            if self.windows_attributes is not None:
+                entry["attributes"] = self._attributes(f"{base}/{child.name}", listing=True)
             if child.name in self.served_as:
                 raw = self.served_as[child.name]
                 entry.update(name=raw.decode("utf-8", "replace"), name_b64=base64.b64encode(raw).decode())
@@ -752,8 +815,16 @@ class FakeAgent:
         path = self.real(req, content=True)
         if path.is_symlink() or not path.is_file():
             raise _Fail("bad_request", "not a regular file")
-        with open(path, "rb") as f:
-            data = f.read(maximum + 1)
+        keys = REDACT_FILES.get(self._posix(path))
+        if keys:                                    # served with its credentials blanked
+            if path.stat().st_size > MAX_READ:
+                raise _Fail("io", "file too large")
+            data = redact_credentials(path.read_bytes(), keys)[:maximum + 1]
+        else:
+            if self._head_is_key(path):
+                raise _Fail("refused", f"{req.get('path')}: denied by agent policy")
+            with open(path, "rb") as f:
+                data = f.read(maximum + 1)
         return {"ok": True, "data_b64": base64.b64encode(data[:maximum]).decode(), "truncated": len(data) > maximum}
 
     def _statfs(self, req: dict[str, Any]) -> dict[str, Any]:
@@ -846,13 +917,22 @@ class FakeAgent:
         head_bytes = req.get("head_bytes", 8192)
         if policy not in ("auto", "full", "none") or not 0 <= head_bytes <= 1024 * 1024:
             raise _Fail("bad_request", "bad hash or head_bytes")
-        path = self.real(req, content=True)
+        path = self.real(req, content="measure")
         if not path.is_file():
             raise _Fail("bad_request", "not a regular file")
+        if self._posix(path) in REDACT_FILES:
+            raise _Fail("refused", f"{req.get('path')}: denied by agent policy")    # read_file only
+        if (attrs := self._attributes(self._posix(path))) & NOT_LOCAL:      # attributes first: no open
+            st = path.lstat()
+            return {"ok": True, "size": st.st_size, "mtime_ns": floor100(st.st_mtime_ns),
+                    "unread": "cloud_placeholder", "attributes": attrs}
         with open(path, "rb") as f:
             st = os.fstat(f.fileno())
             size, mtime_ns = st.st_size, floor100(st.st_mtime_ns)
-            head = f.read(min(size, head_bytes))
+            head = f.read(min(size, max(head_bytes, SIGNATURE_WINDOW)))
+        if private_key_head(head):                   # the head and the digest of a key never leave
+            return {"ok": True, "size": size, "mtime_ns": mtime_ns, "unread": "private_key"}
+        head = head[:head_bytes]
         resp: dict[str, Any] = {"ok": True, "size": size, "mtime_ns": mtime_ns,
                                 "head_b64": base64.b64encode(head).decode()}
         resp.update(hash_file(str(path), size, mtime_ns, policy))
@@ -867,6 +947,8 @@ class FakeAgent:
         path = self.real(req, content=True)
         if not path.is_file():
             raise _Fail("bad_request", "not a regular file")
+        if self._posix(path) in REDACT_FILES or self._head_is_key(path):
+            raise _Fail("refused", f"{req.get('path')}: denied by agent policy")
         with open(path, "rb") as f:
             f.seek(offset)
             data = f.read(length)

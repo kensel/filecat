@@ -62,7 +62,7 @@ A request is `{"cmd": "...", ...}`. A response is either
 | `io` | any other failure reading the file system, including a file that changed while it was read |
 | `cancelled` | the request was stopped by `cancel` (**new**; only when the connection is still open) |
 | `busy` | the agent is already running its maximum number of long sums, or of `run` commands; retry later (**new**) |
-| `refused` | a `run` argument failed the validation of its argument kind, so nothing was run; or a path is outside the agent's allowed roots, or a content read of a path on its deny list ([below](#allowed-roots-and-the-deny-list)) (**new**) |
+| `refused` | a `run` argument failed the validation of its argument kind, so nothing was run; or a path is outside the agent's allowed roots, or a content read of a path on its deny list, of a private key, of a credential-blanked file other than by `read_file`, or of a cloud placeholder ([below](#allowed-roots-and-the-deny-list)) (**new**) |
 
 `error` is for people; clients branch on `code`. A client that meets an
 unknown code treats it as `io`.
@@ -256,6 +256,7 @@ An entry:
 | `link_target` | links only: `readlink` text (byte-string rule: `link_target_b64`) |
 | `rollup` | rollups only: the summary below (optionally `rule`: the id of the first rule that folded something in, or `"marker"` or `"sticky"`; the client records it as `rollup.rule`) |
 | `error` | `{"code": "...", "message": "..."}` when the entry could not be `lstat`ed |
+| `attributes` | **Windows agents only** (left out elsewhere): the file's attribute bits from `GetFileAttributesW` / `FindFirstFileW`, as a number, for files and directories. Python reads the recall bits as `cloudfiles.py` does ([below](#cloud-placeholders-windows)) |
 
 An entry whose `lstat` fails is still listed: `name`, `kind` (from the
 directory entry's type when the OS gave one, else `other`) and `error`, with
@@ -323,6 +324,22 @@ fixed in protocol 1: cutoff 64 MiB (67108864), edge 1 MiB (1048576).
 | 1 B to 64 MiB | `sha256` of the whole file | same | none |
 | over 64 MiB | `sha256_partial` | `sha256` of the whole file | none |
 
+**Files the agent does not read.** Two kinds of file are answered with
+`size` and `mtime_ns` only, plus `unread` and no `head_b64`, `sha256` or
+`sha256_partial`, whatever `hash` and `head_bytes` say (the head and the digest
+of the bytes never leave the agent):
+
+| `unread` | When | Also |
+|---|---|---|
+| `private_key` | the head of the file is a private key ([Private keys](#private-keys-by-content)) | |
+| `cloud_placeholder` | Windows: the attributes include `RECALL_ON_DATA_ACCESS` (0x400000), `RECALL_ON_OPEN` (0x40000) or `OFFLINE` (0x1000) ([below](#cloud-placeholders-windows)) | `attributes`: the bits. The file is not opened: the sizes come from `lstat` |
+
+The client records such a file from its directory entry with
+`probe.secret: "private_key"` or `probe.cloud`, exactly as a scan of the same
+file from disk or over SMB does. A file on the deny list is not answered this
+way but with `refused` (it is not read at all, not even for a size); the
+client records that as `probe.secret: "denied"`, not as an error.
+
 The response carries at most one of `sha256` and `sha256_partial`, lowercase
 hex, and the field is left out (not `null`) when there is none. A partial
 digest never goes in `sha256`. `sha256_partial` is one SHA-256 fed, in this
@@ -360,7 +377,10 @@ reached; `eof` is true when the data ends at or past the file's end. An
 `offset` at or beyond the end returns empty data and `eof: true`. The path
 must be a regular file. A client reading more than 4 MiB sends several
 requests. Disk images, ZIP central directories and PE headers go through
-this.
+this. Like `measure`, it is `refused` ("denied by agent policy") on a private
+key (the agent reads the first 256 bytes of the file to see, whatever the
+offset), on a [credential-blanked file](#files-served-with-credentials-blanked)
+and, on Windows, on a cloud placeholder.
 
 ### `sum_subtree`
 
@@ -466,7 +486,10 @@ offset-and-length contract, and for small configuration files
   are confined the same way: to the agent's **allowed roots**, minus its
   **deny list** ([Allowed roots and the deny list](#allowed-roots-and-the-deny-list));
   outside them the answer is `refused`. It is not a new privilege, only a
-  new way to read files that have no size.
+  new way to read files that have no size. A private key is `refused` here
+  too, a cloud placeholder as well (Windows), and a
+  [credential-blanked file](#files-served-with-credentials-blanked) is served
+  with the credentials replaced, so the bytes returned are not the file's.
 
 ### `statfs`
 
@@ -607,7 +630,8 @@ not try each one and read errors.
   `env`, `env_file` or `default`, so the server can explain a `refused`
   ("the agent serves /volume* and /proc; /home is not one of them") instead of
   guessing. `deny_sha256` is the SHA-256 of the compiled-in deny list (the
-  rules of the next section, one per line in source order); an audit compares
+  path rules and the private key signatures of the next section, one per line
+  in source order); an audit compares
   it per agent version as it does `allowlist_sha256`. The deny list itself is
   not sent: it is in this document and in the binary.
 
@@ -632,8 +656,17 @@ separated by `:` on POSIX and `;` on Windows.
   `/usr/syno/etc/iscsi_*.conf`: the paths the Synology collector and StoreFS
   read. Other Linux: `/proc`, `/sys`, `/dev/disk`, `/etc/hostname`,
   `/etc/os-release`, `/etc/exports`, `/mnt`, `/srv`, `/media`. Windows: every
-  local fixed volume except the system volume, plus the paths of disk shares
-  ([agent-allowlist.md](agent-allowlist.md) section 13). *Set but empty*: no
+  local fixed volume (`GetLogicalDrives` and `GetDriveType` = `DRIVE_FIXED`,
+  evaluated at each request) **except the system drive**, plus the path of each
+  disk share (`Win32_Share` type 0, not special) not already under one of
+  those volumes. On a **Windows client** the system drive is included too. The
+  agent tells them apart by `Win32_OperatingSystem.ProductType` (WMI,
+  [agent-allowlist.md](agent-allowlist.md) section 13): 1 = workstation
+  (Windows 10 or 11, a client), 2 = domain controller, 3 = server; only 1
+  includes `C:\`. When the type cannot be read the agent assumes a server (the
+  narrower list), and `capabilities` reports `product_type` (the number, or
+  `null`) next to `allow_roots`. The fake agent's `default_windows_roots` is
+  the executable specification. *Set but empty*: no
   roots at all; every path is refused.
 - *Entries.* Absolute, with no `.` or `..`. `*` matches any run of
   characters **inside one path component** (never `/`), anywhere in a
@@ -673,12 +706,16 @@ canonical path **after** the roots and applies to the commands that return
 file **content**: `read_file`, `read_range` and `measure` (which returns a
 head and a digest of the bytes). `list_dir`, `sum_subtree` and `statfs` still
 see a denied file's name and size: a catalog needs to know a `.env` exists,
-and its size, even though no one may read it. Match on the canonical path:
+and its size, even though no one may read it. A rollup or `sum_subtree` counts
+a denied file in its totals as any other (they use `lstat` only,
+[rollups.md](rollups.md) section 3.2); outside a rollup a scan records it with
+name, size and times and `probe.secret: "denied"`. Match on the canonical path:
 
 | Platform | Denied |
 |---|---|
 | POSIX | `/etc/shadow`, `/etc/shadow-`, `/etc/gshadow`, `/etc/gshadow-` (password hashes); `/etc/sudoers` and `/etc/sudoers.d/**`; `/etc/ssh/ssh_host_*_key` (host private keys) and `/etc/ssl/private/**`; `/var/log/**` and `/var/logs/**` (logs hold tokens, paths and other users' activity) |
 | POSIX and Windows | any file named exactly `.env` or matching `.env.*`, anywhere, including inside shares and the agent's own `.env`, **except** `.env.example`, `.env.sample` and `.env.template` (conventionally secret-free; case-insensitive on Windows) |
+| Any file, by content | a **private key**: see [Private keys](#private-keys-by-content). Not a path rule: the file is opened and its first bytes decide |
 | Windows (case-insensitive, on the final path) | `%SystemRoot%\System32\config\**` (the SAM, SECURITY, SYSTEM, SOFTWARE and DEFAULT hives, their `.LOG*` and `RegBack`); `NTUSER.DAT*` and `UsrClass.dat*` anywhere (user hives and their logs); `%SystemRoot%\NTDS\**` (`ntds.dit`, `edb*.log`) and any `*.dit` anywhere |
 
 Decisions: `SYSVOL` is **not** denied (every domain user may read it, and it
@@ -690,6 +727,78 @@ A new entry is code and a rebuild. `capabilities` reports `deny_sha256`.
 The collectors read none of these paths, and StoreFS reads only backup and
 database manifests under the roots; `tests/test_synology_space.py` asserts it
 for the Synology collection.
+
+#### Private keys by content
+
+A file whose head is a private key is not read by `measure`, `read_range` or
+`read_file`, whatever it is called and wherever it is (inside the allowed
+roots). The agent reads the first 256 bytes, drops an optional UTF-8 byte
+order mark and then leading ASCII whitespace (space, tab, CR, LF), and tests
+the start of what is left:
+
+| Signature | Covers |
+|---|---|
+| `-----BEGIN ` ... `PRIVATE KEY-----` on the first line | PKCS#8 `PRIVATE KEY`, `RSA`, `EC`, `DSA`, `ENCRYPTED` and `OPENSSH PRIVATE KEY` |
+| `-----BEGIN PGP PRIVATE KEY BLOCK-----` | PGP/GPG secret keys |
+| `---- BEGIN SSH2 ENCRYPTED PRIVATE KEY ----` | ssh.com keys |
+| `PuTTY-User-Key-File-` | PuTTY `.ppk` (any version) |
+
+A public key (`ssh-ed25519 AAAA...`, `-----BEGIN PUBLIC KEY-----`), a
+certificate, a certificate request and a PGP public block are not matched. A key
+after something else in the file (a certificate first, a text before the
+header) and a key in UTF-16 are not found: the rule looks at the start only.
+`measure` answers `unread: "private_key"` (above) and the other two commands
+`refused` with `"<path>: denied by agent policy"`. The signature table is part
+of `deny_sha256`. The Python scan applies the same rule to the head it reads
+itself (`src/filecat/secretfiles.py`), so a local, SMB and agent scan agree.
+filecat also treats `.pfx`, `.p12` and `.kdbx` as secrets **by name**
+(encrypted binary containers with no header to test); that is the scan's rule
+and the agent does not know it.
+
+#### Files served with credentials blanked
+
+A small table compiled into the agent lists files that are readable but hold
+credentials; `read_file` serves them with the value of every credential line
+replaced by the literal `<filecat-redacted>`, so the server can see that the
+agent blanked them. First entry:
+
+| File | Lines blanked (key before the first `=`, compared after trimming) |
+|---|---|
+| `/usr/syno/etc/iscsi_target.conf` | `password`, `mutual_password`, `username`, `mutual_username` |
+
+`password=hunter2` is served as `password=<filecat-redacted>`; every other
+line, the line endings and the order are the file's own. The reply is
+therefore **not the bytes on disk**: its length differs from the `size`
+`list_dir` reports for the file, and nobody should compare them. Because
+offsets into the blanked text would not match the file, `read_range` and
+`measure` on such a file are `refused` ("denied by agent policy"); only
+`read_file` serves it, up to 4 MiB (a larger file is `io`). The table is not
+configurable and not part of the path rules; adding a file is code and a
+rebuild. `iscsi_host.conf`, which the Synology documentation also lists, is
+not in the table: nothing in this repository shows that it holds a credential,
+and the collector does not read it. If a DSM file turns out to hold CHAP
+secrets, it is added here. The collector ignores those keys; the topology
+never contains them or the marker.
+
+#### Cloud placeholders (Windows)
+
+A file whose attributes include `RECALL_ON_DATA_ACCESS` (0x400000),
+`RECALL_ON_OPEN` (0x40000) or `OFFLINE` (0x1000) is a OneDrive Files On-Demand,
+iCloud, Dropbox or tiered file: opening it makes the provider download it. The
+agent follows `filecat.cloudfiles`: it **never opens** such a file on a
+Windows host, wherever it is. It reads the attributes without opening
+(`GetFileAttributesW`, or the `FindFirstFile` data it already has). Listing
+is fine (`list_dir` reports `attributes`); `measure` answers `unread: "cloud_placeholder"` with
+`size`, `mtime_ns` and `attributes`; `read_file` and `read_range` are
+`refused` with `"<path>: not on this device (cloud placeholder), not read"`;
+`sum_subtree` and rollups count the file from the directory entry and never
+open it. `PINNED` (0x80000) and `UNPINNED` (0x100000) alone do not make a file
+unreadable. The client records `probe.cloud = {"provider": null, "state":
+"online-only" | "offline"}` as `cloudfiles.describe` does (the provider name
+comes from the Windows sync root registry, which the agent host knows and the
+server does not read), so the record of a file seen through an agent is the
+record of the same file seen over SMB. There is no way to ask the agent to
+hydrate a file.
 
 ### `wmi`
 
@@ -866,6 +975,36 @@ What the Rust side changes to match this page:
     request text. If the table gains a command that needs an argument, the
     change is a new argument kind in the agent's source and a new row, both
     reviewed, not a configuration.
+13. **Private keys by content** ([above](#private-keys-by-content)). `measure`,
+    `read_range` and `read_file` read the first 256 bytes of the file they are
+    about to serve, apply the signature table (BOM, leading whitespace, the four
+    signatures) and answer `unread: "private_key"` (`measure`: `size` and
+    `mtime_ns` from `fstat`, no `head_b64`, no digest) or `refused` /
+    `"<path>: denied by agent policy"` (the others). Add the signatures to the
+    input of `deny_sha256`. `tests/_fake_agent.py` (`private_key_head`) is the
+    specification; the Python client already handles `unread`.
+14. **Credential blanking** ([above](#files-served-with-credentials-blanked)).
+    A small table `path -> keys` (first entry `/usr/syno/etc/iscsi_target.conf`:
+    `password`, `mutual_password`, `username`, `mutual_username`); `read_file`
+    of a listed file replaces each such line's value with `<filecat-redacted>`
+    (the key, the `=`, line endings and every other line unchanged), while
+    `read_range` and `measure` of it are `refused`. A file over 4 MiB is `io`.
+    Spec: `redact_credentials` and `REDACT_FILES` in the fake agent.
+15. **Windows: product type, roots and placeholders.**
+    - Default roots: local fixed volumes, the system drive only when
+      `Win32_OperatingSystem.ProductType` is 1; plus the disk-share paths not
+      under a volume; assume a server when the type is unknown; report
+      `product_type` in `capabilities` (`default_windows_roots` in the fake
+      agent).
+    - Add the `ProductType` property to the `os_info` WMI entry
+      ([agent-allowlist.md](agent-allowlist.md)).
+    - `list_dir` reports `attributes` for every entry; files with a recall or
+      offline bit are never opened (not by `measure`, `read_file`, `read_range`,
+      hashing, nor `sum_subtree`); `measure` answers `unread:
+      "cloud_placeholder"` with `attributes` ([above](#cloud-placeholders-windows)).
+      Use `GetFileAttributesW` / `FindFirstFileW` data, never `CreateFileW`,
+      to decide. SYSVOL on a domain controller stays readable (NTDS is on the
+      deny list).
 
 ### What `synology_storage.rs` becomes
 

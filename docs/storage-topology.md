@@ -156,7 +156,7 @@ a device before the agent relies on them.
 | pool | the space history's `<space>` (its LVM uuid is the VG id of `/etc/lvm/backup/vgN`); without it the LVM VG over the md arrays, or the md array itself | one array: the pool's `level` is that array's (raid10 on nas3, raid5 on NAS2); several arrays in one LVM: `shr` (with the history the group nodes keep each array's real level; without it `shr` is a guess from the array count); name "Storage Pool 1" is not stable, so it is a field |
 | volume | `/proc/mounts` lines under `/volumeN`; `statvfs`; `blkid` | `device` is `/dev/mapper/cachedev_0` when SSD cache is on; `vg1/volume_1` in `platform` |
 | share | `/etc/samba/smb.conf` (confirmed on nas3), `/etc/exports` for NFS | skip `@*`, `#*`; `unc = \\<host>\<name>`; `path = /volumeN/<name>` |
-| lun | `/usr/syno/etc/iscsi_lun.conf` stanzas (`rootpath` = the volume), `devtype` 5 (BLUN, thin) and 11 (BLUN_THICK) on btrfs volumes; 1 on ext4 (NAS2, `FILE` and `THIN` directories) | `kind: iscsi`; `thin` = devtype 5, or `pre_alloc=no` where there is no BLUN directory; `size_bytes` = `bytes=`; `detail` = the admin's `description`; `allocated_bytes` = sum of `st_blocks * 512` in the UUID directory (never `st_size`: the 512 GiB `ROD` sparse file); `path` = `@iSCSI/LUN/BLUN[_THICK]/<uuid>`. An ext4 LUN's backing layout is not known, so it has neither `path` nor `allocated_bytes` (and a note) |
+| lun | `/usr/syno/etc/iscsi_lun.conf` stanzas (`rootpath` = the volume), `devtype` 5 (BLUN, thin) and 11 (BLUN_THICK) on btrfs volumes; 1 on ext4 (NAS2, `FILE` and `THIN` directories) | `kind: iscsi`; `thin` = devtype 5, or `pre_alloc=no` where there is no BLUN directory; `size_bytes` = `bytes=`; `detail` = the admin's `description`; `allocated_bytes` = sum of `st_blocks * 512` in the UUID directory (never `st_size`: the 512 GiB `ROD` sparse file); `path` = `@iSCSI/LUN/BLUN[_THICK]/<uuid>`. An ext4 LUN (devtype 1) is a directory named by its uuid: `<rootpath>/@iSCSI/LUN/FILE/<uuid>` when `pre_alloc=yes` (thick), else `.../THIN/<uuid>`, the other tried when it is missing (a note when neither is); `path` and `allocated_bytes` (sum_subtree `total_allocated_size`; files can be sparse) as for BLUN. What the directory holds is not read |
 | vdisk | `devtype` 7 (VDISK_BLUN); `name=vdisk.<vm>.<vdisk>.<bus>.<unit>` attached, `name=image.<image>.<vol>...` template | attached: `vm` from `@Repository/<vm_uuid>/vguest.conf`, `attached: true`; image: `attached: false`, no `vm`; vCPU, RAM, `is_meta_disk`, `is_general_vm` go in `platform.synology` |
 | vm | `@Repository/<vm_uuid>/vguest.conf` | `vm:<uuid>`, name, vCPU and RAM in `platform.synology`; Virtual DSM has `is_general_vm: false` |
 | links | LUN: `target` (every target it is mapped to, joined by `, `; each target with its `tid`, `iqn`, `enabled` and the LUN number on it in `platform.synology.targets`), `initiators` from the LUN ACL, `match: ["uuid:<uuid>", "naa:<derived>"]` and `platform.synology.vpd_unit_serial`; vdisk: `match: ["uuid:<uuid>", "vmmdisk:<uuid>"]` and `vm` | the NAA id derives from `vpd_unit_serial` by the rule below (verified on nas3); the ACL is `iscsi_lun_acl.conf` (`authority` still to verify) |
@@ -189,7 +189,12 @@ authority=0
   its `vpd_unit_serial` or else its `uuid:` key.
 - **Where the files are.** `/usr/syno/etc/` holds `iscsi_lun.conf`, `iscsi_lun_acl.conf`,
   `iscsi_target.conf`, `iscsi_mapping.conf` and others (`iscsi_host*.conf`,
-  `iscsi_setting.conf`). `/usr/syno/etc/iscsi_lun.conf` is the host-wide union of all LUNs,
+  `iscsi_setting.conf`). `iscsi_target.conf` holds the CHAP `username`, `password`,
+  `mutual_username` and `mutual_password` of each target: the agent serves it with
+  those values replaced by `<filecat-redacted>` (docs/agent-protocol.md, "Files served
+  with credentials blanked"; the nas3 fixture is recorded that way), and the collector
+  takes only `tid`, `name`, `iqn` and `enabled` out of a stanza. `iscsi_host.conf` is
+  not read and not in the agent's table: nothing recorded here shows it holds a secret. `/usr/syno/etc/iscsi_lun.conf` is the host-wide union of all LUNs,
   each stanza with `rootpath=/volumeN`; `/volumeN/@iSCSI/LUN/iscsi_lun.conf` holds only that
   volume's (on nas3, with one LUN volume, the two are identical; on NAS2 the volume1 copy lacks the
   volume2 stanzas). The collector places each LUN on its `rootpath` volume, uses the per-volume
@@ -315,7 +320,7 @@ asked for its version once per host (`smartctl_version`): DSM 7 ships 6.5, which
 so below 7.0 the collector runs only the text form. Nothing here uses `lsblk` or `findmnt`,
 which DSM does not have. LUN `health`, VM `health` are not collected: nothing readable says
 them. Settled on nas3 and NAS2, still open: whether `smartctl -i` needs `-d sat` on a DSM disk,
-and what an ext4 LUN's `FILE` / `THIN` directories hold.
+and the files inside an ext4 LUN's directory (only summed, never read).
 
 ## 3b. Windows file server collector (planned, not written)
 

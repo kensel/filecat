@@ -12,7 +12,8 @@ import sys
 import time
 from typing import Any
 
-from . import aliases, fsource, preflight, record, redaction, rollup, rootcase, rootinfo
+from . import (aliases, cloudfiles, fsource, preflight, record, redaction, rollup, rootcase, rootinfo,
+               secretfiles)
 from .agent_client import AgentError, Measurement
 from .backends import open_backend
 from .backends.base import Backend
@@ -33,26 +34,46 @@ def measure_file(root: str, rel_path: str, abs_path: str, st: os.stat_result,
     Errors are recorded on the document, never raised. A file on a
     filecat-agent (abs_path is an fsource.RemotePath) is measured by one agent
     call that returns the head, the digest and the size and mtime they
-    describe; the probes then read what else they need through the agent."""
+    describe; the probes then read what else they need through the agent.
+    A secret (secretfiles.py: a private key, a keystore, a file the agent
+    refuses to read) is recorded from its directory entry alone, before any
+    hash, sample or probe exists."""
     size = st.st_size
     mtime_ns = st.st_mtime_ns
     remote = abs_path if isinstance(abs_path, fsource.RemotePath) else None
     head = b""
     measured: Measurement | None = None
     measure_error: OSError | None = None
-    if remote is not None and (size > 0 or options.hash == "full"):
-        try:
-            measured = remote.measure(options.hash, options.timeout_for(root) + 10)
-        except OSError as e:
-            measure_error = e
-        else:
-            head = measured.head
-            size, mtime_ns = measured.size, measured.mtime_ns   # what the digest was computed from
-            remote.size = size
     ctime_ns = getattr(st, "st_birthtime_ns", None)
     if ctime_ns is None:
         ctime_ns = st.st_ctime_ns
     name = rel_path.rsplit("/", 1)[-1] if rel_path else os.path.basename(root.rstrip("\\/")) or root
+
+    def unopened(probe: dict[str, Any]) -> dict[str, Any]:
+        doc = secretfiles.listed(root, rel_path, name, size, mtime_ns, ctime_ns, probe, identifier)
+        fsource.apply_stat_extras(doc, st)
+        return doc
+
+    if secretfiles.keystore_name(name):
+        return unopened({"secret": "keystore"})
+    if remote is not None and (size > 0 or options.hash == "full"):
+        try:
+            measured = remote.measure(options.hash, options.timeout_for(root) + 10)
+        except AgentError as e:
+            if e.code == "refused" and "denied by agent policy" in e.message:
+                return unopened({"secret": "denied"})       # the agent's deny list: .env and the like
+            measure_error = e
+        except OSError as e:
+            measure_error = e
+        else:
+            size, mtime_ns = measured.size, measured.mtime_ns   # what the digest was computed from
+            remote.size = size
+            if measured.unread == "private_key":
+                return unopened({"secret": "private_key"})
+            if measured.unread == "cloud_placeholder":
+                return unopened({"cloud": cloudfiles.describe(str(remote), measured.attributes)
+                                 or {"provider": None, "state": "online-only"}})
+            head = measured.head
 
     doc = record.new_document(root, rel_path, kind="unknown", size=size,
                                mtime_ns=mtime_ns, ctime_ns=ctime_ns, name=name)
@@ -66,6 +87,9 @@ def measure_file(root: str, rel_path: str, abs_path: str, st: os.stat_result,
                 head = f.read(HEAD_BYTES)
         except OSError as e:
             record.add_error(doc, "read", e)
+        else:
+            if secretfiles.private_key_in(head):
+                return unopened({"secret": "private_key"})      # before any hash, sample or probe
 
     if size == 0:
         # dir / link / empty are decided before probe_file is ever called

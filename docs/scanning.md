@@ -101,7 +101,21 @@ Some kinds are read past the 8 KiB head, but each read is capped:
 | **Backup data**: ABB pools, Hyper Backup `Pool/` etc., Veeam `.vbk/.vib/.vrb`, Windows Backup zips, system-image VHDs, duplicity volumes, Google Workspace items, Thunderbird profile copies | name, size, times, `kind: data`, `probe.backup_data: <format>`; no hash | `--measure-backups` |
 | **ABB virtual view** (`ActiveBackupData`) | the folder only, not walked | `--measure-backups` |
 | **Database data files** (PostgreSQL, MySQL/MariaDB, MongoDB, SQL Server) | the same, with `probe.db_data: <engine>` | `--measure-databases`, and only quiet files: unmodified for 90 days and at least 1 MiB (SQL Server: 1 hour) |
-| **Cloud placeholders** (OneDrive, iCloud, Dropbox online-only, offline/tiered files) | from the directory entry, with `probe.cloud` | `filecat enrich --hydrate`; never during a scan, even with `--force` |
+| **Cloud placeholders** (OneDrive, iCloud, Dropbox online-only, offline/tiered files; on a Windows agent too: `list_dir` reports the attribute bits) | from the directory entry, with `probe.cloud` | `filecat enrich --hydrate`; never during a scan, even with `--force` |
+| **Private keys**: the head of the file is `-----BEGIN ... PRIVATE KEY-----` (PKCS#8, RSA, EC, DSA, ENCRYPTED, OPENSSH), a PGP private key block, an SSH2 encrypted key or a PuTTY `.ppk` | name, size, times and the type the name suggests; `probe.secret: "private_key"`; no hash, no head, no sample, no probe, never sent to Ollama | nothing: there is no switch |
+| **Keystores by name**: `.pfx`, `.p12` (PKCS#12), `.kdbx` (KeePass) | the same, `probe.secret: "keystore"`; decided from the name, before any read | nothing |
+| **Files the agent refuses to read** (its deny list: `.env` and `.env.*` except the examples, shadow, sudoers, host keys, `/var/log`, Windows hives, `*.dit`) | the same, `probe.secret: "denied"`; not a scan error | nothing |
+
+A private key is recognised from its first bytes (`secretfiles.py`): after an
+optional UTF-8 byte order mark and leading whitespace, within the first 256
+bytes. This is done on every scan path: a local or SMB scan checks the 8 KiB
+head it reads anyway, before hashing it; an agent scan asks `measure`, and the
+agent checks the head itself and answers the size and times with
+`unread: "private_key"`, never the head or a digest (docs/agent-protocol.md).
+A public key, a certificate, a CSR or a PGP public block is hashed as usual.
+A key that follows something else in the file (a certificate first, as in a
+combined PEM) is not found, and neither is a key in a UTF-16 file. The size
+and times stay in the record, and a rollup still counts these files.
 | Skipped and excluded paths | not recorded | `--no-default-skips`; remove the `exclude` |
 | Unchanged files on a rerun | the old record is kept | `--force` |
 

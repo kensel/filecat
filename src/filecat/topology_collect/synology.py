@@ -54,6 +54,7 @@ SPACE_DIR = "/etc/space"
 SMARTCTL_JSON = (7, 0)          # smartmontools before this has no --json
 DEFAULT_ACL_IQN = "iqn.2000-01.com.synology:default.acl"
 SECTOR = 512
+EXT4_DEVTYPE = 1                                # ext4 volumes: a directory per LUN in FILE (thick) or THIN
 DEVTYPE_DIRS = {5: "BLUN", 11: "BLUN_THICK", 7: "VDISK_BLUN"}
 _VOLUME = re.compile(r"^/volume(\d+)$")
 _DISK = re.compile(r"^(sata\d+|sas\d+|nvme\d+n\d+|sd[a-z]+)$")      # DSM names disks sataN, or sdX on older models
@@ -809,8 +810,8 @@ class _Collector:
         luns, vdisks = [], []
         for p in stanzas:
             devtype = _int(p.get("devtype"))
-            if devtype not in DEVTYPE_DIRS:     # ext4 volumes (devtype 1 seen) back LUNs with FILE and THIN
-                self.r.note(f"{mount}: LUNs of devtype {p.get('devtype')} (ext4 FILE/THIN layout): "
+            if devtype not in DEVTYPE_DIRS and devtype != EXT4_DEVTYPE:
+                self.r.note(f"{mount}: LUN {p.get('name', p['uuid'])} has devtype {p.get('devtype')}: "
                             "backing path and allocated bytes are not collected")
             (vdisks if devtype == 7 else luns).append((p, devtype))
         luns.sort(key=lambda t: (_int(t[0].get("lid")) or 0, t[0]["uuid"]))
@@ -826,6 +827,11 @@ class _Collector:
                 if alloc is not None:
                     node["allocated_bytes"] = alloc
                 node.update(thin=devtype == 5, kind="iscsi", path=f"{lun_dir}/{sub}/{uuid}")
+            elif devtype == EXT4_DEVTYPE:
+                node.update(kind="iscsi", **({"thin": p["pre_alloc"] == "no"} if p.get("pre_alloc") in ("yes", "no") else {}))
+                found = self.ext4_lun(lun_dir, uuid, p.get("pre_alloc") == "yes", node["name"])
+                if found:
+                    node["path"], node["allocated_bytes"] = found
             else:                                # thin only where the stanza says it is not pre-allocated
                 node.update(kind="iscsi", **({"thin": p["pre_alloc"] == "no"} if p.get("pre_alloc") in ("yes", "no") else {}))
             if p.get("description"):
@@ -918,6 +924,22 @@ class _Collector:
                 node["match"] = [f"uuid:{uuid}"]
             node["platform"] = {PLATFORM: plat}
             self.nodes["vdisk"].append(node)
+
+    def ext4_lun(self, lun_dir: str, uuid: str, thick: bool, name: str) -> tuple[str, int] | None:
+        """(path, allocated bytes) of an ext4 file-backed LUN: its own directory named by the
+        uuid, in FILE when pre_alloc=yes (thick), else THIN; the other one is tried when the
+        first is not there. What the directory holds is not read, only summed
+        (total_allocated_size: the files can be sparse)."""
+        order = ("FILE", "THIN") if thick else ("THIN", "FILE")
+        for sub in order:
+            path = f"{lun_dir}/{sub}/{uuid}"
+            try:
+                return path, self.src.sum_subtree(path).total_allocated_size
+            except Exception:
+                continue
+        self.r.note(f"{name}: no {order[0]}/{uuid} or {order[1]}/{uuid} directory under {lun_dir}: "
+                    "backing path and allocated bytes not collected")
+        return None
 
     def allocated(self, path: str) -> int | None:
         """Physical bytes behind a LUN directory: st_blocks * 512 summed (sum_subtree's

@@ -52,6 +52,13 @@ Design notes:
   never opened -- reading it would download it -- and is recorded from its
   directory entry with probe.cloud; --force does not change that. Files in
   a sync root that are on the device are measured and get probe.cloud too.
+  Through a Windows agent the same: list_dir carries the attribute bits, the
+  agent's measure answers metadata only for such a file, and the record is
+  the same probe.cloud.
+* Secrets (secretfiles.py): measure_file checks the name (.pfx, .p12, .kdbx),
+  then the head (private key signatures) before any hash, sample or probe;
+  an agent's refusal ("denied by agent policy") ends in a metadata-only
+  record with probe.secret, not an error.
   A rescan measures a file recorded while cloud-only once it is local.
 * Agent scans (fsource.py). With a `source`, the tree is read through a
   filecat-agent: its listing entries and stats stand in for os.DirEntry and

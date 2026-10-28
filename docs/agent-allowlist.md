@@ -456,7 +456,7 @@ property is a column the server parses). Association class names and the
 
 | id | Status | Namespace and class | Properties | Why |
 |---|---|---|---|---|
-| `os_info` | needed | C `Win32_OperatingSystem` | CSName, Caption, Version, BuildNumber, LastBootUpTime | `host.name` (the machine name the catalog roots use) and `host.os` ("Windows Server 2022 10.0.20348") |
+| `os_info` | needed | C `Win32_OperatingSystem` | CSName, Caption, Version, BuildNumber, LastBootUpTime, **ProductType** | `host.name` (the machine name the catalog roots use) and `host.os` ("Windows Server 2022 10.0.20348"). `ProductType` (1 workstation, 2 domain controller, 3 server) also decides the agent's default allowed roots: the agent runs this query itself at start and reports the number as `capabilities.product_type` |
 | `smb_share` | needed | SMB `MSFT_SmbShare` | Name, Path, Description, ScopeName, Special, Temporary, ShareState, ShareType, FolderEnumerationMode, CachingMode, ContinuouslyAvailable, EncryptData | the `share` nodes: the folder behind each name, with `ScopeName` (a clustered file server has one scope per role; `*` is the node itself) and `Special` (`ADMIN$`, `C$`, `IPC$`: skipped) |
 | `win32_share` | needed | C `Win32_Share` | Name, Path, Type, Description | the same shares where the SMB namespace is missing, and `Type` (0 disk, 1 print queue, 2 device, 3 IPC, with 0x80000000 set for the administrative ones) to tell a folder share from a printer or `IPC$`; both are read and merged by name |
 | `storage_volume` | needed | S `MSFT_Volume` | ObjectId, UniqueId, DriveLetter, FileSystem, FileSystemLabel, Size, SizeRemaining, HealthStatus, OperationalStatus, Path, DedupMode | the `volume` nodes: `mount` (`D:\` or the volume GUID path), `fs_type` (ntfs, refs), size and free space, health; `DedupMode` says whether Data Deduplication is on without the DD namespace |
@@ -489,13 +489,21 @@ part of the collector, not of the agent.
 
 Read scope on Windows (section 14a, and the deny list in
 [agent-protocol.md](agent-protocol.md)): the default allowed roots are every
-**local fixed volume except the system volume** (`GetLogicalDrives` +
+**local fixed volume except the system drive** (`GetLogicalDrives` +
 `GetDriveType` = `DRIVE_FIXED`, evaluated at each request), plus the paths of
 every disk share (`Win32_Share` type 0, not special) even when it lies on the
-system volume. A file server's data is almost never on `C:`; set
+system drive. A file server's data is almost never on `C:`. On a **Windows
+client** (`Win32_OperatingSystem.ProductType` = 1: Windows 10 and 11) the
+system drive is included as well, because a workstation's data is on `C:`;
+type 2 (domain controller) and 3 (server) leave it out, and so does an
+unreadable type. A domain controller's `SYSVOL` stays readable (people keep
+scripts and installers there); `NTDS` and `*.dit` are on the deny list. Set
 `FILECAT_AGENT_ALLOW_ROOTS` (`;` separated) in production to exactly the
 volumes and folders to be cataloged. `wmi` is not affected by the roots: it
-reads no files.
+reads no files. On every Windows host the agent never opens a cloud
+placeholder or offline file (attributes 0x400000, 0x40000, 0x1000; see
+agent-protocol.md): it is listed, counted by `sum_subtree`, and `measure`
+answers metadata only.
 
 ## 14. Files read with `read_file` (no command needed)
 
@@ -645,5 +653,5 @@ for x86_64 and armv7 (note 02); `nix` and `wmi` add no C library.
    mapping, and the host-wide LUN list with `rootpath`); `lsblk` and
    `findmnt` are absent; smartmontools is 6.5; `/etc/space/space_history_*.xml`
    exists. Still open: whether a DSM disk needs `-d sat` for `smartctl -i`,
-   which btrfs-progs flags are accepted, and the layout of ext4 LUN backing
-   directories (`FILE`, `THIN`; NAS2).
+   and which btrfs-progs flags are accepted. An ext4 LUN is a directory named by
+   its uuid in `@iSCSI/LUN/FILE` (pre_alloc=yes) or `THIN` (NAS2).

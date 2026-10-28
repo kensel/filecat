@@ -137,6 +137,7 @@ class DirEntry:
     link_target: str | None = None
     rollup: dict[str, Any] | None = None
     error: dict[str, str] | None = None
+    attributes: int = 0             # Windows agents: the file attribute bits (cloudfiles.py); else 0
 
 
 @dataclass(frozen=True)
@@ -154,11 +155,16 @@ class DirListing:
 class Measurement:
     """What `measure` read. `hashes` has the shape hashing.hash_file returns:
     {}, {"sha256": hex} or {"sha256_partial": hex}. `size` and `mtime_ns`
-    (floored to 100 ns) are what the digest was computed from."""
+    (floored to 100 ns) are what the digest was computed from. `unread` is set when the
+    agent did not read the file (no head, no digest): "private_key" (its head is one,
+    secretfiles.py) or "cloud_placeholder" (Windows: `attributes` has a recall or offline
+    bit, cloudfiles.py)."""
     size: int
     mtime_ns: int
     head: bytes
     hashes: dict[str, str] = field(default_factory=dict)
+    unread: str | None = None
+    attributes: int = 0
 
 
 @dataclass(frozen=True)
@@ -288,7 +294,8 @@ def _entry(obj: dict[str, Any]) -> DirEntry:
         size=obj.get("size", 0), allocated_size=obj.get("allocated_size", 0),
         ino=obj.get("ino", 0), dev=obj.get("dev", 0), nlink=obj.get("nlink", 1),
         mtime_ns=obj.get("mtime_ns", 0), ctime_ns=obj.get("ctime_ns", 0),
-        link_target=_text(obj, "link_target"), rollup=obj.get("rollup"), error=obj.get("error"))
+        link_target=_text(obj, "link_target"), rollup=obj.get("rollup"), error=obj.get("error"),
+        attributes=obj.get("attributes", 0))
 
 
 def _hello(resp: dict[str, Any]) -> Hello:
@@ -535,7 +542,8 @@ class AgentClient:
                            "head_bytes": head_bytes}, timeout)
         hashes = {k: resp[k] for k in ("sha256", "sha256_partial") if resp.get(k)}
         return Measurement(size=resp["size"], mtime_ns=resp["mtime_ns"],
-                           head=base64.b64decode(resp.get("head_b64") or ""), hashes=hashes)
+                           head=base64.b64decode(resp.get("head_b64") or ""), hashes=hashes,
+                           unread=resp.get("unread"), attributes=resp.get("attributes", 0))
 
     def read_range(self, path: str | bytes, offset: int, length: int) -> bytes:
         """`length` bytes from `offset`, fewer at the end of the file. Asks

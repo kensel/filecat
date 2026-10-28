@@ -95,10 +95,11 @@ def from_storage(text: str) -> str:
 class AgentStat:
     """The os.stat_result fields the scan uses, from a list_dir entry."""
     __slots__ = ("st_size", "st_mtime_ns", "st_ctime_ns", "st_ino", "st_dev", "st_nlink",
-                 "allocated_size")
+                 "allocated_size", "st_file_attributes")
 
     def __init__(self, size: int, mtime_ns: int, ctime_ns: int, ino: int = 0, dev: int = 0,
-                 nlink: int = 1, allocated_size: int = 0) -> None:
+                 nlink: int = 1, allocated_size: int = 0, attributes: int = 0) -> None:
+        self.st_file_attributes = attributes    # a Windows agent's attribute bits: cloudfiles.attributes_of
         self.st_size = size
         self.st_mtime_ns = mtime_ns
         self.st_ctime_ns = ctime_ns
@@ -360,7 +361,8 @@ class AgentSource:
         elif "\\" in name:
             error = OSError(errno.EINVAL, f"{name!r}: a name with a backslash has no UNC form")
         else:
-            stat = AgentStat(e.size, e.mtime_ns, e.ctime_ns, e.ino, e.dev, e.nlink, e.allocated_size)
+            stat = AgentStat(e.size, e.mtime_ns, e.ctime_ns, e.ino, e.dev, e.nlink, e.allocated_size,
+                             e.attributes)
         target = to_storage(e.link_target) if e.link_target is not None else None
         return AgentEntry(name, e.kind, stat, error, target)
 

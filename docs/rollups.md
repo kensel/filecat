@@ -491,6 +491,14 @@ Python computes the rollup itself, and names exist only transiently in memory:
    source lines, not locals, and the summing code holds names only in locals.
 6. **Nothing is opened.** `sum_tree` only lists and `lstat`s: no probe, no
    identify, no hash, no sample, no member list, no Ollama.
+   **The agent's deny list does not change a sum.** It stops *content* reads
+   (`read_file`, `read_range`, `measure`); a `.env`, a private key or a
+   Windows hive inside a rolled-up folder (a `.filecat-redacted` folder, a
+   `[CACHE]`) is still counted in `total_files`, `total_size` and
+   `total_allocated_size`, because a sum uses `lstat` only, in Python and in
+   `sum_subtree` alike. Outside a rollup the same file gets a metadata-only
+   record (name, size, times, `probe.secret`; docs/scanning.md section 4).
+   Likewise a cloud placeholder is counted and never recalled.
 7. **Hard links** on Windows are not detected (`DirEntry.stat()` has no
    `st_nlink`/`st_ino`); `hardlink_names` is left out and the record says
    `via: "python"`. `allocated_size` is also left out.

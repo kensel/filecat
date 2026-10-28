@@ -1,4 +1,5 @@
 <?xml version="1.0" encoding="UTF-8"?>
+<!-- Disk serials are pseudonymised: fake values of the same length and character classes. -->
 <spaces>
         <space path="/dev/shared_cache_vg1" reference="@shared_cache" uuid="HXV0h2-T7BL-bVxM-otTx-9ROF-nk2Z-2y5LZm" device_type="2" drive_type="1" container_type="2" limited_raidgroup_num="24" space_id="shared_cache_1" >
                 <device>

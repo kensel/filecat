@@ -259,14 +259,14 @@ def test_a_lun_behind_two_targets_records_both(fixture_dir):
 def test_no_target_credential_reaches_the_topology(fixture_dir):
     committed = (NAS3 / "files" / "usr" / "syno" / "etc" / "iscsi_target.conf").read_text()
     for key in ("username", "password", "mutual_username", "mutual_password"):
-        assert f"\n{key}=REDACTED\n" in committed                           # the fixture only has fake values
+        assert f"\n{key}=<filecat-redacted>\n" in committed                # as the agent serves it: blanked
     rec = copy_nas3(fixture_dir)
     f = rec / "files" / "usr" / "syno" / "etc" / "iscsi_target.conf"
     secrets = {"password": "CANARY-PW-1", "mutual_password": "CANARY-PW-2", "username": "CANARY-USER-1",
                "mutual_username": "CANARY-USER-2"}
     text = f.read_text()
     for k, v in secrets.items():
-        text = text.replace(f"\n{k}=REDACTED\n", f"\n{k}={v}\n")
+        text = text.replace(f"\n{k}=<filecat-redacted>\n", f"\n{k}={v}\n")
     f.write_text(text)
     t = collect_dir(rec)
     dumped = json.dumps(t.to_dict())
@@ -291,15 +291,22 @@ def test_luns_go_to_the_volume_of_their_rootpath_and_per_volume_files_may_be_sub
     put(rec, "proc/mounts", "/dev/md2 /volume1 ext4 rw 0 0\n/dev/md4 /volume2 ext4 rw 0 0\n")
     put(rec, "etc/VERSION", 'productversion="7.1.1"\n')
     (rec / "meta.json").write_text('{"hostname": "nas2"}')
+    (rec / "subtree.json").write_text(json.dumps({
+        f"/volume2/@iSCSI/LUN/FILE/{u1}": {"total_size": 107374182400, "total_allocated_size": 107374182400},
+        f"/volume2/@iSCSI/LUN/THIN/{u2}": {"total_size": 108447924224, "total_allocated_size": 5120}}))
     t = collect_dir(rec)
     luns = {n.name: n for n in t.of_type("lun")}
     vols = {v.mount: v.id for v in t.of_type("volume")}
     assert luns["LUN-1"].parent == vols["/volume2"] and luns["LUN-3"].parent == vols["/volume1"]
     assert luns["LUN-1"].detail == "Windows0" and luns["LUN-2"].detail == "ESXI0"
-    assert luns["LUN-1"].thin is False and luns["LUN-1"].allocated_bytes is None and luns["LUN-1"].path is None
+    assert luns["LUN-1"].thin is False
     assert "naa:" + __import__("filecat").topology.naa_from_unit_serial(u1) in luns["LUN-1"].match
     notes = t.extra["collector"]["notes"]
-    assert any("FILE/THIN" in n for n in notes)                                # backing layout not collected
+    # ext4 LUN directories: FILE when pre_alloc=yes, THIN otherwise, the other tried second, else a note
+    assert luns["LUN-1"].path == f"/volume2/@iSCSI/LUN/FILE/{u1}" and luns["LUN-1"].allocated_bytes == 107374182400
+    assert luns["LUN-2"].path == f"/volume2/@iSCSI/LUN/THIN/{u2}" and luns["LUN-2"].allocated_bytes == 5120
+    assert luns["LUN-3"].path is None and luns["LUN-3"].allocated_bytes is None
+    assert any("LUN-3" in n and "no FILE/" in n for n in notes) and not any("FILE/THIN" in n for n in notes)
     assert not any("differ" in n or "lacks" in n for n in notes)               # a subset is normal
     # a stanza a volume's file has and the system file lacks, or with other values, is noted
     put(rec, "volume1/@iSCSI/LUN/iscsi_lun.conf", stanza.format(u=u3, lid=3, root="/volume1", b=5, d="Third")

@@ -156,7 +156,7 @@ def select_candidates(backend: Backend, options: ScanOptions) -> list[dict[str, 
     for doc in backend.list():
         if len(out) >= options.ollama_max_files:
             break
-        if doc.get("kind") not in options.ollama_kinds:
+        if doc.get("kind") not in options.ollama_kinds or (doc.get("probe") or {}).get("secret"):
             continue
         if doc.get("size", 0) > options.ollama_max_size:
             continue
