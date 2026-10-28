@@ -1,0 +1,3 @@
+{
+ "/sys/block/iscsi1": "../devices/tcm_loop_0/tcm_loop_adapter_1/host12/target12:0:1/12:0:1:0/block/iscsi1"
+}

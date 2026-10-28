@@ -589,8 +589,8 @@ def test_physical_total_counts_lun3_and_nas01_once():
     assert naive - phys["volume_used_bytes"] == sum(e["bytes"] for e in phys["excluded"] if e["type"] == "volume")
     lun3_alloc = by["nas3"].nodes[LUN3[1]].allocated_bytes
     assert lun3_alloc < vol1.used_bytes                         # inside Volume 1, not on top of it
-    # physical disks: nas3's four, the NVMe of pve2 and of the workstation; every virtual disk is excluded
-    assert phys["disk_bytes"] == 4 * 16_000_900_661_248 + 1_000_204_886_016 + 2_000_398_934_016
+    # physical disks: nas3's four and its two cache SSDs, the NVMe of pve2 and of the workstation; every virtual disk is excluded
+    assert phys["disk_bytes"] == 4 * 16_000_900_661_248 + 2 * 400_088_457_216 + 1_000_204_886_016 + 2_000_398_934_016
     assert phys["unresolved_disk_bytes"] == 0 and phys["excluded_disk_bytes"] > 11_000 * 2 ** 30 * 2
     # logical bytes are still reported: truenas2's migrated share and NAS01's shares
     assert phys["share_used_bytes"] == sum(s.used_bytes or 0 for t in snaps for s in t.of_type("share"))

@@ -220,9 +220,17 @@ server keeps store detection, manifest verification, probing and Ollama.
     and `storage_topology_history` stores in every backend; `filecat storage
     collect|show|links`.
   - [ ] **Review [agent-allowlist.md](agent-allowlist.md) before the Rust agent is
-    built** (53 entries, 9 for v0.2.0; argument kinds, `midclt`, `pvesh`, `read_file`
-    scope, `allowlist_sha256`), and verify on a DSM host the items marked
-    "verify on DSM" in [storage-topology.md](storage-topology.md) section 3a.
+    built** (60 entries, 10 for v0.2.0; argument kinds, `midclt`, `pvesh`,
+    `allowlist_sha256`). Decided: the read scope (allowed roots from the agent host's
+    environment or `.env`, plus a hardcoded deny list; agent-protocol.md), and a Windows
+    agent with WMI for a Windows file server (the classes are in agent-allowlist.md
+    section 13, the collector plan in storage-topology.md section 3b; not written).
+  - [x] DSM facts settled on nas3 and NAS2: shares in `/etc/samba/smb.conf`; iSCSI files in
+    `/usr/syno/etc` (LUNs placed by `rootpath`; targets and mappings with iqn, enabled and the
+    LUN number, credentials never read out); no `lsblk` or `findmnt`; smartmontools 6.5
+    (`smartctl_version`, text form); disks `sataN` or `sdX`; DSM's own
+    `/etc/space/space_history_*.xml` is the authority for pools, RAID levels, member disks and
+    SSD cache. Still open: `-d sat`, ext4 LUN backing directories, ACL `authority`.
   - [ ] Then: the Rust agent with `read_file`, `statfs`, `run`, `capabilities`;
     derived share entries merged into `ShareMap` (config wins); the viewer
     drill-down; Proxmox and TrueNAS collectors.- A `storage_pools` store and the storage hierarchy in the web viewer

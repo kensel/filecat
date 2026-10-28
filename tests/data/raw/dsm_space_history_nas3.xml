@@ -1,0 +1,61 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<spaces>
+        <space path="/dev/shared_cache_vg1" reference="@shared_cache" uuid="HXV0h2-T7BL-bVxM-otTx-9ROF-nk2Z-2y5LZm" device_type="2" drive_type="1" container_type="2" limited_raidgroup_num="24" space_id="shared_cache_1" >
+                <device>
+                        <lvm path="/dev/shared_cache_vg1" uuid="HXV0h2-T7BL-bVxM-otTx-9ROF-nk2Z-2y5LZm" designed_pv_counts="1" status="normal" total_size="400082075648" free_size="637534208" pe_size="4194304" expansible="0" max_size="390706752">
+                                <raids>
+                                        <raid path="/dev/md3" uuid="13e3b6da:22793394:c6856d92:662af9b2" level="raid1" version="1.2" layout="0">
+                                                <disks>
+                                                        <disk status="normal" dev_path="/dev/nvme0n1p1" physical_location="2000-1" model="SNV3410-400G" serial="7248J5HFTBTVQ" partition_version="0" partition_start="2048" partition_size="781415617" slot="0">
+                                                        </disk>
+                                                        <disk status="normal" dev_path="/dev/nvme1n1p1" physical_location="2000-2" model="SNV3410-400G" serial="8323I8O9FYXJ2" partition_version="0" partition_start="2048" partition_size="781415617" slot="1">
+                                                        </disk>
+                                                </disks>
+                                        </raid>
+                                </raids>
+                        </lvm>
+                </device>
+                <reference>
+                        <caches>
+                                <cache reference="Ty8iSi-ZfZA-bpWU-xsBO-jGJE-9Iss-HAtnP7" dev_path="/dev/shared_cache_vg1/alloc_cache_1" uuid="cGd8jo-ETGu-1TBy-CArY-H4UE-JlxN-40HU17">
+                                </cache>
+                        </caches>
+                </reference>
+        </space>
+        <space path="/dev/vg1" reference="@storage_pool" uuid="HuEGGQ-6sgw-uUSM-6c0J-YlY4-wJ8Y-m7cnEv" device_type="2" drive_type="0" container_type="2" limited_raidgroup_num="24" space_id="reuse_1" >
+                <device>
+                        <lvm path="/dev/vg1" uuid="HuEGGQ-6sgw-uUSM-6c0J-YlY4-wJ8Y-m7cnEv" designed_pv_counts="1" status="normal" total_size="63959671504896" free_size="79691776" pe_size="4194304" expansible="0" max_size="62460620800">
+                                <raids>
+                                        <raid path="/dev/md2" uuid="60aa04fd:38a0de21:ba641ce2:ec5f38a8" level="raid10" version="1.2" layout="258">
+                                                <disks>
+                                                        <disk status="normal" dev_path="/dev/sata1p3" physical_location="0-1" model="HAT3310-16T" serial="7072EOX47G54OW6KT" partition_version="9" partition_start="21241856" partition_size="31230312448" slot="0">
+                                                        </disk>
+                                                        <disk status="normal" dev_path="/dev/sata2p3" physical_location="0-2" model="HAT3310-16T" serial="8057PVV73V41XU8MQ" partition_version="9" partition_start="21241856" partition_size="31230312448" slot="1">
+                                                        </disk>
+                                                        <disk status="normal" dev_path="/dev/sata3p3" physical_location="0-3" model="HAT3310-16T" serial="0282KML84P88DM5FT" partition_version="9" partition_start="21241856" partition_size="31230312448" slot="2">
+                                                        </disk>
+                                                        <disk status="normal" dev_path="/dev/sata4p3" physical_location="0-4" model="HAT3310-16T" serial="8999OHT46D6ACW4RA" partition_version="9" partition_start="21241856" partition_size="31230312448" slot="3">
+                                                        </disk>
+                                                        <disk status="normal" dev_path="/dev/sata5p3" physical_location="0-5" model="HAT3310-16T" serial="0654TXE74J75NW8QK" partition_version="9" partition_start="21241856" partition_size="31230312448" slot="4">
+                                                        </disk>
+                                                        <disk status="normal" dev_path="/dev/sata6p3" physical_location="0-6" model="HAT3310-16T" serial="1207LSP07U8BUG3TN" partition_version="9" partition_start="21241856" partition_size="31230312448" slot="5">
+                                                        </disk>
+                                                        <disk status="normal" dev_path="/dev/sata7p3" physical_location="0-7" model="HAT3310-16T" serial="4889GXW97O16CH6FG" partition_version="9" partition_start="21241856" partition_size="31230312448" slot="6">
+                                                        </disk>
+                                                        <disk status="normal" dev_path="/dev/sata8p3" physical_location="0-8" model="HAT3310-16T" serial="8674MXL71L8LJV3IX" partition_version="9" partition_start="21241856" partition_size="31230312448" slot="7">
+                                                        </disk>
+                                                </disks>
+                                        </raid>
+                                </raids>
+                        </lvm>
+                </device>
+                <reference>
+                        <volumes>
+                                <volume path="/volume1" dev_path="/dev/vg1/volume_1" uuid="Ty8iSi-ZfZA-bpWU-xsBO-jGJE-9Iss-HAtnP7" type="btrfs">
+                                </volume>
+                        </volumes>
+                        <iscsitrgs>
+                        </iscsitrgs>
+                </reference>
+        </space>
+</spaces>

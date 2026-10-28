@@ -62,7 +62,7 @@ A request is `{"cmd": "...", ...}`. A response is either
 | `io` | any other failure reading the file system, including a file that changed while it was read |
 | `cancelled` | the request was stopped by `cancel` (**new**; only when the connection is still open) |
 | `busy` | the agent is already running its maximum number of long sums, or of `run` commands; retry later (**new**) |
-| `refused` | a `run` argument failed the validation of its argument kind, so nothing was run (**new**) |
+| `refused` | a `run` argument failed the validation of its argument kind, so nothing was run; or a path is outside the agent's allowed roots, or a content read of a path on its deny list ([below](#allowed-roots-and-the-deny-list)) (**new**) |
 
 `error` is for people; clients branch on `code`. A client that meets an
 unknown code treats it as `io`.
@@ -462,9 +462,11 @@ offset-and-length contract, and for small configuration files
   disk can block); on expiry the answer is `io`.
 - The reply is the bytes read, as `data_b64`. There is no `eof` field: a
   `read_file` reply that is not `truncated` is the whole file.
-- It reaches no further than `read_range` and `measure` already do (any
-  file the agent's user can read). It is not a new privilege, only a new way
-  to read files that have no size.
+- It reaches no further than `read_range` and `measure` do, and all three
+  are confined the same way: to the agent's **allowed roots**, minus its
+  **deny list** ([Allowed roots and the deny list](#allowed-roots-and-the-deny-list));
+  outside them the answer is `refused`. It is not a new privilege, only a
+  new way to read files that have no size.
 
 ### `statfs`
 
@@ -572,6 +574,8 @@ not try each one and read errors.
 ```json
 {"cmd": "capabilities"}
 {"ok": true, "allowlist_version": 1, "allowlist_sha256": "5c0e...64 hex digits...",
+ "deny_sha256": "91ab...64 hex digits...",
+ "allow_roots": ["/volume*", "/proc", "/sys", "/etc/samba"], "allow_roots_source": "default",
  "platform": "linux",
  "entries": [
    {"id": "lsblk_json", "available": true, "binary": "/bin/lsblk", "version": "2.38.1",
@@ -597,6 +601,95 @@ not try each one and read errors.
   version, so a binary that was patched to run something else shows up as a
   different hash. Neither is a secret and neither is secured against an agent
   that lies: it is an audit aid, with the review of the table the real control.
+
+- `allow_roots` is the **effective** list of allowed roots exactly as the agent
+  uses it (canonical paths, globs as written) and `allow_roots_source` is
+  `env`, `env_file` or `default`, so the server can explain a `refused`
+  ("the agent serves /volume* and /proc; /home is not one of them") instead of
+  guessing. `deny_sha256` is the SHA-256 of the compiled-in deny list (the
+  rules of the next section, one per line in source order); an audit compares
+  it per agent version as it does `allowlist_sha256`. The deny list itself is
+  not sent: it is in this document and in the binary.
+
+### Allowed roots and the deny list
+
+**New.** Where the agent will read is decided **on the agent host**, never by
+a request, and a hardcoded deny list wins over it.
+
+**Allowed roots.** `FILECAT_AGENT_ALLOW_ROOTS` is a list of absolute paths
+separated by `:` on POSIX and `;` on Windows.
+
+- *Where it is set.* In the agent's environment, or as `FILECAT_AGENT_ALLOW_ROOTS=...`
+  in a `.env` file in the **same directory as the agent binary** (read once at
+  start; `KEY=value`, `#` comments, optional single or double quotes, no
+  expansion). The environment variable wins over the `.env` key. Nothing in
+  the protocol sets or changes it; `configure_policy` cannot.
+- *Unset* (neither source): a built-in default for the OS, so a fresh
+  agent is already confined. DSM (detected by `/etc/VERSION` with a
+  `productversion`):
+  `/volume*`, `/proc`, `/sys`, `/dev/disk`, `/etc/samba`, `/etc/space`,
+  `/etc/VERSION`, `/etc/exports`, `/etc/lvm/backup`,
+  `/usr/syno/etc/iscsi_*.conf`: the paths the Synology collector and StoreFS
+  read. Other Linux: `/proc`, `/sys`, `/dev/disk`, `/etc/hostname`,
+  `/etc/os-release`, `/etc/exports`, `/mnt`, `/srv`, `/media`. Windows: every
+  local fixed volume except the system volume, plus the paths of disk shares
+  ([agent-allowlist.md](agent-allowlist.md) section 13). *Set but empty*: no
+  roots at all; every path is refused.
+- *Entries.* Absolute, with no `.` or `..`. `*` matches any run of
+  characters **inside one path component** (never `/`), anywhere in a
+  component: `/volume*`, `/usr/syno/etc/iscsi_*.conf`. No other glob, no
+  `**`, no regular expressions. A root allows itself and everything below it,
+  compared component by component (`/etc/space` allows `/etc/space/a.xml`,
+  not `/etc/spacey`). Windows entries are compared case-insensitively.
+  A malformed entry stops the agent from starting (it does not widen the
+  scope silently).
+- *Canonicalisation.* The check is on the **real path**: every symlink in the
+  path (and on Windows every junction, reparse point, `\\?\` prefix and 8.3
+  short name, via `GetFinalPathNameByHandle`) is resolved first, and the
+  result must be inside a root. A link inside an allowed root that points
+  outside it is therefore `refused`. When the path does not exist the check
+  uses the longest existing ancestor, resolved, plus the remaining components,
+  so a path outside the roots is `refused` whether or not it exists (no
+  `not_found` oracle). Non-glob roots are canonicalised at start; one that
+  does not exist yet is kept as written and logged. The operation then runs on
+  the **resolved** path with `O_NOFOLLOW` on the last component, which
+  leaves only a swap of a directory inside an allowed root as a race.
+- *Scope.* Every command that takes a path: `read_file`, `read_range`,
+  `measure` (content), `list_dir`, `sum_subtree` (names, sizes, times) and
+  `statfs` (totals). `list_dir`, `sum_subtree` and `statfs` are included
+  because one check at the front of the dispatcher is simpler to review and
+  to get right than a per-command rule, and the names of a user's home
+  directory are not for the central server either. Not affected: `run`
+  (its own allowlist), `wmi`, `hello`, `auth`, `capabilities`.
+- *Error.* `refused`, with `"<path>: outside the agent's allowed roots
+  (FILECAT_AGENT_ALLOW_ROOTS on the agent host)"` (`<path>` is the request's
+  path, not the resolved one, so a link target is not disclosed). The client
+  raises `AgentError` with that code and text; collectors record it as a
+  `collector.notes` line and go on without that source.
+
+**Deny list.** Compiled into the binary, not configurable, not overridable by
+the environment, the `.env` file or any request; it is checked on the same
+canonical path **after** the roots and applies to the commands that return
+file **content**: `read_file`, `read_range` and `measure` (which returns a
+head and a digest of the bytes). `list_dir`, `sum_subtree` and `statfs` still
+see a denied file's name and size: a catalog needs to know a `.env` exists,
+and its size, even though no one may read it. Match on the canonical path:
+
+| Platform | Denied |
+|---|---|
+| POSIX | `/etc/shadow`, `/etc/shadow-`, `/etc/gshadow`, `/etc/gshadow-` (password hashes); `/etc/sudoers` and `/etc/sudoers.d/**`; `/etc/ssh/ssh_host_*_key` (host private keys) and `/etc/ssl/private/**`; `/var/log/**` and `/var/logs/**` (logs hold tokens, paths and other users' activity) |
+| POSIX and Windows | any file named exactly `.env` or matching `.env.*`, anywhere, including inside shares and the agent's own `.env`, **except** `.env.example`, `.env.sample` and `.env.template` (conventionally secret-free; case-insensitive on Windows) |
+| Windows (case-insensitive, on the final path) | `%SystemRoot%\System32\config\**` (the SAM, SECURITY, SYSTEM, SOFTWARE and DEFAULT hives, their `.LOG*` and `RegBack`); `NTUSER.DAT*` and `UsrClass.dat*` anywhere (user hives and their logs); `%SystemRoot%\NTDS\**` (`ntds.dit`, `edb*.log`) and any `*.dit` anywhere |
+
+Decisions: `SYSVOL` is **not** denied (every domain user may read it, and it
+is what a domain controller's file catalog is for); the list is short on
+purpose, each entry being a place where the content is a credential or
+identity store and never a file a catalog needs; a denied path is `refused`
+with `"<path>: denied by agent policy"` and nothing else (no rule is echoed).
+A new entry is code and a rebuild. `capabilities` reports `deny_sha256`.
+The collectors read none of these paths, and StoreFS reads only backup and
+database manifests under the roots; `tests/test_synology_space.py` asserts it
+for the Synology collection.
 
 ### `wmi`
 
@@ -756,7 +849,20 @@ What the Rust side changes to match this page:
     - `wmi {id}` (Windows agents only): an allowlisted WMI query, raw
       property maps back, through the Rust `wmi` crate.
     All five are additive: `protocol` stays 1.
-11. **`run` and the argument rule.** The agent never builds a command from
+11. **Read scope** ([above](#allowed-roots-and-the-deny-list)). New: at the
+    front of the dispatcher, for every command that takes a path, resolve the
+    path to its real form (symlinks; on Windows `GetFinalPathNameByHandle`),
+    check it against the allowed roots (`FILECAT_AGENT_ALLOW_ROOTS` from the
+    environment, else the `.env` file next to the binary, else the OS default;
+    `*` inside one component only) and answer `refused` outside them; for
+    `read_file`, `read_range` and `measure` also check the **deny list
+    compiled into the binary** (it wins over the roots and nothing configures
+    it). `capabilities` reports `allow_roots`, `allow_roots_source` and
+    `deny_sha256`. Open the file by the resolved path with `O_NOFOLLOW`.
+    The Python fake agent (`tests/_fake_agent.py`) is the executable
+    specification of the matching rules, including `resolve_allow_roots` for
+    the environment/`.env` precedence.
+12. **`run` and the argument rule.** The agent never builds a command from
     request text. If the table gains a command that needs an argument, the
     change is a new argument kind in the agent's source and a new row, both
     reviewed, not a configuration.

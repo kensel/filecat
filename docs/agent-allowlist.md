@@ -71,20 +71,32 @@ collector is. Candidate directories: **std** = `/bin`, `/sbin`, `/usr/bin`,
 | ZFS | 8 | 0 | 0 | 8 |
 | RAID (md) | 2 | 1 | 0 | 1 |
 | LVM | 6 | 0 | 0 | 6 |
-| SMART | 4 | 3 | 0 | 1 |
+| SMART | 5 | 4 | 0 | 1 |
 | Proxmox | 5 | 0 | 0 | 5 |
 | Synology | 2 | 0 | 0 | 2 |
 | iSCSI initiator | 1 | 0 | 0 | 1 |
 | TrueNAS middleware | 5 | 0 | 0 | 5 |
-| Windows WMI (`wmi`) | 13 | 0 | 0 | 13 |
-| **Total** | **53** | **9** | **2** | **42** |
+| Windows WMI (`wmi`) | 19 | 0 | 0 | 19 |
+| **Total** | **60** | **10** | **2** | **48** |
+
+The Windows agent has its own labels, *needed* 13, *optional* 4, *later* 2
+(section 13); to the Linux release they are all `later`.
 
 Plus, with no command at all: `read_file` of `/proc`, `/sys` and configuration
 files (section 14), `statfs`, `list_dir` of `/sys/block`, `/dev/disk/by-id`
-and similar. The Synology collector of v0.2.0 needs `mdadm_detail_scan` and
-`smartctl_info_json` (with its two fallbacks) from this page, and the files of
-section 14; the generic Linux basics add `lsblk` (three forms), `blkid` and
-`findmnt`.
+and similar, all within the agent's read scope (section 14a).
+
+**What DSM can use** (checked on nas3, DSM 7, where `which` finds only
+`/sbin/blkid`, `/sbin/mdadm`, `/bin/smartctl` and `/sbin/btrfs`): of the
+v0.2.0 entries, `mdadm_detail_scan`, `blkid_export`, `smartctl_version`,
+`smartctl_info` (smartmontools 6.5: no `--json`) and the optional
+`btrfs_show` and `btrfs_usage`. **Not on DSM: `lsblk_json`,
+`lsblk_json_legacy`, `lsblk_pairs`, `findmnt_json`** (they are for the generic
+Linux collector). The Synology collector needs none of the four; it reads
+`/proc/mounts`, `/sys/block` and DSM's own `/etc/space/space_history_*.xml`
+(section 14), and runs only `mdadm_detail_scan` (the array UUIDs) and, for a
+disk the space history does not name, `smartctl_version` and `smartctl_info`.
+Its `smartctl_info_json` and `_sat` are for DSM releases with smartmontools 7.
 
 ## 2. Block devices
 
@@ -97,8 +109,8 @@ section 14; the generic Linux basics add `lsblk` (three forms), `blkid` and
   `lsblk` refuses the unknown column and exits non-zero). Falls back to
   `lsblk_json_legacy`, then `lsblk_pairs`; below all that, `/sys/block` and
   `/dev/disk/by-id` through `read_file` and `list_dir`.
-- Platforms: Linux, TN, PVE. **DSM: not expected** (DSM ships BusyBox
-  utilities; the collector reads `/sys/block`; *verify on DSM*).
+- Platforms: Linux, TN, PVE. **Not on DSM** (checked on nas3: no `lsblk`; the
+  Synology collector reads `/sys/block` and the space history).
 - Purpose: the disk inventory and partition tree. Feeds `disk` nodes
   (`serial`, `model`, `size_bytes`, `media` from `ROTA`, `match: naa:` from
   `WWN`), the disk-to-volume link (`KNAME`, `PKNAME`, `MOUNTPOINTS`,
@@ -139,7 +151,8 @@ section 14; the generic Linux basics add `lsblk` (three forms), `blkid` and
   platform that `export` is accepted, else the entry's vector becomes
   `-o udev`*. Needs root to probe devices. Falls back to `/dev/disk/by-uuid`
   (`list_dir` shows each link's `link_target`) and `/sys/fs/btrfs/<uuid>`.
-- Platforms: Linux, TN, PVE; DSM has a `blkid` of its own (*verify*).
+- Platforms: Linux, TN, PVE; DSM has `/sbin/blkid` (the Synology collector
+  prefers `/sys/fs/btrfs` and `/dev/disk/by-uuid`, and asks `blkid` last).
 - Purpose: file system UUIDs, the stable key of a `volume` node; `TYPE` for
   `fs_type`; `LABEL`.
 
@@ -155,7 +168,8 @@ section 14; the generic Linux basics add `lsblk` (three forms), `blkid` and
 - Needs: util-linux 2.27. Fallback, always available: `read_file`
   `/proc/self/mountinfo` (the better source: it has the major:minor and root of
   bind mounts and subvolumes) and `/proc/mounts`.
-- Platforms: Linux, TN, PVE. DSM: use mountinfo.
+- Platforms: Linux, TN, PVE. **Not on DSM** (no `findmnt`; the Synology
+  collector reads `/proc/mounts`).
 - Purpose: mount point, source device, file system type, options (`ro`/`rw`
   gives a volume's `health`), UUID and label in one pass. Feeds `volume`
   `mount`, `device`, `fs_type`, `health`.
@@ -297,18 +311,31 @@ PVE, Linux, DSM (if its lvm2 is new enough; *verify*).
 
 ## 8. SMART
 
-Binaries: `smartctl` in std and syno. Platforms: all Linux. Argument kind
+Binaries: `smartctl` in std and syno (`/bin/smartctl` on DSM, smartmontools
+6.5 on DSM 7: no `--json`). Platforms: all Linux. Argument kind
 **`block_device`**: `/dev/<name>` where `<name>` is a whole disk listed in
 `/sys/block` (not a partition, not `loop*` or `ram*`), no other form; the
 check reads the directory at the moment of the request. Exit status is a bit
 mask (bit 3 and up mean a disk problem), not failure: the reply is `ok: true`
 with `exit_code`, and Python reads both.
 
+### `smartctl_version` (v0.2.0)
+
+- Arguments: `--version`. Argument kind: none. Timeout 5 seconds.
+- Purpose: the version, asked **once per host** by the collector
+  (`smartctl 6.5 2016-05-07 r4318 [x86_64-linux-4.4.302+] (local build)`;
+  Python reads the first two numbers). Below 7.0 the collector goes straight
+  to `smartctl_info` instead of spending two JSON runs per disk on a binary
+  that does not know `--json`. Unavailable or unreadable: the collector
+  tries the JSON forms first, as before. (`capabilities` also reports a
+  `version` for an entry with a probe, but one number per entry is not enough
+  to choose between forms, so this is an entry of its own.)
+
 ### `smartctl_info_json` (v0.2.0)
 
 - Arguments: `--json -i` and the argument.
-- Needs: smartmontools 7.0 for `--json` (*verify what DSM ships*). Fallback
-  `smartctl_info_json_sat`, then `smartctl_info`.
+- Needs: smartmontools 7.0 for `--json`; **DSM 7 ships 6.5, which has none**
+  (checked on nas3). Fallback `smartctl_info_json_sat`, then `smartctl_info`.
 - Platforms: DSM, Linux, PVE, TN.
 - Purpose: identity: `serial_number` (the id of a `disk` node), `model_name`,
   `rotation_rate` (0 = SSD), `wwn` (an `naa:` match), capacity.
@@ -316,13 +343,15 @@ with `exit_code`, and Python reads both.
 ### `smartctl_info_json_sat` (v0.2.0)
 
 - Arguments: `--json -d sat -i` and the argument.
-- Needs: as above. On DSM the SATA disks (`/dev/sata1`) generally need
-  `-d sat` (*verify*).
+- Needs: as above.
 
 ### `smartctl_info` (v0.2.0)
 
-- Arguments: `-i` and the argument. The plain-text fallback (`Serial Number:
-  ZR6N3A01`), parsed in Python, for smartmontools below 7.0.
+- Arguments: `-i` and the argument. The plain-text form (`Serial Number:
+  ZR6N3A01`), parsed in Python: what smartmontools below 7.0 (DSM 7) uses.
+  Whether a DSM disk needs `-d sat` here is not known yet (the DSM collector
+  takes serials from the space history and `syno_disk_serial` first, so it
+  rarely gets here).
 
 ### `smartctl_all_json` (later)
 
@@ -405,45 +434,82 @@ and read the generated configuration files.
 
 ## 13. Windows: `wmi {id}`
 
-All `later`. A Windows agent has no `run`: it answers `wmi` from the Rust
-`wmi` crate (COM, read-only `SELECT` of a fixed property list from one class).
+**Decision: a Windows agent is wanted**, to catalog a Windows file server
+(shares, volumes, disks, Storage Spaces, and the iSCSI LUNs from nas3 that
+back them). A Windows agent has no `run`: it answers `wmi` from the Rust `wmi`
+crate (COM, read-only `SELECT` of a fixed property list from one class).
+Nothing is written yet on the collector side; this section and the plan in
+[storage-topology.md](storage-topology.md) ("Windows file server collector")
+are the design.
+
 Namespaces: **S** = `root\Microsoft\Windows\Storage`, **SMB** =
-`root\Microsoft\Windows\SMB`, **C** = `root\cimv2`. Property names are WMI's;
-the table lists the main ones. The association class names are *to verify on
-a Windows Server 2019/2022 host*.
+`root\Microsoft\Windows\SMB`, **C** = `root\cimv2`, **DFS** =
+`root\Microsoft\Windows\DFSN`, **DD** = `root\Microsoft\Windows\Deduplication`.
+Status: **needed** (the file-server collector cannot do without it),
+**optional** (a fallback or extra detail, cheap), **later** (a feature not
+planned for the first collector). Property names are WMI's; the lists are the
+exact `SELECT` lists the agent compiles in, kept short on purpose (every
+property is a column the server parses). Association class names and the
+`DedupMode` / `FileSystem` properties are *to verify on a Windows Server
+2019/2022 host*; a class missing from a namespace is reported by
+`capabilities` as `available: false`, never an error.
 
-| id | Namespace and class | Properties | Feeds |
-|---|---|---|---|
-| `storage_physical_disk` | S `MSFT_PhysicalDisk` | ObjectId, UniqueId, FriendlyName, SerialNumber, Model, Size, AllocatedSize, MediaType, BusType, HealthStatus, OperationalStatus, Usage, PhysicalLocation, SlotNumber, SpindleSpeed, CanPool | `disk` (serial, `media`, `health`, `slot`, role from `Usage`) |
-| `storage_disk` | S `MSFT_Disk` | Number, UniqueId, Guid, SerialNumber, Size, PartitionStyle, IsBoot, IsSystem, BusType, Location, Path | `disk` NAA id (`match: naa:`) for iSCSI disks, `virtual` |
-| `storage_partition` | S `MSFT_Partition` | DiskNumber, PartitionNumber, DriveLetter, Size, Offset, AccessPaths, Type | disk-to-volume link |
-| `storage_pool` | S `MSFT_StoragePool` | UniqueId, FriendlyName, Size, AllocatedSize, HealthStatus, IsPrimordial, ResiliencySettingNameDefault | `pool` |
-| `storage_virtual_disk` | S `MSFT_VirtualDisk` | UniqueId, FriendlyName, Size, FootprintOnPool, ResiliencySettingName, NumberOfColumns, NumberOfDataCopies, ProvisioningType, HealthStatus | `lun` (a Space) and pool `level` |
-| `storage_pool_to_physical_disk` | S `MSFT_StoragePoolToPhysicalDisk` | StoragePool, PhysicalDisk (references) | pool `members` |
-| `storage_volume` | S `MSFT_Volume` | ObjectId, DriveLetter, FileSystemType, FileSystemLabel, Size, SizeRemaining, HealthStatus, Path | `volume` |
-| `win32_volume` | C `Win32_Volume` | DeviceID, DriveLetter, FileSystem, Capacity, FreeSpace, Label | `volume` where `MSFT_Volume` is missing |
-| `iscsi_session` | S `MSFT_iSCSISession` | SessionIdentifier, TargetNodeAddress, InitiatorNodeAddress, IsConnected, IsPersistent | iSCSI disks and the host IQN |
-| `iscsi_target_portal` | S `MSFT_iSCSITargetPortal` | TargetPortalAddress, TargetPortalPortNumber, InitiatorInstanceName | iSCSI target to portal |
-| `initiator_port` | S `MSFT_InitiatorPort` | NodeAddress, ConnectionType | `host.iqn` |
-| `smb_share` | SMB `MSFT_SmbShare` | Name, Path, Description, ScopeName, Special, ShareState | `share` |
-| `win32_share` | C `Win32_Share` | Name, Path, Type, Description | `share` fallback |
+| id | Status | Namespace and class | Properties | Why |
+|---|---|---|---|---|
+| `os_info` | needed | C `Win32_OperatingSystem` | CSName, Caption, Version, BuildNumber, LastBootUpTime | `host.name` (the machine name the catalog roots use) and `host.os` ("Windows Server 2022 10.0.20348") |
+| `smb_share` | needed | SMB `MSFT_SmbShare` | Name, Path, Description, ScopeName, Special, Temporary, ShareState, ShareType, FolderEnumerationMode, CachingMode, ContinuouslyAvailable, EncryptData | the `share` nodes: the folder behind each name, with `ScopeName` (a clustered file server has one scope per role; `*` is the node itself) and `Special` (`ADMIN$`, `C$`, `IPC$`: skipped) |
+| `win32_share` | needed | C `Win32_Share` | Name, Path, Type, Description | the same shares where the SMB namespace is missing, and `Type` (0 disk, 1 print queue, 2 device, 3 IPC, with 0x80000000 set for the administrative ones) to tell a folder share from a printer or `IPC$`; both are read and merged by name |
+| `storage_volume` | needed | S `MSFT_Volume` | ObjectId, UniqueId, DriveLetter, FileSystem, FileSystemLabel, Size, SizeRemaining, HealthStatus, OperationalStatus, Path, DedupMode | the `volume` nodes: `mount` (`D:\` or the volume GUID path), `fs_type` (ntfs, refs), size and free space, health; `DedupMode` says whether Data Deduplication is on without the DD namespace |
+| `storage_partition` | needed | S `MSFT_Partition` | DiskNumber, PartitionNumber, DriveLetter, Size, Offset, AccessPaths, Type, Guid, IsBoot, IsSystem | the join from a disk to a volume: `AccessPaths` holds the volume GUID path (`\\?\Volume{...}\`) that `MSFT_Volume.Path` has, and the drive letter |
+| `storage_disk` | needed | S `MSFT_Disk` | Number, UniqueId, Guid, SerialNumber, Model, FriendlyName, Size, PartitionStyle, IsBoot, IsSystem, IsOffline, BusType, Location, Path | the disk the OS sees: `Number` (joins partitions), `UniqueId` (for an iSCSI disk this is its NAA identifier, the `naa:` match that links it to a nas3 LUN), `BusType` (iSCSI, SATA, SAS, Spaces: tells a physical disk from a LUN or a virtual disk) |
+| `storage_physical_disk` | needed | S `MSFT_PhysicalDisk` | ObjectId, DeviceId, UniqueId, FriendlyName, SerialNumber, Model, Size, AllocatedSize, MediaType, BusType, HealthStatus, OperationalStatus, Usage, PhysicalLocation, SlotNumber, SpindleSpeed, CanPool | the `disk` nodes: serial (the id), model, `media` from `MediaType`/`SpindleSpeed`, `health`, bay from `SlotNumber`/`PhysicalLocation`, role from `Usage` (`AutoSelect`, `HotSpare`, `Journal`); `DeviceId` is the disk number, so it joins `MSFT_Disk` |
+| `storage_pool` | needed | S `MSFT_StoragePool` | UniqueId, FriendlyName, Size, AllocatedSize, HealthStatus, OperationalStatus, IsPrimordial, IsReadOnly, ResiliencySettingNameDefault | the `pool` nodes (Storage Spaces); the primordial pool is not one |
+| `storage_pool_to_physical_disk` | needed | S `MSFT_StoragePoolToPhysicalDisk` (association) | StoragePool, PhysicalDisk (references) | which physical disk is in which pool: pool `members` |
+| `storage_virtual_disk` | needed | S `MSFT_VirtualDisk` | ObjectId, UniqueId, FriendlyName, Size, FootprintOnPool, ResiliencySettingName, NumberOfColumns, NumberOfDataCopies, PhysicalDiskRedundancy, ProvisioningType, HealthStatus, OperationalStatus | a Space: a `lun`-like node under its pool (`Size` logical, `FootprintOnPool` physical, `ProvisioningType` thin or fixed) and the pool's `level` (`simple`, `mirror`, `parity`; with `NumberOfDataCopies` / `PhysicalDiskRedundancy` for two-way versus three-way) |
+| `storage_virtual_disk_to_disk` | needed | S `MSFT_VirtualDiskToDisk` (association) | VirtualDisk, Disk (references) | which `MSFT_Disk` is a Space, hence which volume is on it (name *to verify*) |
+| `iscsi_session` | needed | S `MSFT_iSCSISession` | SessionIdentifier, TargetNodeAddress, InitiatorNodeAddress, InitiatorPortalAddress, IsConnected, IsPersistent | the iSCSI sessions of this file server to nas3: which target IQN each iSCSI disk comes from, so a Windows disk links to the Synology LUN behind it (with the disk's NAA id, `storage_disk.UniqueId`) |
+| `initiator_port` | needed | S `MSFT_InitiatorPort` | NodeAddress, ConnectionType | `host.iqn`: the initiator IQN a nas3 LUN's ACL names (`initiator_ok` on the link) |
+| `win32_volume` | optional | C `Win32_Volume` | DeviceID, DriveLetter, Name, FileSystem, Capacity, FreeSpace, Label, DriveType, BootVolume, SystemVolume | the `volume` nodes where `MSFT_Volume` is missing (Windows Server 2008 R2), and volumes mounted in a folder (`Name` is that path) |
+| `iscsi_target` | optional | S `MSFT_iSCSITarget` | NodeAddress, IsConnected, IsPersistent | targets known to the initiator, connected or not (a persistent target that is down) |
+| `iscsi_target_portal` | optional | S `MSFT_iSCSITargetPortal` | TargetPortalAddress, TargetPortalPortNumber, InitiatorInstanceName | the portal (nas3's address) of each target |
+| `dedup_volume` | optional | DD `MSFT_DedupVolume` | Volume, VolumeId, Enabled, UsageType, Capacity, FreeSpace, UsedSpace, UnoptimizedSize, SavedSpace, SavingsRate, InPolicyFilesCount, OptimizedFilesCount | what Data Deduplication saves on a volume: a volume's `used_bytes` is the optimized size, not the sum of the files, which matters when the catalog's byte totals are compared with the volume's |
+| `dfs_namespace` | later | DFS `MSFT_DFSNamespace` | Path, Type, State, Description, TimeToLiveSec | DFS namespaces hosted here (`\\domain\ns`): a catalog root may be a DFS path rather than a server share |
+| `dfs_folder` | later | DFS `MSFT_DFSNamespaceFolder` (and `MSFT_DFSNamespaceFolderTarget` for the target paths; names *to verify*) | Path, State, Description, TimeToLiveSec | a namespace folder and the server shares it points at: the mapping from a DFS path to `\\server\share` |
 
-Windows agents also need their own path mapping for drive letters before
-shares derive a `ShareMap` ([storage-topology.md](storage-topology.md)
-section 4); until then Windows hosts stay on SMB scans.
+Join keys, so the Python side needs no other query: share `Path` to volume
+by drive letter or GUID path prefix (longest match); volume to partition by
+`AccessPaths`; partition to disk by `DiskNumber`; disk to physical disk by
+`DeviceId`; physical disk to pool by the association; disk to Space by
+`MSFT_VirtualDiskToDisk`; iSCSI disk to nas3 LUN by the NAA id in
+`UniqueId` against `lun.match`.
+
+Windows needs its own path mapping for drive letters before shares derive a
+`ShareMap` ([storage-topology.md](storage-topology.md) section 4); that is
+part of the collector, not of the agent.
+
+Read scope on Windows (section 14a, and the deny list in
+[agent-protocol.md](agent-protocol.md)): the default allowed roots are every
+**local fixed volume except the system volume** (`GetLogicalDrives` +
+`GetDriveType` = `DRIVE_FIXED`, evaluated at each request), plus the paths of
+every disk share (`Win32_Share` type 0, not special) even when it lies on the
+system volume. A file server's data is almost never on `C:`; set
+`FILECAT_AGENT_ALLOW_ROOTS` (`;` separated) in production to exactly the
+volumes and folders to be cataloged. `wmi` is not affected by the roots: it
+reads no files.
 
 ## 14. Files read with `read_file` (no command needed)
 
 `read_file {path, max}` reads a file to its end up to `max` bytes (default
 256 KiB, at most 4 MiB), which is what `/proc` and `/sys` need because they
 report size 0. `list_dir` lists the directories. Nothing here needs an
-allowlist entry.
+allowlist entry. Every path below is inside the **default allowed roots** of
+section 14a for its platform.
 
 | Platform | Path | Read for | Status |
 |---|---|---|---|
 | Linux | `/proc/mounts`, `/proc/self/mountinfo` | mounts, bind mounts, subvolumes, `ro`/`rw` | v0.2.0 |
 | Linux | `/proc/mdstat` | md arrays, members, `[UUU_]`, failed `(F)`, resync | v0.2.0 |
-| Linux | `/sys/block/*/size`, `queue/rotational`, `removable`, `device/{model,vendor,serial,wwid}`, `<name>p<N>/size` | disks and their partitions | v0.2.0 |
+| Linux | `/sys/block/*/size`, `queue/rotational`, `removable`, `device/{model,vendor,serial,wwid}`, `<name>p<N>/size` (`<name><N>` for `sdX`) | disks and their partitions; `list_dir` of `/sys/block` shows each entry's link target (a `tcm_loop` device is not a disk) | v0.2.0 |
 | Linux | `/sys/block/md*/md/{level,array_state,degraded,sync_action,sync_completed,raid_disks,metadata_version,chunk_size}`, `md/dev-*/{state,slot,size,errors}` | array level, state, member state and role | v0.2.0 |
 | Linux | `/sys/block/dm-*/dm/{name,uuid}`, `slaves/` (list) | device-mapper chain (cachedev, LV, md) | v0.2.0 |
 | Linux | `/sys/fs/btrfs/<uuid>/{label,devices/,allocation/*}` | btrfs UUID, label, members, allocation | v0.2.0 |
@@ -452,23 +518,54 @@ allowlist entry.
 | Linux | `/proc/diskstats`, `/sys/block/*/stat` | I/O counters (telemetry) | later, not v0.2.0 |
 | Linux | `/sys/class/iscsi_session/**`, `/etc/iscsi/initiatorname.iscsi` | initiator sessions and IQN | later |
 | DSM | `/etc/VERSION` | DSM version (`productversion`) | v0.2.0 |
-| DSM | `/etc/synoinfo.conf` | model, disk count | later |
+| DSM | `/etc/space/space_history_<YYYYMMDD_HHMMSS>.xml` (many; the newest by the stamp in the name is the current layout; `list_dir` of `/etc/space`) | DSM's own view of the pools: md arrays with RAID level, member partitions with disk model, serial, slot and bay (`physical_location`), the volumes, and the SSD cache spaces (`reference="@shared_cache"`), which name the volume they cache | v0.2.0 |
+| DSM | `/sys/block/<dev>/device/syno_disk_serial` | a disk's serial when the space history does not name the disk (`device/serial` does not exist on DSM) | v0.2.0 |
 | DSM | `/etc/lvm/backup/vgN` | VG UUID, PVs, LVs, extent size | v0.2.0 |
-| DSM | `<volume>/@iSCSI/LUN/iscsi_lun.conf` | LUNs, VMM vdisks (`uuid`, `name`, `lid`, `bytes`, `devtype`, `vpd_unit_serial`) | v0.2.0 |
-| DSM | `<volume>/@iSCSI/LUN/iscsi_lun_acl.conf` | LUN ACL (`initiator`, `lun_uuid`, `authority`) | v0.2.0 |
-| DSM | `<volume>/@iSCSI/LUN/iscsi_target.conf`, `iscsi_mapping.conf` | targets and the target-to-LUN mapping (*file names and keys to verify on DSM*) | v0.2.0 |
+| DSM | `/usr/syno/etc/iscsi_lun.conf`, `iscsi_lun_acl.conf` | LUNs and VMM vdisks (`uuid`, `name`, `lid`, `bytes`, `devtype`, `vpd_unit_serial`, `rootpath`, `description`, `pre_alloc`) and each LUN's ACL (`initiator`, `lun_uuid`, `authority`): the host-wide union; `rootpath` is the volume holding the LUN | v0.2.0 |
+| DSM | `<volume>/@iSCSI/LUN/iscsi_lun.conf`, `iscsi_lun_acl.conf` | only that volume's LUNs; read when the `/usr/syno/etc` files cannot be, and compared with them | v0.2.0 |
+| DSM | `/usr/syno/etc/iscsi_target.conf`, `iscsi_mapping.conf` | targets (`tid`, `name`, `iqn`, `enabled`) and which LUN each maps (`tid`, `uuid`, `lun`). **The target file holds CHAP credentials** (`username`, `password`, `mutual_username`, `mutual_password`); they cross the wire in the file and are dropped in Python at once, never stored | v0.2.0 |
 | DSM | `<volume>/@Repository/<vm>/{vguest.conf,vdisk.conf}` | VMM guests and their disks | v0.2.0 |
-| DSM | `/etc/samba/smb.conf` or `/usr/syno/etc/smb.conf` (*which one: verify on DSM*) | SMB share names and paths | v0.2.0 |
+| DSM | `/etc/samba/smb.conf` | SMB share names and paths (confirmed on nas3; `/usr/syno/etc/smb.conf` does not exist) | v0.2.0 |
+| DSM | `/etc/synoinfo.conf` | model, disk count | later |
 | PVE | `/etc/pve/storage.cfg` | storages, `shared`, node lists, iSCSI/LVM/ZFS definitions | later |
 | PVE | `/etc/pve/qemu-server/*.conf`, `/etc/pve/lxc/*.conf` | VMs and their disk lines | later |
 | PVE | `/etc/pve/.vmlist`, `/etc/pve/.members`, `/etc/pve/corosync.conf` | VM placement, cluster nodes | later |
 | TN | `/etc/smb4.conf`, `/etc/exports`, `/etc/scst.conf` or `ctl.conf` (*verify*) | shares and iSCSI extents without `midclt` | later |
 
-Review question (a security one): `read_file` takes any path the agent can
-open, as `read_range` and `measure` already do. Should the agent have a local
-configuration (a file next to its binary, not settable from the network) that
-restricts which roots `read_file` and `read_range` serve? It would cost
-nothing in the protocol; the question is whether it is wanted.
+DSM disks are named `sataN` on nas3 and `sdX` on NAS2 (an older model, ext4
+volumes, partitions `sde5` without the `p`); the collector takes both, and
+never `iscsiN`, `loopN`, `ramN`, `zramN`, `mtdblockN`, `dm-N`, `mdN` or
+`synoboot`.
+
+## 14a. The read scope: allowed roots and a deny list
+
+**Decision (review question 4): yes.** Which files the agent will serve is
+configured **on the agent host** and cannot be changed over the network, and a
+hardcoded deny list sits above it. The rules are in
+[agent-protocol.md](agent-protocol.md) ("Allowed roots and the deny list");
+this is the part the allowlist review needs.
+
+- `FILECAT_AGENT_ALLOW_ROOTS`: a path list (`:` on POSIX, `;` on Windows) in
+  the environment, or the same key in the `.env` file next to the agent
+  binary; the environment wins. Unset: a built-in default per OS.
+- Applies to every command that takes a path: `read_file`, `read_range`,
+  `measure` (content), `list_dir`, `sum_subtree`, `statfs` (names, sizes,
+  totals). One check at the front of the dispatcher is cheaper to review than
+  a per-command list, and listing `/home` is a leak too.
+- **Default on DSM** (derived from every path the collectors and StoreFS
+  read; `tests/test_synology_space.py` runs the nas3 collection through the
+  fake agent with exactly this list and demands that nothing is refused):
+
+      /volume*  /proc  /sys  /dev/disk  /etc/samba  /etc/space  /etc/VERSION
+      /etc/exports  /etc/lvm/backup  /usr/syno/etc/iscsi_*.conf
+
+  `/volume*` carries the cataloged data (shares, `@iSCSI`, `@Repository`);
+  the rest is topology metadata. Other Linux: the metadata paths of the table
+  above (`/proc`, `/sys`, `/dev/disk`, `/etc/hostname`, `/etc/os-release`,
+  `/etc/exports`) plus `/mnt`, `/srv`, `/media`; data elsewhere must be added.
+  Windows: section 13.
+- Not a boundary against root on the host (root edits the `.env`); it is a
+  boundary against a compromised central server or a stolen token.
 
 ## 15. Native capabilities and crates
 
@@ -530,15 +627,23 @@ for x86_64 and armv7 (note 02); `nix` and `wmi` add no C library.
    the generated configuration files only (section 12)?
 3. **`pvesh`.** Allow the two fixed `get` paths of section 9, or only the
    files and the three text commands?
-4. **`read_file` scope** (section 14): a local allow-root configuration, or the
-   same reach as `read_range` as written?
+4. **`read_file` scope.** Decided: allowed roots from the agent host's
+   environment or `.env`, and a hardcoded deny list (section 14a). Still
+   open: the exact deny list (agent-protocol.md), and whether `.env.example`,
+   `.env.sample` and `.env.template` should be readable (they are).
 5. **`allowlist_sha256`.** Worth carrying (an audit aid, not a security
    boundary), or drop it?
-6. **Windows.** `wmi` entries only when a Windows agent is built; is it
-   wanted at all, given Windows hosts already scan by SMB?
+6. **Windows.** Decided: a Windows agent with the `wmi` entries of section
+   13, for a Windows file server. Open: confirm the association class names
+   and the `DedupMode` / `FileSystem` properties on a Server 2019/2022 host,
+   and the Windows default allowed roots (fixed volumes except the system
+   volume, plus share paths).
 7. **Synology tools** (`synodisk`, `synoiscsiep`): leave out unless the files
    prove insufficient (the recommendation), or specify them now?
-8. **DSM facts to verify** before the Synology collector is trusted (the
-   `verify` items above): the share configuration file, the iSCSI target and
-   mapping files, whether `lsblk` exists, the smartmontools version and
-   `-d sat`, and which btrfs-progs flags are accepted.
+8. **DSM facts.** Settled on nas3 and NAS2: the share file is
+   `/etc/samba/smb.conf`; the iSCSI files are in `/usr/syno/etc` (targets,
+   mapping, and the host-wide LUN list with `rootpath`); `lsblk` and
+   `findmnt` are absent; smartmontools is 6.5; `/etc/space/space_history_*.xml`
+   exists. Still open: whether a DSM disk needs `-d sat` for `smartctl -i`,
+   which btrfs-progs flags are accepted, and the layout of ext4 LUN backing
+   directories (`FILE`, `THIN`; NAS2).

@@ -11,6 +11,42 @@
   "collected_at": "2026-10-22T09:00:00Z",
   "nodes": [
    {
+    "id": "disk:SYNTH-NVME-0001",
+    "type": "disk",
+    "parent": null,
+    "name": "M.2 Drive 1",
+    "health": "ok",
+    "size_bytes": 400088457216,
+    "serial": "SYNTH-NVME-0001",
+    "model": "SNV3410-400G",
+    "slot": "1",
+    "media": "nvme",
+    "platform": {
+     "synology": {
+      "device": "/dev/nvme0n1",
+      "physical_location": "2000-1"
+     }
+    }
+   },
+   {
+    "id": "disk:SYNTH-NVME-0002",
+    "type": "disk",
+    "parent": null,
+    "name": "M.2 Drive 2",
+    "health": "ok",
+    "size_bytes": 400088457216,
+    "serial": "SYNTH-NVME-0002",
+    "model": "SNV3410-400G",
+    "slot": "2",
+    "media": "nvme",
+    "platform": {
+     "synology": {
+      "device": "/dev/nvme1n1",
+      "physical_location": "2000-2"
+     }
+    }
+   },
+   {
     "id": "disk:ZR6N3A01",
     "type": "disk",
     "parent": null,
@@ -24,7 +60,7 @@
     "platform": {
      "synology": {
       "device": "/dev/sata1",
-      "wwn": "500c500c5a0b1c21"
+      "physical_location": "0-1"
      }
     }
    },
@@ -42,7 +78,7 @@
     "platform": {
      "synology": {
       "device": "/dev/sata2",
-      "wwn": "500c500c5a0b1c22"
+      "physical_location": "0-2"
      }
     }
    },
@@ -60,7 +96,7 @@
     "platform": {
      "synology": {
       "device": "/dev/sata3",
-      "wwn": "500c500c5a0b1c23"
+      "physical_location": "0-3"
      }
     }
    },
@@ -78,7 +114,7 @@
     "platform": {
      "synology": {
       "device": "/dev/sata4",
-      "wwn": "500c500c5a0b1c24"
+      "physical_location": "0-4"
      }
     }
    },
@@ -94,7 +130,8 @@
     "level": "raid5",
     "platform": {
      "synology": {
-      "vg": "vg1"
+      "vg": "vg1",
+      "space_id": "reuse_1"
      }
     }
    },
@@ -133,6 +170,36 @@
     }
    },
    {
+    "id": "group:5b2a9f10-7c3d-4e21-98a0-b1c2d3e4f506",
+    "type": "group",
+    "parent": "pool:Xw3kLp-9aVt-QmR2-uYb7-Hn4d-Zc8e-Ft6Sgj",
+    "name": "md3",
+    "health": "ok",
+    "size_bytes": 400084697088,
+    "raw_bytes": 800169591808,
+    "role": "cache",
+    "level": "raid1",
+    "members": [
+     {
+      "disk": "disk:SYNTH-NVME-0001",
+      "role": "cache"
+     },
+     {
+      "disk": "disk:SYNTH-NVME-0002",
+      "role": "cache"
+     }
+    ],
+    "platform": {
+     "synology": {
+      "md": "md3",
+      "space": "shared_cache_vg1",
+      "cache_for": [
+       "/volume1"
+      ]
+     }
+    }
+   },
+   {
     "id": "vol:5e2c8d41-90ab-4c17-a3f6-7b1d0e94c258",
     "type": "volume",
     "parent": "pool:Xw3kLp-9aVt-QmR2-uYb7-Hn4d-Zc8e-Ft6Sgj",
@@ -144,7 +211,12 @@
     "free_bytes": 6006599999488,
     "mount": "/volume1",
     "fs_type": "btrfs",
-    "device": "/dev/mapper/cachedev_0"
+    "device": "/dev/mapper/cachedev_0",
+    "platform": {
+     "synology": {
+      "ssd_cache": "group:5b2a9f10-7c3d-4e21-98a0-b1c2d3e4f506"
+     }
+    }
    },
    {
     "id": "share:backup",
@@ -208,7 +280,16 @@
      "synology": {
       "devtype": 5,
       "lid": 1,
-      "vpd_unit_serial": "7949c2d0-3b1e-4f58-9a6d-0e5c8b1f2a33"
+      "vpd_unit_serial": "7949c2d0-3b1e-4f58-9a6d-0e5c8b1f2a33",
+      "targets": [
+       {
+        "tid": 1,
+        "name": "Synology iSCSI Target",
+        "iqn": "iqn.2000-01.com.synology:NAS3.default-target.b822278c1ad",
+        "enabled": true,
+        "lun": 1
+       }
+      ]
      }
     }
    },
@@ -238,7 +319,16 @@
      "synology": {
       "devtype": 11,
       "lid": 2,
-      "vpd_unit_serial": "47f5d7a8-5444-4932-93e3-c712f6aa0130"
+      "vpd_unit_serial": "47f5d7a8-5444-4932-93e3-c712f6aa0130",
+      "targets": [
+       {
+        "tid": 1,
+        "name": "Synology iSCSI Target",
+        "iqn": "iqn.2000-01.com.synology:NAS3.default-target.b822278c1ad",
+        "enabled": true,
+        "lun": 2
+       }
+      ]
      }
     }
    },
@@ -276,7 +366,16 @@
      "synology": {
       "devtype": 5,
       "lid": 3,
-      "vpd_unit_serial": "f48f1514-6072-4193-989e-9e7bfbe6d0e1"
+      "vpd_unit_serial": "f48f1514-6072-4193-989e-9e7bfbe6d0e1",
+      "targets": [
+       {
+        "tid": 2,
+        "name": "PVEC",
+        "iqn": "iqn.2000-01.com.synology:NAS3.PVEC.b822278c1ad",
+        "enabled": true,
+        "lun": 1
+       }
+      ]
      }
     }
    },
@@ -310,7 +409,16 @@
      "synology": {
       "devtype": 5,
       "lid": 4,
-      "vpd_unit_serial": "2a93d1c8-71e4-4b60-8c25-5f0e9a6b7d14"
+      "vpd_unit_serial": "2a93d1c8-71e4-4b60-8c25-5f0e9a6b7d14",
+      "targets": [
+       {
+        "tid": 3,
+        "name": "lkensel-g5-5090",
+        "iqn": "iqn.2000-01.com.synology:NAS3.lkensel-g5-5090.b822278c1ad",
+        "enabled": true,
+        "lun": 1
+       }
+      ]
      }
     }
    },
@@ -344,7 +452,16 @@
      "synology": {
       "devtype": 5,
       "lid": 5,
-      "vpd_unit_serial": "a0061b7e-4c92-4d83-b5f1-26d8e3c90a57"
+      "vpd_unit_serial": "a0061b7e-4c92-4d83-b5f1-26d8e3c90a57",
+      "targets": [
+       {
+        "tid": 3,
+        "name": "lkensel-g5-5090",
+        "iqn": "iqn.2000-01.com.synology:NAS3.lkensel-g5-5090.b822278c1ad",
+        "enabled": true,
+        "lun": 2
+       }
+      ]
      }
     }
    },
@@ -378,7 +495,16 @@
      "synology": {
       "devtype": 5,
       "lid": 6,
-      "vpd_unit_serial": "83a1e4f6-0d57-4a29-9c3b-b71f58e2d640"
+      "vpd_unit_serial": "83a1e4f6-0d57-4a29-9c3b-b71f58e2d640",
+      "targets": [
+       {
+        "tid": 3,
+        "name": "lkensel-g5-5090",
+        "iqn": "iqn.2000-01.com.synology:NAS3.lkensel-g5-5090.b822278c1ad",
+        "enabled": true,
+        "lun": 3
+       }
+      ]
      }
     }
    },
@@ -412,7 +538,16 @@
      "synology": {
       "devtype": 5,
       "lid": 7,
-      "vpd_unit_serial": "bd85bc23-c5d3-459e-8801-39d17f096c57"
+      "vpd_unit_serial": "bd85bc23-c5d3-459e-8801-39d17f096c57",
+      "targets": [
+       {
+        "tid": 3,
+        "name": "lkensel-g5-5090",
+        "iqn": "iqn.2000-01.com.synology:NAS3.lkensel-g5-5090.b822278c1ad",
+        "enabled": true,
+        "lun": 4
+       }
+      ]
      }
     }
    },

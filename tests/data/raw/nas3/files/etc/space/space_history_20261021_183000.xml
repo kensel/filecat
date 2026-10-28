@@ -1,0 +1,31 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!-- synthetic: written to match tests/data/raw/nas3 (4 disks, one array), in the layout of a real
+     DSM 7 space_history file (tests/data/raw/dsm_space_history_nas3.xml) -->
+<spaces>
+        <space path="/dev/vg1" reference="@storage_pool" uuid="Xw3kLp-9aVt-QmR2-uYb7-Hn4d-Zc8e-Ft6Sgj" device_type="2" drive_type="0" container_type="2" limited_raidgroup_num="24" space_id="reuse_1" >
+                <device>
+                        <lvm path="/dev/vg1" uuid="Xw3kLp-9aVt-QmR2-uYb7-Hn4d-Zc8e-Ft6Sgj" designed_pv_counts="1" status="normal" total_size="47970078687232" free_size="969890856960" pe_size="4194304" expansible="0" max_size="1">
+                                <raids>
+                                        <raid path="/dev/md2" uuid="c40e7b19:6d254f83:a1b093e8:d52f7a46" level="raid6" version="1.2" layout="2">
+                                                <disks>
+                                                        <disk status="normal" dev_path="/dev/sata1p5" physical_location="0-1" model="ST16000NM001G" serial="ZR6N3A01" partition_version="9" partition_start="21241856" partition_size="31230783488" slot="0">
+                                                        </disk>
+                                                        <disk status="normal" dev_path="/dev/sata2p5" physical_location="0-2" model="ST16000NM001G" serial="ZR6N3A02" partition_version="9" partition_start="21241856" partition_size="31230783488" slot="1">
+                                                        </disk>
+                                                        <disk status="normal" dev_path="/dev/sata3p5" physical_location="0-3" model="ST16000NM001G" serial="ZR6N3A03" partition_version="9" partition_start="21241856" partition_size="31230783488" slot="2">
+                                                        </disk>
+                                                </disks>
+                                        </raid>
+                                </raids>
+                        </lvm>
+                </device>
+                <reference>
+                        <volumes>
+                                <volume path="/volume1" dev_path="/dev/vg1/volume_1" uuid="kP7mQz-4tRw-LnB8-Vc2x-Ds5H-Gj3f-Ya9Uie" type="btrfs">
+                                </volume>
+                        </volumes>
+                        <iscsitrgs>
+                        </iscsitrgs>
+                </reference>
+        </space>
+</spaces>

@@ -49,9 +49,69 @@ ALLOWLIST: dict[str, str | None] = {
     "findmnt_json": None, "btrfs_show": None, "btrfs_usage": "btrfs_mount",
     "mdadm_detail_scan": None, "mdadm_detail": "md_device",
     "smartctl_info_json": "block_device", "smartctl_info_json_sat": "block_device",
-    "smartctl_info": "block_device", "smartctl_all_json": "block_device",
+    "smartctl_info": "block_device", "smartctl_all_json": "block_device", "smartctl_version": None,
     "zpool_list": None, "zpool_status": None, "zfs_list": None, "zpool_get": None,
 }
+
+# --- the agent's read scope (docs/agent-protocol.md, "Allowed roots and the deny list") --------
+# Deny list, compiled into the real agent: wins over the allowed roots, no configuration changes
+# it. It applies to commands that return file content (read_file, read_range, measure), to the
+# canonical path (symlinks resolved). `*` matches inside one path component.
+DENY_POSIX = ("/etc/shadow", "/etc/shadow-", "/etc/gshadow", "/etc/gshadow-", "/etc/sudoers",
+              "/etc/sudoers.d", "/etc/ssh/ssh_host_*_key", "/etc/ssl/private", "/var/log", "/var/logs")
+ENV_ALLOWED = (".env.example", ".env.sample", ".env.template")
+DENY_WINDOWS = (r"%SystemRoot%\system32\config", r"%SystemRoot%\ntds")
+DENY_SHA256 = hashlib.sha256("\n".join(DENY_POSIX + ENV_ALLOWED + DENY_WINDOWS).encode()).hexdigest()
+
+
+def _comp_match(pattern: str, name: str, fold: bool = False) -> bool:
+    if fold:
+        pattern, name = pattern.lower(), name.lower()
+    return re.fullmatch(".*".join(re.escape(p) for p in pattern.split("*")), name) is not None
+
+
+def under(pattern: str, path: str, sep: str = "/", fold: bool = False) -> bool:
+    """`path` is `pattern` or below it, component by component; `*` is a glob inside one component."""
+    pp, xs = [c for c in pattern.split(sep) if c], [c for c in path.split(sep) if c]
+    return len(xs) >= len(pp) and all(_comp_match(a, b, fold) for a, b in zip(pp, xs))
+
+
+def is_env_file(name: str, fold: bool = False) -> bool:
+    n = name.lower() if fold else name
+    return (n == ".env" or n.startswith(".env.")) and n not in ENV_ALLOWED
+
+
+def denied(path: str) -> bool:
+    """POSIX deny list on a canonical path."""
+    return (any(under(p, path) for p in DENY_POSIX) or is_env_file(path.rsplit("/", 1)[-1]))
+
+
+def denied_windows(path: str, system_root: str = r"C:\Windows") -> bool:
+    """Windows deny list on a canonical (final, long-name, case-insensitive) path."""
+    low = path.lower()
+    if any(under(d.replace("%SystemRoot%", system_root), path, "\\", True) for d in DENY_WINDOWS):
+        return True
+    name = low.rsplit("\\", 1)[-1]
+    return (is_env_file(name, True) or name.endswith(".dit") or name.startswith(("ntuser.dat", "usrclass.dat")))
+
+
+def resolve_allow_roots(environ: dict[str, str], dotenv: str | None, default: list[str]
+                        ) -> tuple[list[str], str]:
+    """The effective allowed roots and where they came from: FILECAT_AGENT_ALLOW_ROOTS in the
+    environment wins over the same key in the `.env` file next to the agent binary; neither: the
+    built-in default. A variable that is set but empty means no roots (every path is refused)."""
+    sep = ";" if os.name == "nt" else ":"
+    raw, source = environ.get("FILECAT_AGENT_ALLOW_ROOTS"), "env"
+    if raw is None and dotenv is not None:
+        for line in dotenv.splitlines():
+            key, eq, value = line.strip().partition("=")
+            if eq and key.strip() == "FILECAT_AGENT_ALLOW_ROOTS":
+                raw, source = value.strip().strip("\"'"), "env_file"
+    if raw is None:
+        return list(default), "default"
+    return [r for r in raw.split(sep) if r], source
+
+
 MAX_RULES = 1024
 MAX_PATTERN_BYTES = 4096
 MAX_PATTERNS_BYTES = 64 * 1024
@@ -154,10 +214,12 @@ class _Policy:
 
 class FakeAgent:
     def __init__(self, root: Path, token: str = "s3cret", *, protocol: int = 1,
-                 cert: Path = CERT, key: Path = KEY) -> None:
+                 cert: Path = CERT, key: Path = KEY, allow_roots: list[str] | None = None) -> None:
         self.root = root
         self.token = token
         self.protocol = protocol
+        self.allow_roots = allow_roots                  # None: this fake imposes no roots (the deny list always applies)
+        self.allow_roots_source = "env"
         self.requests: list[dict[str, Any]] = []        # every request received, in order
         self.wire: list[tuple[str, str]] = []           # ("in" | "out", the line as text), both ways
         self.log: list[str] = []                        # what the agent would log
@@ -319,7 +381,10 @@ class FakeAgent:
         return _Policy(raw)
 
     # --- commands ---
-    def real(self, req: dict[str, Any]) -> Path:
+    def real(self, req: dict[str, Any], content: bool = False) -> Path:
+        """The served file of a request. The scope is checked on the canonical path (symlinks
+        resolved), before the file is looked up, so a path outside gets `refused` whether or not
+        it exists: the allowed roots for every command, the deny list for those that return content."""
         if "path_b64" in req:
             raw = base64.b64decode(req["path_b64"])
             back = {v: k.encode() for k, v in self.served_as.items()}
@@ -329,6 +394,15 @@ class FakeAgent:
         if not isinstance(path, str) or not path.startswith("/"):
             raise _Fail("bad_request", "path must be absolute")
         real = self.root / path.lstrip("/")
+        try:
+            rel = real.resolve().relative_to(self.root.resolve()).as_posix()
+            canon = "/" if rel == "." else "/" + rel
+        except ValueError:
+            canon = "/\0outside"        # a link out of the served tree
+        if self.allow_roots is not None and not any(under(r, canon) for r in self.allow_roots):
+            raise _Fail("refused", f"{path}: outside the agent's allowed roots (FILECAT_AGENT_ALLOW_ROOTS on the agent host)")
+        if content and denied(canon):
+            raise _Fail("refused", f"{path}: denied by agent policy")
         real.lstat()                    # FileNotFoundError -> not_found
         return real
 
@@ -675,7 +749,7 @@ class FakeAgent:
         maximum = req.get("max", READ_FILE_DEFAULT)
         if not isinstance(maximum, int) or isinstance(maximum, bool) or maximum < 1 or maximum > MAX_READ:
             raise _Fail("bad_request", f"max must be 1 to {MAX_READ}")
-        path = self.real(req)
+        path = self.real(req, content=True)
         if path.is_symlink() or not path.is_file():
             raise _Fail("bad_request", "not a regular file")
         with open(path, "rb") as f:
@@ -761,15 +835,18 @@ class FakeAgent:
             entries.append({"id": entry, "available": ok, "binary": f"/usr/bin/{entry.split('_')[0]}" if ok else None,
                             "version": None, "arg_kind": kind})
         digest = hashlib.sha256("\0".join(f"{e}={k}" for e, k in sorted(ALLOWLIST.items())).encode()).hexdigest()
-        return {"ok": True, "allowlist_version": 1, "allowlist_sha256": digest, "platform": "linux",
-                "entries": entries}
+        resp = {"ok": True, "allowlist_version": 1, "allowlist_sha256": digest, "deny_sha256": DENY_SHA256,
+                "platform": "linux", "entries": entries}
+        if self.allow_roots is not None:
+            resp.update(allow_roots=list(self.allow_roots), allow_roots_source=self.allow_roots_source)
+        return resp
 
     def _measure(self, req: dict[str, Any]) -> dict[str, Any]:
         policy = req.get("hash", "auto")
         head_bytes = req.get("head_bytes", 8192)
         if policy not in ("auto", "full", "none") or not 0 <= head_bytes <= 1024 * 1024:
             raise _Fail("bad_request", "bad hash or head_bytes")
-        path = self.real(req)
+        path = self.real(req, content=True)
         if not path.is_file():
             raise _Fail("bad_request", "not a regular file")
         with open(path, "rb") as f:
@@ -787,7 +864,7 @@ class FakeAgent:
             raise _Fail("bad_request", "bad offset or len")
         if length > MAX_READ:
             raise _Fail("bad_request", f"len {length} is over the maximum {MAX_READ}")
-        path = self.real(req)
+        path = self.real(req, content=True)
         if not path.is_file():
             raise _Fail("bad_request", "not a regular file")
         with open(path, "rb") as f:

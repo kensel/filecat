@@ -72,7 +72,8 @@ _HEX64 = re.compile(r"[0-9a-f]{64}")
 class AgentError(OSError):
     """The agent answered {"ok": false}, or the connection to it cannot be
     trusted. `code` is the protocol's error code (unauthorized, bad_request,
-    not_found, permission_denied, io, cancelled, busy) or one the client adds
+    not_found, permission_denied, io, cancelled, busy, refused: a `run` argument that failed its
+    check, or a path outside the agent's allowed roots or on its deny list) or one the client adds
     (protocol, fingerprint, policy)."""
 
     def __init__(self, code: str, message: str) -> None:
@@ -244,6 +245,9 @@ class Capabilities:
     allowlist_sha256: str | None
     platform: str
     entries: dict[str, Capability]
+    allow_roots: tuple[str, ...] | None = None      # the agent's effective read scope; None: not reported
+    allow_roots_source: str | None = None           # env, env_file or default
+    deny_sha256: str | None = None                  # hash of the agent's compiled-in deny list
 
     def has(self, entry_id: str) -> bool:
         cap = self.entries.get(entry_id)
@@ -627,8 +631,11 @@ class AgentClient:
         for e in resp.get("entries", []):
             entries[e["id"]] = Capability(e["id"], bool(e.get("available")), e.get("binary"),
                                           e.get("version"), e.get("arg_kind"))
+        roots = resp.get("allow_roots")
         return Capabilities(int(resp.get("allowlist_version") or 0), resp.get("allowlist_sha256"),
-                            str(resp.get("platform") or ""), entries)
+                            str(resp.get("platform") or ""), entries,
+                            tuple(roots) if isinstance(roots, list) else None,
+                            resp.get("allow_roots_source"), resp.get("deny_sha256"))
 
     def wmi(self, entry_id: str, timeout: float | None = None) -> list[dict[str, Any]]:
         """The rows of an allowlisted WMI query (Windows agents only; any other agent answers

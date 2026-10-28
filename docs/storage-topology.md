@@ -84,7 +84,7 @@ platforms that name parity disks (ZFS and md do not, so their members are
 | `protocols` | share | `smb`, `nfs` |
 | `vm` | vdisk | `{"id", "name"}` of the VM it is attached to: the id of a `vm` node (absent for a template) |
 | `attached` | vdisk | false for an image-library template or an orphaned disk |
-| `target`, `initiators` | lun | the iSCSI target name; the LUN's ACL, `[{"iqn", "authority", "default"?}]` (section 3, Synology) |
+| `target`, `initiators` | lun | the iSCSI target name (several, joined by `, `, when the LUN is mapped to more than one; the detail is in `platform`); the LUN's ACL, `[{"iqn", "authority", "default"?}]` (section 3, Synology) |
 | `backing` | disk, lun, vdisk | `{"host", "id"}` of the node on another host that provides this one (section 5) |
 | `match` | disk, lun, vdisk | `kind:value` identifiers to link nodes across hosts: `naa`, `uuid`, `serial`, `vmserial`, `volid`, `vmmdisk` |
 | `virtual` | disk, lun, vdisk | something else provides it; a missing provider is then reported |
@@ -151,17 +151,17 @@ a device before the agent relies on them.
 
 | Node | From | Notes |
 |---|---|---|
-| disk | `/sys/block/sata*`, `nvme*`; SMART identify for serial/model; DSM slot from the device name | `platform.synology.device = /dev/sataN`; *verify* where DSM keeps the slot and health (`synodisk`, `/run/synostorage`) |
-| group | `/proc/mdstat`, `mdadm --detail` or `/sys/block/mdX/md` | `level` raid1/raid5/raid6/raid10; `[UUU_]` gives `degraded`; SHR with unequal disks gives several groups (md2, md3, ...) in one pool |
-| pool | LVM VG over the md arrays (`/etc/lvm/backup/vgN`, `vgs`); no LVM: the md array itself | `level: shr` when the arrays are an SHR layout, else the md level; name "Storage Pool 1" is not stable, so it is a field |
+| disk | the space history (`/etc/space/space_history_*.xml`) for model, serial, slot and bay; `/sys/block` for size and `rotational`; serial fallbacks `device/syno_disk_serial`, then SMART identify | `platform.synology.device = /dev/sataN` (`/dev/sdX` on older models), `physical_location` (`0-1`: enclosure-bay); `slot` is the bay number |
+| group | the space history's `<raid>` (`level` raid1/raid5/raid6/raid10, member partitions); `/proc/mdstat`, `mdadm --detail --scan` (UUID) and `/sys/block/mdX/size` for sizes and health. Without the history: mdstat alone | `[UUU_]` gives `degraded`; SHR with unequal disks gives several groups (md2, md3, ...) in one pool, each with its own level. An SSD cache space (`reference="@shared_cache"`) is a group with `role: cache` under the pool of the volume it caches; a cache of one SSD is reported as raid1 and is not degraded for that |
+| pool | the space history's `<space>` (its LVM uuid is the VG id of `/etc/lvm/backup/vgN`); without it the LVM VG over the md arrays, or the md array itself | one array: the pool's `level` is that array's (raid10 on nas3, raid5 on NAS2); several arrays in one LVM: `shr` (with the history the group nodes keep each array's real level; without it `shr` is a guess from the array count); name "Storage Pool 1" is not stable, so it is a field |
 | volume | `/proc/mounts` lines under `/volumeN`; `statvfs`; `blkid` | `device` is `/dev/mapper/cachedev_0` when SSD cache is on; `vg1/volume_1` in `platform` |
-| share | share definitions (`/usr/syno/etc/synoshare.conf` or `smb.conf`, *verify*), not every top-level folder | skip `@*`, `#*`; `unc = \\<host>\<name>`; `path = /volumeN/<name>` |
-| lun | `iscsi_lun.conf` stanzas, `devtype` 5 (BLUN, thin) and 11 (BLUN_THICK) | `kind: iscsi`; `thin` = devtype 5; `size_bytes` = `bytes=`; `allocated_bytes` = sum of `st_blocks * 512` in the UUID directory (never `st_size`: the 512 GiB `ROD` sparse file); `path` = `@iSCSI/LUN/BLUN[_THICK]/<uuid>` |
+| share | `/etc/samba/smb.conf` (confirmed on nas3), `/etc/exports` for NFS | skip `@*`, `#*`; `unc = \\<host>\<name>`; `path = /volumeN/<name>` |
+| lun | `/usr/syno/etc/iscsi_lun.conf` stanzas (`rootpath` = the volume), `devtype` 5 (BLUN, thin) and 11 (BLUN_THICK) on btrfs volumes; 1 on ext4 (NAS2, `FILE` and `THIN` directories) | `kind: iscsi`; `thin` = devtype 5, or `pre_alloc=no` where there is no BLUN directory; `size_bytes` = `bytes=`; `detail` = the admin's `description`; `allocated_bytes` = sum of `st_blocks * 512` in the UUID directory (never `st_size`: the 512 GiB `ROD` sparse file); `path` = `@iSCSI/LUN/BLUN[_THICK]/<uuid>`. An ext4 LUN's backing layout is not known, so it has neither `path` nor `allocated_bytes` (and a note) |
 | vdisk | `devtype` 7 (VDISK_BLUN); `name=vdisk.<vm>.<vdisk>.<bus>.<unit>` attached, `name=image.<image>.<vol>...` template | attached: `vm` from `@Repository/<vm_uuid>/vguest.conf`, `attached: true`; image: `attached: false`, no `vm`; vCPU, RAM, `is_meta_disk`, `is_general_vm` go in `platform.synology` |
 | vm | `@Repository/<vm_uuid>/vguest.conf` | `vm:<uuid>`, name, vCPU and RAM in `platform.synology`; Virtual DSM has `is_general_vm: false` |
-| links | LUN: `target`, `initiators` from the LUN ACL, `match: ["uuid:<uuid>", "naa:<derived>"]` and `platform.synology.vpd_unit_serial`; vdisk: `match: ["uuid:<uuid>", "vmmdisk:<uuid>"]` and `vm` | the NAA id derives from `vpd_unit_serial` by the rule below (verified on nas3); the ACL is `iscsi_lun_acl.conf` (found, `authority` still to verify) |
+| links | LUN: `target` (every target it is mapped to, joined by `, `; each target with its `tid`, `iqn`, `enabled` and the LUN number on it in `platform.synology.targets`), `initiators` from the LUN ACL, `match: ["uuid:<uuid>", "naa:<derived>"]` and `platform.synology.vpd_unit_serial`; vdisk: `match: ["uuid:<uuid>", "vmmdisk:<uuid>"]` and `vm` | the NAA id derives from `vpd_unit_serial` by the rule below (verified on nas3); the ACL is `iscsi_lun_acl.conf` (`authority` still to verify) |
 
-**The LUN files** (both in `/volume1/@iSCSI/LUN/`, found on nas3):
+**The iSCSI files** (all in `/usr/syno/etc/`; `/volumeN/@iSCSI/LUN/` holds copies of the LUN and ACL files, found on nas3 and NAS2):
 
 ```ini
 # iscsi_lun.conf, one stanza per LUN
@@ -187,6 +187,21 @@ authority=0
   The collector records the serial in `platform.synology.vpd_unit_serial` and the result as
   a `naa:` match; a LUN reported without one is still matched, by deriving the id from
   its `vpd_unit_serial` or else its `uuid:` key.
+- **Where the files are.** `/usr/syno/etc/` holds `iscsi_lun.conf`, `iscsi_lun_acl.conf`,
+  `iscsi_target.conf`, `iscsi_mapping.conf` and others (`iscsi_host*.conf`,
+  `iscsi_setting.conf`). `/usr/syno/etc/iscsi_lun.conf` is the host-wide union of all LUNs,
+  each stanza with `rootpath=/volumeN`; `/volumeN/@iSCSI/LUN/iscsi_lun.conf` holds only that
+  volume's (on nas3, with one LUN volume, the two are identical; on NAS2 the volume1 copy lacks the
+  volume2 stanzas). The collector places each LUN on its `rootpath` volume, uses the per-volume
+  files only if the system file cannot be read, and notes a stanza a volume's file has that the
+  system file lacks or has with other values (a subset is normal). Same for the ACL.
+- **Targets.** `iscsi_target.conf` has `[iSCSI_T1]` stanzas (`tid`, `name`, `iqn`, `enabled=yes|no`,
+  portals, and CHAP settings); `iscsi_mapping.conf` has `[iSCSI_MAP_T1_L<uuid>]` stanzas with
+  `tid`, `uuid` and `lun` (the LUN number on that target). A LUN may map to several targets; all
+  are recorded. **The target file holds `username`, `password`, `mutual_username` and
+  `mutual_password`: only `tid`, `name`, `iqn` and `enabled` are ever copied out**, so no
+  credential reaches the topology, the store, a note or a test fixture (fixtures say `REDACTED`;
+  a test plants canary values and demands they never appear).
 - **ACL.** `initiators` is one entry per ACL stanza: `{"iqn": <initiator>, "authority":
   <integer as written>}`; the stanza for `iqn.2000-01.com.synology:default.acl` is the
   default for initiators not listed and is recorded with `"default": true`. `authority`
@@ -245,6 +260,9 @@ device.
 
 ### Windows
 
+The plan for a Windows file server, with the exact WMI classes and properties, is in
+section 3b; the table below is the general mapping.
+
 | Node | Source | Notes |
 |---|---|---|
 | disk | `Get-PhysicalDisk` (SerialNumber, Usage -> role: `AutoSelect`/`HotSpare`/`Journal`), `Get-Disk` | `slot` from `PhysicalLocation`; `UniqueId`/`Guid` for an iSCSI disk is its NAA id: `match: ["naa:..."]`, `virtual: true`; `serial:<SerialNumber>` for a VM's disk. `host.iqn` from `Get-InitiatorPort` |
@@ -282,20 +300,48 @@ tool. `collect()` picks the collector by `detect_platform` (a DSM host has
 | Node | Read from | Notes |
 |---|---|---|
 | host `os` | `/etc/VERSION` | `DSM 7.2.2` |
-| disk | `/sys/block/{sataN,sasN,nvmeNnM}/{size,queue/rotational,device/model}`; `smartctl --json -i /dev/sataN` (`run` `smartctl_info_json`, then `_sat`, then the text form) | serial is the id; no serial: WWN, then device name, flagged `id_unstable` |
-| group | `/proc/mdstat`, `mdadm --detail --scan` (`mdadm_detail_scan`), `/sys/block/mdN/size`, member partition sizes | md0 (system) and md1 (swap) are skipped: only arrays under a VG or a mounted volume count; `[UU_]` or `(F)` is `degraded` |
-| pool | `/etc/lvm/backup/vgN` (VG id, PVs, LVs) | no LVM: the array is its own pool. `level` is the array level; several arrays in one VG is `shr`. *Verify on DSM:* SHR with equal disks looks like a plain RAID 5 in md and LVM; a pool-type file (`/etc/space/space_table`?) would settle it |
+| disk | the space history (model, serial, slot, `physical_location`); `/sys/block/{sataN,sasN,nvmeNnM,sdX}/{size,queue/rotational,device/model}`; no serial there: `device/syno_disk_serial`, then smartctl (below) | serial is the id; no serial: WWN, then device name, flagged `id_unstable`. `iscsiN` (tcm_loop, DSM's local loopback of one of its own LUNs; `/sys/block/iscsi1 -> ../devices/tcm_loop_0/...`), `loopN`, `ramN`, `zramN`, `mtdblockN`, `dm-N`, `mdN`, `synoboot` and removable disks are never disks. The loopbacks are to be linked to their LUN later; they are not now |
+| group | the space history's raids (level, members); `/proc/mdstat`, `mdadm --detail --scan` (`mdadm_detail_scan`), `/sys/block/mdN/size`, member partition sizes | md0 (system) and md1 (swap) are skipped: only arrays under a pool or a mounted volume count; `[UU_]` or `(F)` is `degraded`; a `@shared_cache` space is a `role: cache` group, attached to the pool of the volume its `<cache reference>` names (the volume's uuid in the pool's `<volumes>`; else a pool that mentions it, else the VG that owns that LV, else the only pool, with a note) |
+| pool | the space history's pools (LVM uuid, `total_size`, `free_size`, RAID level of each array); `/etc/lvm/backup/vgN` (VG id, PVs, LVs) for volumes' LV names and when there is no history | no LVM: the array is its own pool. One array: its level; several arrays in one LVM: `shr`. Order of the spaces in the file and `device_type` mean nothing (nas3 and NAS2 differ) |
 | volume | `/proc/mounts` (`/volumeN`), `statfs`, the device-mapper chain (`/sys/block/dm-*/dm/name`, `slaves/`) from `cachedev_0` to the LV to the array, file system uuid from `/sys/fs/btrfs/<uuid>/devices` (else `/dev/disk/by-uuid`, else `blkid`) | `used` is `total - free`, `free` is `avail`; `ro` mount is `warning` |
-| share | `/etc/samba/smb.conf` or `/usr/syno/etc/smb.conf`; `/etc/exports` for NFS | *Verify on DSM:* which file lists the shares. Fallback, flagged in the notes: every top-level folder of the volume not starting with `@`, `#`, `$` or `.`. `used_bytes` only with `--measure-shares` (`sum_subtree`, minutes on a big share) |
-| lun, vdisk | `iscsi_lun.conf`, `iscsi_lun_acl.conf`, `iscsi_target.conf` + `iscsi_mapping.conf` in `<volume>/@iSCSI/LUN/` | the NAA id is `topology.naa_from_unit_serial`; targets: *verify on DSM*, the two file names and keys are assumed and a host without them gets no `target` |
+| share | `/etc/samba/smb.conf`; `/etc/exports` for NFS | Fallback, flagged in the notes, when `smb.conf` cannot be read: every top-level folder of the volume not starting with `@`, `#`, `$` or `.`. `used_bytes` only with `--measure-shares` (`sum_subtree`, minutes on a big share) |
+| lun, vdisk | `/usr/syno/etc/iscsi_lun.conf`, `iscsi_lun_acl.conf`, `iscsi_target.conf`, `iscsi_mapping.conf`; the per-volume copies as fallback and comparison | the NAA id is `topology.naa_from_unit_serial`; `target` and `platform.synology.targets` as above |
 | lun/vdisk `allocated_bytes` | `sum_subtree` of `<volume>/@iSCSI/LUN/<BLUN|BLUN_THICK|VDISK_BLUN>/<uuid>`, `total_allocated_size` | `st_blocks * 512`, never `total_size`: the sparse `ROD` file in each directory is 512 GiB |
 | vm | `<volume>/@Repository/<vm>/vguest.conf`, `vdisk.conf` | a vdisk naming a VM that has no folder gets a `[ORPHANED_VDISK]` vm |
 
-*Also verify on DSM:* that `lsblk` is absent (the collector does not need
-it), the smartmontools version and whether `-d sat` is required, and that
-`/sys/block/sataN` is how the disks appear on every model. LUN `health`, VM
-`health` and the per-LUN `detail` are not collected: nothing readable says
-them.
+**Disk serials, in order:** the space history, `/sys/block/<dev>/device/syno_disk_serial`
+(DSM's own; `device/serial` does not exist), `smartctl -i`, `device/serial`. smartctl is
+asked for its version once per host (`smartctl_version`): DSM 7 ships 6.5, which has no `--json`,
+so below 7.0 the collector runs only the text form. Nothing here uses `lsblk` or `findmnt`,
+which DSM does not have. LUN `health`, VM `health` are not collected: nothing readable says
+them. Settled on nas3 and NAS2, still open: whether `smartctl -i` needs `-d sat` on a DSM disk,
+and what an ext4 LUN's `FILE` / `THIN` directories hold.
+
+## 3b. Windows file server collector (planned, not written)
+
+A Windows agent answers `wmi {id}` (the entries of
+[agent-allowlist.md](agent-allowlist.md) section 13); a `windows` collector would read them through the
+same `Source` and build the same generic nodes. No new node type or parent rule is needed. Reads
+are by `needed` entries only; the optional ones add detail.
+
+| WMI entry (class) | Node and fields |
+|---|---|
+| `os_info` (`Win32_OperatingSystem`) | `host.name`, `host.os` |
+| `storage_physical_disk` (`MSFT_PhysicalDisk`) | `disk`: id `disk:<SerialNumber>` (else `UniqueId`, flagged `id_unstable`), `serial`, `model`, `size_bytes`, `media` (`MediaType`, `SpindleSpeed`), `health` (`HealthStatus`), `slot` (`SlotNumber`), role from `Usage` (`HotSpare` is `spare`), `platform.windows.{device_id, physical_location}` |
+| `storage_disk` (`MSFT_Disk`) | links a disk number to a `disk`; an iSCSI disk (`BusType` iSCSI) is `virtual: true` with `match: ["naa:<UniqueId>"]` and no serial of its own: it resolves to a nas3 `lun` through the NAA id, like a Proxmox iSCSI disk. A disk with `BusType` Spaces is a Storage Spaces virtual disk |
+| `storage_pool`, `storage_pool_to_physical_disk` | `pool`: id `pool:<UniqueId>`, `size_bytes`, `allocated_bytes`, `health`; `members` the physical disks; the primordial pool is skipped |
+| `storage_virtual_disk`, `storage_virtual_disk_to_disk` | a Space: a `lun`-like node under its pool (`kind: space`, `size_bytes` = `Size`, `allocated_bytes` = `FootprintOnPool`, `thin` from `ProvisioningType`); the pool's `level` is its resiliency (`simple`, `mirror`, `parity`), per-Space detail in `platform.windows` |
+| `storage_partition`, `storage_volume` (`win32_volume` fallback) | `volume`: id `vol:<UniqueId>`, `mount` (`D:\` or the volume GUID path), `fs_type`, `size_bytes`, `free_bytes`, `used_bytes`, `health`; parent the pool when the volume sits on a Space, else none with the disk in `members` (a basic disk, an iSCSI disk) |
+| `smb_share`, `win32_share` | `share`: id `share:<name>`, `path` (`D:\Data`), parent the volume holding the path, `unc` `\\<host>\<name>` (the scope name for a clustered file server), `protocols: ["smb"]`; special shares (`ADMIN$`, `C$`, `IPC$`) and printers skipped |
+| `iscsi_session`, `initiator_port` | `host.iqn`; `platform.windows.iscsi` on the iSCSI disks: target IQN and portal, to name the nas3 target |
+| `dedup_volume` (optional) | `volume.platform.windows.dedup`: `SavedSpace`, `SavingsRate` |
+| `dfs_namespace`, `dfs_folder` (later) | a DFS path to `\\server\share` map for catalog roots; no node |
+
+The disk-to-volume join goes `volume` to `MSFT_Partition.AccessPaths` to `DiskNumber` to
+`MSFT_Disk` to `MSFT_PhysicalDisk.DeviceId`; a share goes to its volume by the longest matching
+drive-letter or GUID-path prefix. Drive-letter path mapping for `ShareMap` (section 4) belongs to
+this collector. The agent's read scope on Windows (allowed roots, deny list) is in
+[agent-protocol.md](agent-protocol.md).
 
 ## 4. Shares and path mapping
 
@@ -622,8 +668,7 @@ into their own store, since they are already keyed by root.
    of `vpd_unit_serial` with non-hex characters mapped to `ord(c) & 0xF`
    (section 3); (b) the ACL is `iscsi_lun_acl.conf`, one stanza per LUN and
    initiator, with a `default.acl` entry. Still to verify: what `authority`
-   means (0 and 3 seen; guess 0 = no access, 3 = read/write), whether the
-   target-to-LUN mapping lives in the same file, and (c) that the `serial=` a
+   means (0 and 3 seen; guess 0 = no access, 3 = read/write), and (c) that the `serial=` a
    Proxmox VM sets is what the guest reports (TrueNAS shows it as the disk
    serial: expected, check).
 2. Disks as an inventory with `members` edges (this design) versus disks as
@@ -645,7 +690,8 @@ into their own store, since they are already keyed by root.
    volume holds.
 7. History (rows are written on a structure change only; decided): keep every changed structure forever, or a fixed number per host;
    what usage movement counts as a change.
-8. Windows: its agent (if any) needs drive-letter path mapping before shares
-   derive; until then Windows hosts stay on SMB scans.
+8. Windows: decided to have a Windows agent (WMI) for a Windows file server;
+   it needs drive-letter path mapping before shares derive (section 3b).
+   Until the collector exists, Windows hosts stay on SMB scans.
 9. Replace `storage_pools` (note 04) outright, as proposed here, or keep that
    name for the store.

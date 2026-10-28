@@ -19,7 +19,8 @@ from filecat.backends.memory import MemoryBackend
 from filecat.backends.sqlite import SqliteBackend
 from filecat.topology_collect import AgentSource, RecordedSource, collect, detect_platform, parse
 from filecat.topology_collect import linux, synology
-from _fake_agent import FakeAgent, cert_fingerprint
+from _fake_agent import (DENY_SHA256, FakeAgent, cert_fingerprint, denied, denied_windows,
+                          resolve_allow_roots, under)
 
 DATA = Path(__file__).parent / "data"
 NAS3 = DATA / "raw" / "nas3"
@@ -42,10 +43,15 @@ def test_nas3_collects_to_the_lab_fixture():
 def test_nas3_layers():
     t = nas3()
     assert t.platform == "synology" and t.host["os"] == "DSM 7.2.2"
-    assert [d.serial for d in t.of_type("disk")] == [f"ZR6N3A0{i}" for i in (1, 2, 3, 4)]
+    assert [d.serial for d in t.of_type("disk")] == ["SYNTH-NVME-0001", "SYNTH-NVME-0002"] + [
+        f"ZR6N3A0{i}" for i in (1, 2, 3, 4)]
     pool, = t.of_type("pool")
-    group, = t.of_type("group")
+    group, cache = sorted(t.of_type("group"), key=lambda g: g.role != "data")
     vol, = t.of_type("volume")
+    assert cache.role == "cache" and cache.parent == pool.id and cache.level == "raid1"
+    assert [m["role"] for m in cache.members] == ["cache", "cache"]
+    assert cache.platform["synology"]["cache_for"] == ["/volume1"]         # cache.reference == the volume's LV uuid
+    assert vol.platform["synology"]["ssd_cache"] == cache.id
     assert pool.id == "pool:Xw3kLp-9aVt-QmR2-uYb7-Hn4d-Zc8e-Ft6Sgj"        # the VG id of /etc/lvm/backup
     assert group.id == "group:c40e7b19-6d25-4f83-a1b0-93e8d52f7a46"        # the md uuid of mdadm --detail --scan
     assert vol.id == "vol:5e2c8d41-90ab-4c17-a3f6-7b1d0e94c258"            # /sys/fs/btrfs uuid via cachedev_0 -> dm-0 -> md2
@@ -79,15 +85,24 @@ def test_allocated_bytes_are_st_blocks_never_the_rod_size():
     assert thin_empty.allocated_bytes == 0 and thin_empty.size_bytes == 10 * 2 ** 30
 
 
-def test_nonzero_smartctl_exit_status_is_not_a_failure():
+def copy_nas3(fixture_dir, name="nas3", space=True) -> Path:
+    rec = fixture_dir / name
+    shutil.copytree(NAS3, rec)
+    if not space:
+        shutil.rmtree(rec / "files" / "etc" / "space")
+    return rec
+
+
+def test_nonzero_smartctl_exit_status_is_not_a_failure(fixture_dir):
     rec = RecordedSource(NAS3)
     assert rec.run("smartctl_info_json", "/dev/sata2").exit_code == 64
-    assert nas3().nodes["disk:ZR6N3A02"].serial == "ZR6N3A02"
+    src = RecordedSource(copy_nas3(fixture_dir, space=False))
+    assert collect(src, now=NOW).nodes["disk:ZR6N3A02"].serial == "ZR6N3A02"
+    assert ("smartctl_info_json", "/dev/sata2") in src.runs
 
 
 def test_unreadable_sources_leave_notes_not_failures(fixture_dir):
-    rec = fixture_dir / "nas3"
-    shutil.copytree(NAS3, rec)
+    rec = copy_nas3(fixture_dir, space=False)
     (rec / "statfs.json").write_text("{}")
     (rec / "files" / "etc" / "samba" / "smb.conf").unlink()
     (rec / "files" / "etc" / "lvm" / "backup" / "vg1").unlink()
@@ -104,8 +119,7 @@ def test_unreadable_sources_leave_notes_not_failures(fixture_dir):
 
 
 def test_image_template_orphan_vdisk_and_nfs_export(fixture_dir):
-    rec = fixture_dir / "nas3"
-    shutil.copytree(NAS3, rec)
+    rec = copy_nas3(fixture_dir)
     lun_conf = rec / "files" / "volume1" / "@iSCSI" / "LUN" / "iscsi_lun.conf"
     lun_conf.write_text(lun_conf.read_text() + (
         "[LUN_dc8c50db-f451-4367-966a-f6277ac5341b]\nuuid=dc8c50db-f451-4367-966a-f6277ac5341b\n"
@@ -132,7 +146,7 @@ def test_detect_platform_and_dispatch():
 # --- parsers --------------------------------------------------------------------------------
 def test_parse_mdstat_and_scan():
     arrays = parse.parse_mdstat((NAS3 / "files" / "proc" / "mdstat").read_text())
-    assert sorted(arrays) == ["md0", "md1", "md2"]
+    assert sorted(arrays) == ["md0", "md1", "md2", "md3"]
     md2 = arrays["md2"]
     assert md2["level"] == "raid5" and md2["flags"] == "UUUU" and (md2["active"], md2["total"]) == (4, 4)
     assert [m["name"] for m in md2["members"]] == ["sata1p5", "sata2p5", "sata3p5", "sata4p5"]
@@ -268,7 +282,7 @@ def test_the_collector_runs_through_the_agent(served):
     with client(served) as c:
         t = collect(AgentSource(c), "synology", name="nas3", unc_server="\\\\nas3", now=NOW, measure_shares=True)
     assert t.to_dict() == nas3().to_dict()
-    assert {e for e, _ in served.ran} == {"mdadm_detail_scan", "smartctl_info_json"}
+    assert {e for e, _ in served.ran} == {"mdadm_detail_scan"}            # the space history named the disks: no smartctl
 
 
 # --- the catalog store -----------------------------------------------------------------------
@@ -352,13 +366,13 @@ def test_storage_collect_show_and_links(served, fixture_dir, capsys):
     bk = ["--backend", "sqlite", "--out", db]
     go = lambda *a: run(capsys, *common, "storage", *a, *bk)
     code, out = go("collect", "--measure-shares", "--dry-run")
-    assert code == 0 and "nas3  nas3  synology  20 nodes  not stored" in out.out
+    assert code == 0 and "nas3  nas3  synology  23 nodes  not stored" in out.out
     assert not Path(db).exists()
     code, out = go("collect", "--measure-shares")
     assert code == 0 and "first snapshot stored" in out.out
     code, out = go("collect", "--measure-shares", "--json")
     row = json.loads(out.out)
-    assert code == 0 and row["changed"] is False and row["first"] is False and row["nodes"] == 20
+    assert code == 0 and row["changed"] is False and row["first"] is False and row["nodes"] == 23
     code, out = go("show")
     assert code == 0 and "nas3" in out.out and "stored" in out.out and "ghost" in out.out and "manual" in out.out
     code, out = go("show", "NAS3")

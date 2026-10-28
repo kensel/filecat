@@ -6,6 +6,7 @@ from __future__ import annotations
 
 import json
 import re
+import xml.etree.ElementTree as ET
 from typing import Any
 
 
@@ -213,6 +214,16 @@ def parse_smartctl_json(text: str) -> dict[str, Any]:
     return out
 
 
+_SMARTCTL_VERSION = re.compile(r"^smartctl\s+(\d+)\.(\d+)", re.M)
+
+
+def parse_smartctl_version(text: str) -> tuple[int, int] | None:
+    """`smartctl --version` ("smartctl 6.5 2016-05-07 r4318 [x86_64-linux-4.4.302+] (local
+    build)") -> (6, 5); None when the output is not smartctl's."""
+    m = _SMARTCTL_VERSION.search(text)
+    return (int(m.group(1)), int(m.group(2))) if m else None
+
+
 def parse_smartctl_text(text: str) -> dict[str, Any]:
     """`smartctl -i` (smartmontools before 7.0): the same keys as parse_smartctl_json."""
     out: dict[str, Any] = {}
@@ -341,3 +352,80 @@ ST_RDONLY = 1
 
 def fs_type_name(type_id: int | None) -> str | None:
     return FS_MAGIC.get(type_id) if type_id is not None else None
+
+
+# --- DSM's own view of its storage: /etc/space/space_history_<YYYYMMDD_HHMMSS>.xml -----------
+MAX_SPACE_XML = 4 * 1024 * 1024
+_SPACE_FILE = re.compile(r"^space_history_(\d{8}_\d{6})\.xml$")
+
+
+def newest_space_history(names: list[str]) -> str | None:
+    """The file name with the latest timestamp in it (the current layout), or None."""
+    stamped = [(m.group(1), n) for n in names if (m := _SPACE_FILE.match(n))]
+    return max(stamped)[1] if stamped else None
+
+
+def _attrs(el: ET.Element, *keys: str) -> dict[str, str]:
+    return {k: el.attrib[k] for k in keys if k in el.attrib}
+
+
+def _int_attr(v: str) -> int | str:
+    try:
+        return int(v)
+    except ValueError:
+        return v
+
+
+def parse_space_history(text: str) -> list[dict[str, Any]]:
+    """A space_history XML: one dict per `<space>`:
+
+        {path, reference, uuid, space_id, device_type, drive_type,
+         cache: True for a `@shared_cache` space (SSD cache),
+         lvm: {path, uuid, status, total_size, free_size, pe_size} | None,
+         raids: [{path, uuid, level, disks: [{dev_path, status, physical_location, model, serial,
+                  slot, partition_size}]}],
+         volumes: [{path, dev_path, uuid, type}]   (the volumes DSM made on the space),
+         caches: [{reference, dev_path, uuid}]     (`reference` is the uuid of the volume cached),
+         refs: every uuid / reference attribute value below the space except its caches'}
+
+    Numbers are ints; a missing attribute is left out. A document from a device is untrusted:
+    a DOCTYPE or ENTITY declaration is refused (so nothing is expanded) and so is more than
+    MAX_SPACE_XML characters. Raises ValueError."""
+    if len(text) > MAX_SPACE_XML:
+        raise ValueError(f"space history is longer than {MAX_SPACE_XML} characters")
+    if re.search(r"<!(DOCTYPE|ENTITY)", text, re.I):
+        raise ValueError("space history has a DOCTYPE or ENTITY declaration")
+    try:
+        root = ET.fromstring(text)
+    except ET.ParseError as exc:
+        raise ValueError(f"space history is not XML: {exc}") from exc
+    spaces = []
+    for sp in root.iter("space"):
+        out: dict[str, Any] = _attrs(sp, "path", "reference", "uuid", "space_id", "device_type", "drive_type")
+        out["cache"] = sp.attrib.get("reference") == "@shared_cache"
+        lvm = sp.find("./device/lvm")
+        out["lvm"] = None
+        if lvm is not None:
+            out["lvm"] = {k: (_int_attr(v) if k in ("total_size", "free_size", "pe_size") else v)
+                          for k, v in _attrs(lvm, "path", "uuid", "status", "total_size", "free_size",
+                                             "pe_size").items()}
+        raids = []
+        for raid in sp.findall("./device//raid"):
+            disks = []
+            for d in raid.iter("disk"):
+                row: dict[str, Any] = _attrs(d, "dev_path", "status", "physical_location", "model",
+                                             "serial", "slot", "partition_size")
+                for k in ("slot", "partition_size"):
+                    if k in row:
+                        row[k] = _int_attr(row[k])
+                disks.append(row)
+            raids.append({**_attrs(raid, "path", "uuid", "level"), "disks": disks})
+        out["raids"] = raids
+        out["volumes"] = [_attrs(v, "path", "dev_path", "uuid", "type") for v in sp.iter("volume")]
+        caches = list(sp.iter("cache"))
+        out["caches"] = [_attrs(c, "reference", "dev_path", "uuid") for c in caches]
+        skip = {id(sp), *(id(c) for c in caches)}
+        out["refs"] = sorted({v for el in sp.iter() if id(el) not in skip
+                              for k, v in el.attrib.items() if "uuid" in k or "reference" in k})
+        spaces.append(out)
+    return spaces
