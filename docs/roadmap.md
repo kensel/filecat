@@ -93,10 +93,13 @@ the agent becomes a second writer.
 - Prune on large tables: the anti-join over `sample_id` / `members_id` has
   no index behind it; add expression indexes (or MongoDB partial indexes)
   if the timing calls for it.
-- Rebuild an existing MongoDB catalog in place (zstd collections, partial
-  `sha256` index) one collection at a time, instead of only through
-  `filecat migrate` into a second database.
-- `filecat migrate` copies member sets before the records that name them.
+- [x] `filecat mongo-rebuild`: rebuilds an existing MongoDB catalog in place
+  (zstd collections, partial `sha256` index) one collection at a time,
+  instead of only through `filecat migrate` into a second database. A
+  server-side copy into `<name>__rebuild`, the indexes, a count check, then
+  `renameCollection`; refuses while a scan runs; `--dry-run` shows sizes.
+- [x] `filecat migrate` copies member sets before the records that name
+  them (with `--root`, only the sets those records name).
 - Maybe, if the trial or a review says it matters: archives above 64 MiB
   whose copies differ in mtime get separate member sets (`sha256_partial`
   includes the mtime); path mapping between NAS POSIX paths and SMB UNC

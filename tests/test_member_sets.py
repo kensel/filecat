@@ -270,6 +270,38 @@ def test_copy_catalog_between_set_and_path_backends(fixture_dir: Path):
         b.close()
 
 
+def test_copy_catalog_writes_sets_before_the_records_that_name_them(fixture_dir: Path):
+    src = SqliteBackend(str(fixture_dir / "src.sqlite"))
+    _legacy_catalog(src)
+    member_sets.migrate(src, str(fixture_dir / "cp.json"))
+    order: list[str] = []
+
+    class Watching(MemoryBackend):
+        def put_member_set(self, header, rows):
+            order.append("set")
+            return super().put_member_set(header, rows)
+
+        def put_many(self, docs):
+            order.append("records")
+            return super().put_many(docs)
+
+    dst = Watching()
+    stats = copy_catalog(src, dst, verify=True)
+    assert stats.ok and stats.member_sets == 3
+    assert order[:4] == ["set", "set", "set", "records"] and order.count("set") == 3
+    _check_migrated(dst)
+
+    # --root copies only the sets that root's records name
+    other = r"C:\other-root"
+    src.put({"root_id": root_id(other), "root": other, "rel_path": "z.txt", "name": "z.txt",
+             "size": 1, "kind": "text"})
+    src.flush()
+    only = MemoryBackend()
+    stats = copy_catalog(src, only, roots=[other])
+    assert stats.member_sets == 0 and list(only.iter_member_sets()) == []
+    src.close()
+
+
 def test_trim_compound_covers_gzip_wrapped_saves():
     save = _doc("x3/quick.sav", PACK, H1, container="gzip_xored")
     kept, trimmed = member_sets.trim_compound(save, PACK)

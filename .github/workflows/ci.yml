@@ -85,7 +85,7 @@ jobs:
         with:
           python-version: "3.13"
       - run: uv sync --all-extras
-      - run: uv run pytest -q -rs tests/test_backend_contract.py tests/test_browse.py tests/test_config.py
+      - run: uv run pytest -q -rs tests/test_backend_contract.py tests/test_browse.py tests/test_config.py tests/test_mongo_rebuild.py
 
   smb:
     name: SMB share
