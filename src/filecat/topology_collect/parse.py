@@ -323,8 +323,24 @@ def parse_smb_conf(text: str) -> list[dict[str, str]]:
         low = {k.lower(): v for k, v in props.items()}
         if not name or name.lower() in _SMB_SKIP or "path" not in low:
             continue
-        out.append({"name": name, **low})
+        out.append({"name": name, **{k: _unquote(v) for k, v in low.items()}})
     return out
+
+
+def parse_smb_includes(text: str) -> list[str]:
+    """The `include = <file>` paths of a Samba configuration, in file order, in any section.
+    A path with a Samba macro (%U, %m, ...) names no single file and is skipped."""
+    out = []
+    for raw in text.splitlines():                    # by line: parse_stanzas keeps one value per key
+        key, sep, value = raw.strip().partition("=")
+        path = _unquote(value.strip())
+        if sep and key.strip().lower() == "include" and path.startswith("/") and "%" not in path:
+            out.append(path)
+    return out
+
+
+def _unquote(value: str) -> str:
+    return value[1:-1] if len(value) >= 2 and value[0] == value[-1] == '"' else value
 
 
 def parse_exports(text: str) -> list[str]:

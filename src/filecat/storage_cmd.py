@@ -316,10 +316,12 @@ def _summary_row(t: topology.Topology, source: str, doc: dict[str, Any] | None) 
             "structure_hash": (doc or {}).get("structure_hash")}
 
 
-def _line(n: topology.Node) -> str:
+def _line(n: topology.Node, topo: topology.Topology | None = None) -> str:
     bits = [n.type, n.name or n.id]
     if n.level:
         bits.append(n.level)
+    if n.type == "group" and n.role not in (None, "data"):
+        bits.append(n.role)
     if n.kind:
         bits.append(n.kind)
     if n.mount:
@@ -333,6 +335,13 @@ def _line(n: topology.Node) -> str:
         bits.append(f"{_human_bytes(n.used_bytes)} used")
     if n.allocated_bytes is not None and n.type in ("lun", "vdisk"):
         bits.append(f"{_human_bytes(n.allocated_bytes)} allocated")
+    if n.type == "group" and n.role not in (None, "data"):
+        served = (n.platform.get("synology") or {}).get("cache_for")
+        if served:
+            bits.append(f"{n.role} for {', '.join(served)}")
+    if (cache := (n.platform.get("synology") or {}).get("ssd_cache")):
+        group = topo.nodes.get(cache) if topo else None
+        bits.append(f"ssd cache {(group.name if group else None) or cache}")
     if n.unc:
         bits.append(n.unc)
     if n.target:
@@ -352,9 +361,11 @@ def _print_host(topo: topology.Topology, source: str, doc: dict[str, Any] | None
           + f"  ({source}" + (f", scanned {doc['scanned_at']}" if doc and doc.get("scanned_at") else "") + ")")
     for disk in topo.of_type("disk"):
         print("  " + _line(disk) + (f"  {disk.model}" if disk.model else "")
-              + (f"  {disk.media}" if disk.media else ""))
+              + (f"  {disk.media}" if disk.media else "")
+              + (f"  slot {disk.slot}" if disk.slot else "")
+              + (f"  serial {disk.serial}" if disk.serial else ""))
     for n, depth in topo.walk():
-        print("  " * (depth + 1) + _line(n))
+        print("  " * (depth + 1) + _line(n, topo))
     for vm in topo.of_type("vm"):
         print("  " + _line(vm))
     notes = (topo.extra.get("collector") or {}).get("notes", [])

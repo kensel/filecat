@@ -533,7 +533,7 @@ section 14a for its platform.
 | DSM | `<volume>/@iSCSI/LUN/iscsi_lun.conf`, `iscsi_lun_acl.conf` | only that volume's LUNs; read when the `/usr/syno/etc` files cannot be, and compared with them | v0.2.0 |
 | DSM | `/usr/syno/etc/iscsi_target.conf`, `iscsi_mapping.conf` | targets (`tid`, `name`, `iqn`, `enabled`) and which LUN each maps (`tid`, `uuid`, `lun`). **The target file holds CHAP credentials** (`username`, `password`, `mutual_username`, `mutual_password`); they cross the wire in the file and are dropped in Python at once, never stored | v0.2.0 |
 | DSM | `<volume>/@Repository/<vm>/{vguest.conf,vdisk.conf}` | VMM guests and their disks | v0.2.0 |
-| DSM | `/etc/samba/smb.conf` | SMB share names and paths (confirmed on nas3; `/usr/syno/etc/smb.conf` does not exist) | v0.2.0 |
+| DSM | `/etc/samba/smb.conf`, `/etc/samba/smb.share.conf` | SMB share names and paths: DSM 7 keeps the share stanzas in `smb.share.conf`, which Samba loads without an `include`; `smb.conf` has only `[global]` (confirmed on nas3; `/usr/syno/etc/smb.conf` does not exist) | v0.2.0 |
 | DSM | `/etc/synoinfo.conf` | model, disk count | later |
 | PVE | `/etc/pve/storage.cfg` | storages, `shared`, node lists, iSCSI/LVM/ZFS definitions | later |
 | PVE | `/etc/pve/qemu-server/*.conf`, `/etc/pve/lxc/*.conf` | VMs and their disk lines | later |

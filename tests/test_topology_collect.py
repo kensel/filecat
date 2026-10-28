@@ -105,6 +105,7 @@ def test_unreadable_sources_leave_notes_not_failures(fixture_dir):
     rec = copy_nas3(fixture_dir, space=False)
     (rec / "statfs.json").write_text("{}")
     (rec / "files" / "etc" / "samba" / "smb.conf").unlink()
+    (rec / "files" / "etc" / "samba" / "smb.share.conf").unlink()
     (rec / "files" / "etc" / "lvm" / "backup" / "vg1").unlink()
     (rec / "run" / "mdadm_detail_scan.stdout").unlink()
     t = collect(RecordedSource(rec), unc_server="\\\\nas3", now=NOW)
@@ -135,6 +136,88 @@ def test_image_template_orphan_vdisk_and_nfs_export(fixture_dir):
     assert orphan.vm["name"] == "[ORPHANED_VDISK]" and t.nodes[orphan.vm["id"]].platform["synology"]["orphaned"]
     assert t.nodes["share:apps"].protocols == ["smb", "nfs"]
     assert t.nodes["share:media"].protocols == ["nfs"] and t.nodes["share:media"].unc is None
+
+
+DSM_SHARES = (
+    "[ActiveBackupforBusiness]\n\trecycle bin admin only=no\n\tbrowseable=yes\n\tguest ok=yes\n"
+    "\tpath=/volume1/ActiveBackupforBusiness\n\tskip smb perm=yes\n\tcomment=\"\"\n"
+    "[ActiveBackupforBusinessC]\n\tbrowseable=yes\n\tpath=/volume1/ActiveBackupforBusinessC\n"
+    "\tcomment=\"Active Backup for Business destination\"\n\tvalid users=nobody,nobody\n")
+
+
+def with_samba(fixture_dir, conf, **files):
+    """nas3 with smb.conf replaced by `conf`, no smb.share.conf, and these other files
+    (path relative to the fixture root, text) added."""
+    rec = copy_nas3(fixture_dir)
+    samba = rec / "files" / "etc" / "samba"
+    (samba / "smb.share.conf").unlink()
+    (samba / "smb.conf").write_text(conf, newline="\n")
+    for rel, text in files.items():
+        f = rec / "files" / rel
+        f.parent.mkdir(parents=True, exist_ok=True)
+        f.write_text(text, newline="\n")
+    return collect(RecordedSource(rec), unc_server="\\\\nas3", now=NOW)
+
+
+def test_dsm_share_file_is_read_without_an_include(fixture_dir):
+    t = with_samba(fixture_dir, "[global]\n\tworkgroup=WORKGROUP\n\tinclude=/var/tmp/nginx/smb.netbios.aliases.conf\n",
+                   **{"etc/samba/smb.share.conf": DSM_SHARES})
+    abb = t.nodes["share:activebackupforbusiness"]
+    assert abb.unc == "\\\\nas3\\ActiveBackupforBusiness" and abb.path == "/volume1/ActiveBackupforBusiness"
+    assert t.nodes["share:activebackupforbusinessc"].protocols == ["smb"]
+    assert not any("smb" in n.lower() for n in (t.extra.get("collector") or {}).get("notes", []))      # the include outside the roots is silent
+
+
+def test_samba_includes_are_followed(fixture_dir):
+    conf = "[global]\n\tinclude = /etc/samba/extra.conf\n\tinclude = /etc/samba/%U.conf\n"
+    t = with_samba(fixture_dir, conf, **{"etc/samba/extra.conf": "[Media]\npath = /volume1/Media\n"
+                                         "include = /etc/samba/nested.conf\n",
+                                         "etc/samba/nested.conf": "[Deep]\npath = /volume1/Deep\n"})
+    assert [s.name for s in t.of_type("share")] == ["Media", "Deep"]
+
+
+def test_samba_include_loop_is_guarded(fixture_dir):
+    t = with_samba(fixture_dir, "[global]\ninclude = /etc/samba/a.conf\n",
+                   **{"etc/samba/a.conf": "[A]\npath = /volume1/A\ninclude = /etc/samba/b.conf\n",
+                      "etc/samba/b.conf": "[B]\npath = /volume1/B\ninclude = /etc/samba/smb.conf\ninclude = /etc/samba/a.conf\n"})
+    assert [s.name for s in t.of_type("share")] == ["A", "B"]
+
+
+def test_samba_include_outside_the_roots_is_silent(fixture_dir):
+    t = with_samba(fixture_dir, "[global]\ninclude = /usr/syno/etc/smb.conf.global\n[Only]\npath = /volume1/Only\n")
+    assert [s.name for s in t.of_type("share")] == ["Only"]
+    assert not any("smb.conf.global" in n for n in (t.extra.get("collector") or {}).get("notes", []))
+
+
+def test_samba_shares_merge_with_nfs_exports(fixture_dir):
+    rec = copy_nas3(fixture_dir)
+    (rec / "files" / "etc" / "samba" / "smb.share.conf").write_text(DSM_SHARES, newline="\n")
+    (rec / "files" / "etc" / "exports").write_text("/volume1/ActiveBackupforBusiness *(rw)\n/volume1/PVE *(rw)\n")
+    t = collect(RecordedSource(rec), unc_server="\\\\nas3", now=NOW)
+    assert t.nodes["share:activebackupforbusiness"].protocols == ["smb", "nfs"]
+    assert t.nodes["share:pve"].protocols == ["nfs"]
+
+
+def test_vmm_image_with_several_disks_is_numbered(fixture_dir):
+    rec = copy_nas3(fixture_dir)
+    lun_conf = rec / "files" / "volume1" / "@iSCSI" / "LUN" / "iscsi_lun.conf"
+    lun_conf.write_text(lun_conf.read_text() + "".join(
+        f"[LUN_{u}]\nuuid={u}\nname=image.8ad92580-0000-4000-8000-000000000000.v.sata.{i}\nlid={20 + i}\n"
+        f"bytes={(i + 1) * 1000}\ndevtype=7\n\n"
+        for i, u in enumerate(("aaaaaaaa-0000-4000-8000-000000000001", "aaaaaaaa-0000-4000-8000-000000000002"))))
+    t = collect(RecordedSource(rec), unc_server="\\\\nas3", now=NOW)
+    names = [t.nodes[f"vdisk:aaaaaaaa-0000-4000-8000-00000000000{i}"].name for i in (1, 2)]
+    assert names == ["[VMM_IMAGE: 8ad92580] disk 1", "[VMM_IMAGE: 8ad92580] disk 2"]
+
+
+def test_storage_show_labels_cache_group_volume_cache_and_disks():
+    from filecat import storage_cmd
+    t = nas3()
+    cache, = [g for g in t.of_type("group") if g.role == "cache"]
+    vol, = t.of_type("volume")
+    line = storage_cmd._line(cache)
+    assert line.startswith("group") and " cache " in line and "cache for /volume1" in line
+    assert "ssd cache md3" in storage_cmd._line(vol, t)
 
 
 def test_detect_platform_and_dispatch():

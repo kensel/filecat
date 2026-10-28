@@ -18,7 +18,7 @@ interpretation is here (docs/storage-topology.md section 3, docs/agent-allowlist
     smartctl -i /dev/sataN                   a disk's serial, model, WWN, only when the space
                                              history does not name it; the version is asked once
                                              (`smartctl_version`): below 7.0 there is no --json
-    /etc/samba/smb.conf, /etc/exports        shares
+    /etc/samba/smb.share.conf, smb.conf, /etc/exports  shares
     /usr/syno/etc/iscsi_lun.conf, iscsi_lun_acl.conf
                                              LUNs and VMM vdisks (the NAA id by
                                              topology.naa_from_unit_serial) and each LUN's
@@ -44,11 +44,14 @@ from .common import Reader, finish, now_iso
 from .parse import (MAX_SPACE_XML, ST_RDONLY, fs_type_name, md_uuid, newest_space_history,
                     parse_blkid_export, parse_exports, parse_lvm_text, parse_mdadm_scan, parse_mdstat,
                     parse_mounts, parse_shell_vars, parse_smartctl_json, parse_smartctl_text,
-                    parse_smartctl_version, parse_smb_conf, parse_space_history, parse_stanzas)
+                    parse_smartctl_version, parse_smb_conf, parse_smb_includes, parse_space_history,
+                    parse_stanzas)
 from .source import Source
 
 PLATFORM = "synology"
 SMB_CONF = "/etc/samba/smb.conf"
+SMB_SHARES = "/etc/samba/smb.share.conf"      # DSM 7: the share stanzas, loaded implicitly by Samba
+MAX_SMB_INCLUDES = 16
 SYNO_ETC = "/usr/syno/etc"
 SPACE_DIR = "/etc/space"
 SMARTCTL_JSON = (7, 0)          # smartmontools before this has no --json
@@ -684,6 +687,29 @@ class _Collector:
         return "ok"
 
     # --- shares ---
+    def smb_files(self) -> list[str] | None:
+        """The texts of the Samba files that hold shares, None when none could be read.
+        smb.conf (the DSM 7 one has only [global]) and /etc/samba/smb.share.conf, which DSM's
+        Samba loads without any `include` naming it, so it is always tried; then the files
+        smb.conf and those include (`include = <path>`, in any section), to a depth of
+        MAX_SMB_INCLUDES files and each file once. An include with a macro in it is skipped; one
+        outside the agent's allowed roots (DSM's /var/tmp/nginx/smb.netbios.aliases.conf) or
+        missing is skipped without a note."""
+        texts: list[str] = []
+        seen: set[str] = set()
+        queue = [SMB_CONF, SMB_SHARES]
+        while queue and len(seen) < MAX_SMB_INCLUDES:
+            path = queue.pop(0)
+            if path in seen:
+                continue
+            seen.add(path)
+            text = self.r.text(path, silent=path != SMB_CONF)
+            if text is None:
+                continue
+            texts.append(text)
+            queue.extend(parse_smb_includes(text))
+        return texts or None
+
     def shares(self, volume_id: dict[str, str]) -> None:
         mounts = sorted(volume_id, key=len, reverse=True)
 
@@ -695,12 +721,12 @@ class _Collector:
         if text:
             exports = parse_exports(text)
         found: list[dict[str, str]] = []
-        text = self.r.text(SMB_CONF)
-        if text is not None:
-            found = parse_smb_conf(text)
+        smb = self.smb_files()
+        if smb is not None:
+            found = [sh for text in smb for sh in parse_smb_conf(text)]
         else:
-            self.r.note(f"no Samba configuration found ({SMB_CONF}): shares are the top-level "
-                        "folders of each volume")
+            self.r.note(f"no Samba configuration found ({SMB_CONF}, {SMB_SHARES}): shares are the "
+                        "top-level folders of each volume")
             for m in volume_id:
                 for e in self.r.entries(m):
                     if e.kind == "dir" and not e.name.startswith(("@", "#", "$", ".")) and e.name != "lost+found":
@@ -889,6 +915,13 @@ class _Collector:
             return next(n["name"] for n in self.nodes["vm"] if n["id"] == f"vm:{u}")
 
         counts: dict[str, int] = {}
+        images: dict[str, int] = {}                  # image id -> disks numbered so far
+        image_disks: dict[str, int] = {}             # image id -> disks it has
+        for p, _ in vdisks:
+            pp = p.get("name", "").split(".")
+            if not (pp[0] == "vdisk" and len(pp) > 2):
+                image = pp[1] if len(pp) > 1 else p["uuid"]
+                image_disks[image] = image_disks.get(image, 0) + 1
         for p, parts in sorted(((p, p.get("name", "").split(".")) for p, _ in vdisks),
                                key=lambda t: (t[1][1] if len(t[1]) > 1 else "", t[1][3] if len(t[1]) > 3 else "",
                                               _int(t[1][4]) if len(t[1]) > 4 else 0, t[0]["uuid"])):
@@ -901,7 +934,9 @@ class _Collector:
                 counts[vm_uuid] = counts.get(vm_uuid, 0) + 1
                 node["name"] = f"{vm_name(vm_uuid)} disk {counts[vm_uuid]}"
             else:
-                node["name"] = f"[VMM_IMAGE: {parts[1][:8] if len(parts) > 1 else uuid[:8]}]"
+                image = parts[1] if len(parts) > 1 else uuid
+                images[image] = images.get(image, 0) + 1
+                node["name"] = f"[VMM_IMAGE: {image[:8]}]" + (f" disk {images[image]}" if image_disks[image] > 1 else "")
             if (size := _int(p.get("bytes"))) is not None:
                 node["size_bytes"] = size
             alloc = self.allocated(f"{lun_dir}/VDISK_BLUN/{uuid}")

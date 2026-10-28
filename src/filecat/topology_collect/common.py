@@ -35,11 +35,15 @@ class Reader:
             return
         self.note(f"{what}: {exc.code}: {exc.message}")
 
-    def text(self, path: str, *, max: int = 1024 * 1024, quiet: bool = True) -> str | None:
+    def text(self, path: str, *, max: int = 1024 * 1024, quiet: bool = True,
+             silent: bool = False) -> str | None:
+        """The file's text; None when it cannot be read. `silent` leaves no note whatever the
+        failure (a path that was only guessed, possibly outside the allowed roots)."""
         try:
             data = self.source.read_file(path, max)
         except AgentError as exc:
-            self._failed(path, exc, quiet)
+            if not silent:
+                self._failed(path, exc, quiet)
             return None
         if data.truncated:
             self.note(f"{path}: longer than {max} bytes, read the first part")
