@@ -250,7 +250,7 @@ def _file(t: rollup.Totals, d: Document, seen: set[tuple[int, int]]) -> None:
         key = (dev or 0, ino)
         if key in seen:
             t.total_files += 1
-            t.newest = max(t.newest, mtime)
+            t.newest = max(t.newest, mtime - mtime % 100)
             return
         seen.add(key)
     t.seen_file(d.get("size") or 0, mtime)

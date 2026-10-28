@@ -897,6 +897,7 @@ class Totals:
         self.error_codes[code] = self.error_codes.get(code, 0) + 1
 
     def seen_file(self, size: int, mtime_ns: int) -> None:
+        mtime_ns -= mtime_ns % 100          # rolled up at 100 ns, the agent protocol's resolution
         self.total_files += 1
         self.size += size
         if mtime_ns > self.newest:
@@ -1079,7 +1080,7 @@ def _sum_into(t: Totals, path: str, is_dir: bool, count_self: bool,
                     key = (st.st_dev, st.st_ino)
                     if key in seen:
                         t.total_files += 1
-                        t.newest = max(t.newest, st.st_mtime_ns)
+                        t.newest = max(t.newest, st.st_mtime_ns - st.st_mtime_ns % 100)
                         continue
                     seen.add(key)
                 _sum_entry(t, st)

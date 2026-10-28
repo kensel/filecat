@@ -528,7 +528,15 @@ def main(argv: list[str] | None = None) -> int:
     # a bare --verify-backups means level 1; argparse would take the next word (a ROOT) as its level
     argv = ["--verify-backups=1" if a == "--verify-backups" else a
             for a in (sys.argv[1:] if argv is None else argv)]
-    args = build_parser().parse_args(argv)
+    parser = build_parser()
+    args, extra = parser.parse_known_args(argv)
+    # `roots case-merge --backend sqlite OLD NEW`: before Python 3.14 argparse binds the optional
+    # `names` positional to nothing when options come between it and the action word, and leaves
+    # OLD NEW over; hand those words back to it, for that one command
+    if extra and args.command == "roots" and not any(w.startswith("-") for w in extra):
+        args.names = list(getattr(args, "names", None) or []) + extra
+    elif extra:
+        parser.error("unrecognized arguments: " + " ".join(extra))
     if args.command != "config":
         from . import config
         try:

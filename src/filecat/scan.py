@@ -128,7 +128,9 @@ def measure_file(root: str, rel_path: str, abs_path: str, st: os.stat_result,
             doc.update(measured.hashes)
     else:
         try:
-            doc.update(hash_file(abs_path, size, mtime_ns, options.hash))
+            # the digest takes the mtime at 100 ns (SMB, the agent protocol), so a local scan of a
+            # nanosecond filesystem and an agent scan of the same file give the same sha256_partial
+            doc.update(hash_file(abs_path, size, mtime_ns - mtime_ns % 100, options.hash))
         except OSError as e:
             record.add_error(doc, "hash", e)
 

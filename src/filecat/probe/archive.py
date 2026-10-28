@@ -19,6 +19,7 @@ from typing import Any, Callable, Iterator
 
 from ..record import suffix_of
 from ..options import GZIP_PROBE_CAP, ScanOptions
+from .. import fsource
 from ..fsource import fopen, fsize
 from . import compound, images, media, members, tarball, text, x3
 
@@ -77,7 +78,7 @@ def probe_zip(path: str, options: ScanOptions, result: Any) -> None:
     with fopen(path) as fh, zipfile.ZipFile(fh) as zf:
         infos = zf.infolist()
 
-    name = os.path.basename(path)
+    name = fsource.basename(path)
     fmt = compound.for_file(name, "zip", (i.filename.replace("\\", "/") for i in infos))
     result.kind = (fmt.kind or "archive") if fmt else "archive"
     result.container = "zip"
@@ -318,7 +319,7 @@ def probe_gzip(path: str, container: str, options: ScanOptions, result: Any) -> 
     if inflated:
         inflated_bytes = bytes(inflated)
         _classify_inflated(inflated_bytes, result)
-        name = os.path.basename(path)
+        name = fsource.basename(path)
         if suffix_of(name) == "pck":
             from . import pck
             pck.refine_x3_pck(name, inflated_bytes, truncated, result)

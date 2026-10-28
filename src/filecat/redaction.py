@@ -278,8 +278,8 @@ def locate(backend: Backend, text: str, agents: list[Any] | None = None) -> tupl
             except ValueError:
                 continue
             candidates.append((unc, rollup.path_comps(unc)))
-    else:
-        candidates.append((text, comps))
+    # also as typed: on Linux a local root is a POSIX path, which reads as the agent form
+    candidates.append((text, comps))
     best: tuple[int, str, str] | None = None
     for root in backend.roots():
         rcomps = rollup.path_comps(root)

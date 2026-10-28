@@ -216,6 +216,14 @@ def sibling(path: str, other: str) -> str | None:
     return RemotePath(other, path.source, posix, m.size)
 
 
+def basename(path: str) -> str:
+    """os.path.basename(), for a path that may be the UNC path of a file on an agent (backslashes
+    separate there, whatever the platform filecat runs on)."""
+    if isinstance(path, RemotePath):
+        return re.split(r"[\\/]", path)[-1]
+    return os.path.basename(path)
+
+
 def isfile(path: str) -> bool:
     """os.path.isfile(); a sibling() result is a file."""
     return True if isinstance(path, RemotePath) else os.path.isfile(path)

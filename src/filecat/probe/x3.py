@@ -273,7 +273,7 @@ def probe_cat(path: str, result: Any, options: ScanOptions | None = None) -> boo
     summary.pop("entries")                  # probe.entries stays the dict list above
     result.probe.update(summary)
     result.probe["entries_total"] = len(entries)
-    result.probe["x3_dat"] = os.path.splitext(os.path.basename(path))[0] + ".dat"
+    result.probe["x3_dat"] = os.path.splitext(fsource.basename(path))[0] + ".dat"
     return True
 
 
@@ -295,7 +295,7 @@ def probe_dat_sibling(path: str, options: ScanOptions, result: Any) -> bool:
     result.probe["format"] = "x3-dat"
     result.probe["transform"] = "byte ^= 0x33"
     # pointer only: the entries are member rows on the .cat record
-    result.probe["x3_cat"] = os.path.basename(cat_path)
+    result.probe["x3_cat"] = fsource.basename(cat_path)
     result.probe["entries_total"] = len(entries)
     if options.expand_dat:
         result.probe["members"] = _expand_members(path, entries, options.member_cap)
