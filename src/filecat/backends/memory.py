@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import copy
+import threading
 from typing import Any, Iterable, Iterator
 
 from ..record import root_id
@@ -26,6 +27,7 @@ class MemoryBackend(Backend):
         self.set_rows: dict[str, list[Document]] = {}
         self._redactions: dict[str, Document] = {}
         self._topology: dict[str, dict[str, Document]] = {s: {} for s in self.DOC_STORES}
+        self._claim_lock = threading.Lock()
 
     def put(self, document: Document) -> None:
         self.docs[(document["root_id"], document["rel_path"])] = copy.deepcopy(document)
@@ -140,6 +142,13 @@ class MemoryBackend(Backend):
 
     def _topology_remove(self, store: str, key: str) -> None:
         self._topology[store].pop(key, None)
+
+    def _topology_claim(self, store: str, doc: Document, holder: str, now: str, takeover: bool) -> bool:
+        with self._claim_lock:
+            if not self.claimable(self._topology[store].get(doc["key"]), holder, now, takeover):
+                return False
+            self._topology[store][doc["key"]] = copy.deepcopy(doc)
+            return True
 
     def put_program(self, record: Document) -> None:
         self.programs[record["program_id"]] = copy.deepcopy(record)

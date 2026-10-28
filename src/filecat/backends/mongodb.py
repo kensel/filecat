@@ -428,6 +428,21 @@ class MongoBackend(Backend):
     def _topology_put(self, store: str, doc: Document) -> None:
         self.topology_docs[store].replace_one({"key": doc["key"]}, _bson_safe(dict(doc)), upsert=True)
 
+    def _topology_claim(self, store: str, doc: Document, holder: str, now: str, takeover: bool) -> bool:
+        """replace_one with upsert, filtered on key AND (holder is us OR expired). When the filter
+        matches nothing Mongo tries to insert, and the unique index on "key" rejects that for a
+        row someone else holds (DuplicateKeyError = lost). One document, one atomic operation."""
+        from pymongo.errors import DuplicateKeyError
+        mine: list[dict[str, Any]] = [{"holder": holder}]
+        if takeover:
+            mine.append({"expires_at": {"$lt": now}})
+        try:
+            res = self.topology_docs[store].replace_one({"key": doc["key"], "$or": mine},
+                                                        _bson_safe(dict(doc)), upsert=True)
+        except DuplicateKeyError:
+            return False
+        return bool(res.matched_count or res.upserted_id is not None)
+
     def _topology_remove(self, store: str, key: str) -> None:
         self.topology_docs[store].delete_one({"key": key})
 

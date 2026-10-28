@@ -633,6 +633,41 @@ class MysqlBackend(Backend):
                 (doc["key"], doc["host"], doc.get("scanned_at"), json.dumps(doc, ensure_ascii=False)))
         self.conn.commit()
 
+    def _topology_claim(self, store: str, doc: Document, holder: str, now: str, takeover: bool) -> bool:
+        """A conditional UPDATE (InnoDB row lock), then INSERT when nothing matched: the primary
+        key makes a racing second insert fail with a duplicate-key error, which means "lost"."""
+        import pymysql
+        assert store in self.DOC_STORES
+        text = json.dumps(doc, ensure_ascii=False)
+        cond = "JSON_UNQUOTE(JSON_EXTRACT(document, '$.holder')) = %s"
+        args: list[Any] = [holder]
+        if takeover:
+            cond += " OR JSON_UNQUOTE(JSON_EXTRACT(document, '$.expires_at')) < %s"
+            args.append(now)
+        try:
+            with self.conn.cursor() as cur:
+                cur.execute(f"UPDATE {store} SET host=%s, scanned_at=%s, document=%s "
+                            f"WHERE doc_key=%s AND ({cond})",
+                            (doc["host"], doc.get("scanned_at"), text, doc["key"], *args))
+                changed = cur.rowcount
+                if not changed:
+                    # PyMySQL counts changed rows: an identical rewrite reports 0. Ours then?
+                    cur.execute(f"SELECT JSON_UNQUOTE(JSON_EXTRACT(document, '$.holder')) FROM {store} "
+                                "WHERE doc_key=%s", (doc["key"],))
+                    row = cur.fetchone()
+                    if row is None:
+                        cur.execute(f"INSERT INTO {store} (doc_key, host, scanned_at, document) "
+                                    "VALUES (%s, %s, %s, %s)",
+                                    (doc["key"], doc["host"], doc.get("scanned_at"), text))
+                        changed = 1
+                    else:
+                        changed = 1 if row[0] == holder else 0
+            self.conn.commit()
+            return bool(changed)
+        except pymysql.err.IntegrityError:          # 1062: another server inserted first
+            self.conn.rollback()
+            return False
+
     def _topology_remove(self, store: str, key: str) -> None:
         assert store in self.DOC_STORES
         with self.conn.cursor() as cur:

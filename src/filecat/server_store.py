@@ -134,33 +134,35 @@ class ServerStore:
         self.clock = clock
 
     # --- lease ---
+    def _lease_doc(self, holder: str, host: str, pid: int, started_at: str, now: datetime,
+                   ttl: timedelta) -> dict[str, Any]:
+        return {"key": LEASE_KEY, "host": host, "holder": holder, "pid": pid, "started_at": started_at,
+                "renewed_at": iso(now), "scanned_at": iso(now), "expires_at": iso(now + ttl)}
+
     def acquire(self, holder: str, host: str, pid: int, ttl: timedelta) -> LeaseResult:
-        """Take the lease when it is free, expired or already ours: check, write, read back."""
+        """Take the lease when it is free, expired or already ours, in ONE conditional write in the
+        backend (`Backend.claim_server_doc`): of two servers starting together exactly one wins."""
         def fn(b: Any) -> LeaseResult:
             now = self.clock()
             doc = _state(b, LEASE_KEY)
-            if doc and doc.get("holder") != holder:
-                expires = parse_iso(doc.get("expires_at"))
-                if expires and expires > now:
-                    return LeaseResult(False, doc)
-            mine = {"key": LEASE_KEY, "host": host, "holder": holder, "pid": pid,
-                    "started_at": (doc or {}).get("started_at") if doc and doc.get("holder") == holder else iso(now),
-                    "renewed_at": iso(now), "scanned_at": iso(now), "expires_at": iso(now + ttl)}
-            b.put_server_doc(STATE, mine)
-            back = _state(b, LEASE_KEY)
-            return LeaseResult(bool(back and back.get("holder") == holder), back)
+            started = doc.get("started_at") if doc and doc.get("holder") == holder else None
+            mine = self._lease_doc(holder, host, pid, started or iso(now), now, ttl)
+            if b.claim_server_doc(STATE, mine, holder=holder, now=iso(now)):
+                return LeaseResult(True, mine)
+            return LeaseResult(False, _state(b, LEASE_KEY))
         return self.handle.call(fn)
 
     def renew(self, holder: str, ttl: timedelta) -> bool:
-        """Extend our lease; False when another server holds it now (we were replaced)."""
+        """Extend our lease with the same conditional write (holder = us, no takeover); False when
+        another server holds it now, or it was released (we were replaced)."""
         def fn(b: Any) -> bool:
             doc = _state(b, LEASE_KEY)
             if not doc or doc.get("holder") != holder:
                 return False
             now = self.clock()
-            b.put_server_doc(STATE, {**doc, "renewed_at": iso(now), "scanned_at": iso(now),
-                                     "expires_at": iso(now + ttl)})
-            return True
+            new = self._lease_doc(holder, doc.get("host", ""), doc.get("pid", 0),
+                                  doc.get("started_at") or iso(now), now, ttl)
+            return b.claim_server_doc(STATE, new, holder=holder, now=iso(now), takeover=False)
         return self.handle.call(fn)
 
     def release(self, holder: str) -> None:

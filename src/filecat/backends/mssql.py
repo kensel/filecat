@@ -622,6 +622,32 @@ class MssqlBackend(Backend):
              doc["key"], doc["host"], doc.get("scanned_at"), text))
         self.conn.commit()
 
+    def _topology_claim(self, store: str, doc: Document, holder: str, now: str, takeover: bool) -> bool:
+        """A conditional UPDATE (row lock), then INSERT when nothing matched: the primary key makes
+        a racing second insert fail with an integrity error, which means "lost"."""
+        import pyodbc
+        assert store in self.DOC_STORES
+        text = json.dumps(doc, ensure_ascii=False)
+        cond = "JSON_VALUE(document, '$.holder') = ?"
+        args: list[Any] = [holder]
+        if takeover:
+            cond += " OR JSON_VALUE(document, '$.expires_at') < ?"
+            args.append(now)
+        cur = self.conn.cursor()
+        try:
+            cur.execute(f"UPDATE {store} SET host=?, scanned_at=?, document=? WHERE doc_key=? AND ({cond})",
+                        (doc["host"], doc.get("scanned_at"), text, doc["key"], *args))
+            won = cur.rowcount == 1
+            if not won:
+                cur.execute(f"INSERT INTO {store} (doc_key, host, scanned_at, document) VALUES (?, ?, ?, ?)",
+                            (doc["key"], doc["host"], doc.get("scanned_at"), text))
+                won = True
+            self.conn.commit()
+            return won
+        except pyodbc.IntegrityError:               # the row exists and is held by someone else
+            self.conn.rollback()
+            return False
+
     def _topology_remove(self, store: str, key: str) -> None:
         assert store in self.DOC_STORES
         cur = self.conn.cursor()

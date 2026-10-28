@@ -571,6 +571,32 @@ class Backend(ABC):
         assert store in self.SERVER_STORES
         self._topology_put(store, doc)
 
+    @staticmethod
+    def claimable(current: Document | None, holder: str, now: str, takeover: bool = True) -> bool:
+        """The lease rule: free, ours, or (with `takeover`) expired. `now` and expires_at are the
+        server's UTC ISO strings, which compare as text."""
+        if current is None or current.get("holder") == holder:
+            return True
+        return takeover and (current.get("expires_at") or "") < now
+
+    def claim_server_doc(self, store: str, doc: Document, *, holder: str, now: str,
+                         takeover: bool = True) -> bool:
+        """Atomically write `doc` (doc["key"], doc["holder"], doc["expires_at"]) when the stored
+        document of that key is absent, held by `holder`, or (with `takeover`) expired at `now`.
+        Returns whether it was written. Two servers racing for the same key: exactly one wins. The
+        server backends do this in one conditional statement; this default (JSONL files) is a
+        best-effort read-check-write for a single host."""
+        assert store in self.SERVER_STORES
+        return self._topology_claim(store, doc, holder, now, takeover)
+
+    def _topology_claim(self, store: str, doc: Document, holder: str, now: str, takeover: bool) -> bool:
+        current = next((d for d in self._topology_rows(store) if d.get("key") == doc["key"]), None)
+        if not self.claimable(current, holder, now, takeover):
+            return False
+        self._topology_put(store, doc)
+        back = next((d for d in self._topology_rows(store) if d.get("key") == doc["key"]), None)
+        return bool(back and back.get("holder") == doc.get("holder"))
+
     def server_docs(self, store: str) -> list[Document]:
         assert store in self.SERVER_STORES
         return self._topology_rows(store)

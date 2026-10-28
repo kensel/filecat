@@ -685,6 +685,24 @@ class SqliteBackend(Backend):
             (doc["key"], doc["host"], doc.get("scanned_at"), json.dumps(doc, ensure_ascii=False)))
         self.conn.commit()
 
+    def _topology_claim(self, store: str, doc: Document, holder: str, now: str, takeover: bool) -> bool:
+        """One upsert whose DO UPDATE only fires for our own or (takeover) an expired row; SQLite
+        serialises writers, so of two racing servers exactly one changes a row."""
+        assert store in self.DOC_STORES
+        cond = f"json_extract({store}.document, '$.holder') = ?"
+        args: list[Any] = [holder]
+        if takeover:
+            cond += f" OR json_extract({store}.document, '$.expires_at') < ?"
+            args.append(now)
+        cur = self.conn.execute(
+            f"INSERT INTO {store}(doc_key, host, scanned_at, document) VALUES (?, ?, ?, ?) "
+            "ON CONFLICT(doc_key) DO UPDATE SET host=excluded.host, scanned_at=excluded.scanned_at, "
+            f"document=excluded.document WHERE {cond}",
+            (doc["key"], doc["host"], doc.get("scanned_at"), json.dumps(doc, ensure_ascii=False), *args))
+        won = cur.rowcount == 1
+        self.conn.commit()
+        return won
+
     def _topology_remove(self, store: str, key: str) -> None:
         assert store in self.DOC_STORES
         self.conn.execute(f"DELETE FROM {store} WHERE doc_key=?", (key,))
