@@ -98,6 +98,9 @@ filecat dropped                                           # records of files tha
 filecat backups [--versions]                              # backup stores: machines, versions, problems, copies
 filecat databases                                         # database data folders: engine, version, databases, quiet?
 filecat scan-everything [--list] [--unfinished]           # every share of [everything] servers + local drives
+filecat agents enroll nas3 --host nas3 [--write]           # token + .env lines + [[agents]] stanza, fingerprint (docs/agent-server.md)
+filecat agents status [--strict]                          # version, pin, allowed roots, run ids, allowlist/deny hashes
+filecat server [--serve] [--once] [--dry-run]             # coordinator: agent health + scheduled scans and storage collects
 filecat programs                                          # registry, PATH, Start Menu
 filecat programs --reg uninstall-export.reg               # from a regedit export instead
 filecat signatures status

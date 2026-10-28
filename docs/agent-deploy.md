@@ -55,7 +55,23 @@ chmod 750 /usr/local/filecat-agent/filecat-agent
 
 ## 3. The `.env`
 
-In the same directory, next to the binary (it is read once at start):
+The quick way: on the filecat host, `filecat agents enroll nas3 --host nas3.lan` makes a token and
+prints the `.env` lines for the NAS, the `[[agents]]` stanza (`token = "${FILECAT_NAS3_TOKEN}"`,
+never the token itself) and how to set `FILECAT_NAS3_TOKEN`; it also reads the certificate
+fingerprint once if the agent is already running. The token is printed once. The whole workflow:
+
+1. `filecat agents enroll nas3 --host nas3.lan` while the agent is not running yet: the stanza has a
+   placeholder fingerprint and nothing is written. Put `FILECAT_AGENT_TOKEN=...` in the NAS's `.env`
+   and set `FILECAT_NAS3_TOKEN` on the filecat host with the same value.
+2. Start the agent (section 4); it prints its `cert_sha256`.
+3. `filecat agents fingerprint nas3.lan` shows what the agent presents; compare it with the agent's
+   own output, then paste the stanza into `filecat.toml` with that value as `cert_sha256`. (Enrolling
+   after the agent is up shows the fingerprint at once, and `--write` appends the stanza; it also
+   makes a new token, so that order needs the `.env` changed and the agent restarted.)
+4. `filecat agents status`: reachable, pin ok, allowlist and deny list match this filecat.
+   A mismatch means the binary on the NAS is from another build ([agent-server.md](agent-server.md)).
+
+By hand, the same thing, in the same directory as the binary (it is read once at start):
 
 ```sh
 cd /usr/local/filecat-agent

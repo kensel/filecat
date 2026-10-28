@@ -128,6 +128,13 @@ server keeps store detection, manifest verification, probing and Ollama.
     `ShareMap` (POSIX and UNC paths both ways), tested against a fake agent
     in Python.
   - [x] `filecat agents list` and `filecat agents test`.
+  - [x] `filecat agents enroll` (token, `.env` lines, `[[agents]]` stanza with `${FILECAT_<NAME>_TOKEN}`,
+    trust-on-first-use fingerprint, `--write`), `agents fingerprint` and `agents status [--strict]`
+    (capabilities, and the allowlist/deny hashes against `src/filecat/data/agent_expected.json`,
+    kept in step by a Python test and a cargo test); design in [agent-server.md](agent-server.md).
+  - [ ] `filecat server`: the coordinator (agent health, `[[server.jobs]]` scans, storage collects and
+    store re-sums on a schedule, job history and a lease in the catalog, `--once`, `--serve` with
+    `/api/agents` and `/api/jobs`); [agent-server.md](agent-server.md).
   - [x] `filecat scan` and `scan-everything` read a UNC root through the
     agent that covers it: listing, stat, measuring and probing from an
     agent-backed source (`fsource.py`, [scanning.md](scanning.md#6-scanning-through-filecat-agent)),

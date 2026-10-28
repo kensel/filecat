@@ -254,6 +254,7 @@ class Capabilities:
     allow_roots: tuple[str, ...] | None = None      # the agent's effective read scope; None: not reported
     allow_roots_source: str | None = None           # env, env_file or default
     deny_sha256: str | None = None                  # hash of the agent's compiled-in deny list
+    product_type: int | None = None                 # Windows agents: Win32_OperatingSystem.ProductType
 
     def has(self, entry_id: str) -> bool:
         cap = self.entries.get(entry_id)
@@ -643,7 +644,8 @@ class AgentClient:
         return Capabilities(int(resp.get("allowlist_version") or 0), resp.get("allowlist_sha256"),
                             str(resp.get("platform") or ""), entries,
                             tuple(roots) if isinstance(roots, list) else None,
-                            resp.get("allow_roots_source"), resp.get("deny_sha256"))
+                            resp.get("allow_roots_source"), resp.get("deny_sha256"),
+                            resp["product_type"] if isinstance(resp.get("product_type"), int) else None)
 
     def wmi(self, entry_id: str, timeout: float | None = None) -> list[dict[str, Any]]:
         """The rows of an allowlisted WMI query (Windows agents only; any other agent answers
@@ -891,3 +893,16 @@ def time_call(fn: Any, *args: Any, **kwargs: Any) -> tuple[Any, float]:
     start = time.perf_counter()
     result = fn(*args, **kwargs)
     return result, time.perf_counter() - start
+
+
+def fetch_fingerprint(host: str, port: int = DEFAULT_PORT, timeout: float = CONNECT_TIMEOUT) -> str:
+    """The SHA-256 (64 hex digits) of the certificate the agent at host:port presents, taken
+    without verifying anything: trust on first use. Nothing but the TLS handshake is sent; the
+    admin compares the result with what the agent printed at its first start."""
+    ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT)
+    ctx.check_hostname = False
+    ctx.verify_mode = ssl.CERT_NONE
+    ctx.minimum_version = ssl.TLSVersion.TLSv1_2
+    with socket.create_connection((host, port), timeout=timeout) as raw:
+        with ctx.wrap_socket(raw, server_hostname=host) as sock:
+            return hashlib.sha256(sock.getpeercert(binary_form=True) or b"").hexdigest()

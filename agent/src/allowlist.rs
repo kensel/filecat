@@ -196,6 +196,17 @@ mod tests {
     /// `./build.sh hashes` runs this and prints the values `src/filecat/data/agent_expected.json`
     /// must hold; a Python test fails when the file and the Rust build disagree.
     #[test]
+    fn expected_json_matches_this_build() {
+        let file: serde_json::Value =
+            serde_json::from_str(include_str!("../../src/filecat/data/agent_expected.json")).unwrap();
+        let v = &file["1"];
+        assert_eq!(v["allowlist_sha256"]["linux"], allowlist_sha256(),
+                   "src/filecat/data/agent_expected.json is stale: run ./build.sh hashes and update it");
+        assert_eq!(v["deny_sha256"], crate::scope::deny_sha256(),
+                   "src/filecat/data/agent_expected.json is stale: run ./build.sh hashes and update it");
+    }
+
+    #[test]
     fn print_expected_hashes() {
         println!("EXPECTED allowlist_sha256 {}", allowlist_sha256());
         println!("EXPECTED deny_sha256 {}", crate::scope::deny_sha256());

@@ -1,0 +1,9 @@
+{
+  "1": {
+    "deny_sha256": "bc7902ca6732ca37432534198239904100e0fcbb16bd0850e56604f205c36201",
+    "allowlist_sha256": {
+      "linux": "1421d08a57af05c07b6c34f7f18a81b002895370132c6d87773a66010875fa31",
+      "windows": null
+    }
+  }
+}

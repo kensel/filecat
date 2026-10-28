@@ -350,6 +350,28 @@ def build_parser() -> argparse.ArgumentParser:
     a.add_argument("names", nargs="*", metavar="NAME", help="agents to test (default: all)")
     a.add_argument("--timeout", type=float, default=5.0, help="seconds per connection and request")
     a.add_argument("--json", action="store_true", help="one JSON object per agent")
+    a = asub.add_parser("status", help="hello and capabilities of each agent: version, certificate pin, "
+                                       "allowed roots, run ids, and whether its allowlist and deny list "
+                                       "are the ones this filecat expects")
+    a.add_argument("names", nargs="*", metavar="NAME", help="agents to check (default: all)")
+    a.add_argument("--timeout", type=float, default=5.0, help="seconds per connection and request")
+    a.add_argument("--json", action="store_true", help="one JSON object per agent")
+    a.add_argument("--strict", action="store_true",
+                   help="exit 1 on an allowlist/deny list mismatch or any warning too")
+    a = asub.add_parser("enroll", help="make a token and print the agent's .env lines and the [[agents]] "
+                                       "stanza; fetch the certificate fingerprint once (trust on first use)")
+    a.add_argument("name", metavar="NAME")
+    a.add_argument("--host", required=True, metavar="HOST[:PORT]", help="the agent's address (default port 9876)")
+    a.add_argument("--alias", dest="agent_alias", metavar="\\\\SERVER", help="the server name SMB scans record the shares under")
+    a.add_argument("--write", action="store_true",
+                   help="append the stanza to filecat.toml (refuses when NAME exists); the token is never written")
+    a.add_argument("--cert-sha256", dest="cert_sha256", metavar="HEX",
+                   help="use this fingerprint instead of connecting to fetch it")
+    a.add_argument("--no-connect", dest="no_connect", action="store_true", help="do not connect to the agent")
+    a.add_argument("--timeout", type=float, default=5.0, help="seconds to connect")
+    a = asub.add_parser("fingerprint", help="print the certificate fingerprint the agent at HOST[:PORT] presents")
+    a.add_argument("target", metavar="HOST[:PORT]")
+    a.add_argument("--timeout", type=float, default=5.0, help="seconds to connect")
 
     p = sub.add_parser("rollups", help="rollup groups: the rules and modes in force, what the catalog "
                                        "holds, what a scan would suggest, and the sticky redactions")

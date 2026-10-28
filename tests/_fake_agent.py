@@ -57,10 +57,8 @@ ALLOWLIST: dict[str, str | None] = {
 # Deny list, compiled into the real agent: wins over the allowed roots, no configuration changes
 # it. It applies to commands that return file content (read_file, read_range, measure), to the
 # canonical path (symlinks resolved). `*` matches inside one path component.
-DENY_POSIX = ("/etc/shadow", "/etc/shadow-", "/etc/gshadow", "/etc/gshadow-", "/etc/sudoers",
-              "/etc/sudoers.d", "/etc/ssh/ssh_host_*_key", "/etc/ssl/private", "/var/log", "/var/logs")
-ENV_ALLOWED = (".env.example", ".env.sample", ".env.template")
-DENY_WINDOWS = (r"%SystemRoot%\system32\config", r"%SystemRoot%\ntds")
+from filecat.agent_expected import (DENY_POSIX, DENY_WINDOWS, ENV_ALLOWED, SIGNATURE_LINES,  # noqa: E402
+                                    deny_sha256)
 # Private keys are denied by content: the head of the file (first SIGNATURE_WINDOW bytes, after an
 # optional UTF-8 BOM and leading ASCII whitespace) decides, whatever the name. A regex per rule,
 # written from docs/agent-protocol.md and not from filecat.secretfiles.
@@ -68,12 +66,9 @@ SIGNATURE_WINDOW = 256
 KEY_SIGNATURES = (rb"-----BEGIN [^\n]*PRIVATE KEY-----[ \t\r]*(?:\n|\Z)",
                   rb"-----BEGIN PGP PRIVATE KEY BLOCK-----", rb"---- BEGIN SSH2 ENCRYPTED PRIVATE KEY ----",
                   rb"PuTTY-User-Key-File-")
-# What deny_sha256 covers: the path rules, the env-file exceptions, the Windows rules and the key
-# signatures as docs/agent-protocol.md and secretfiles.SIGNATURES spell them, one per line (no
-# trailing newline). The Rust agent computes the same bytes (agent/src/scope.rs `deny_sha256`).
-SIGNATURE_LINES = ("-----BEGIN *PRIVATE KEY-----", "-----BEGIN PGP PRIVATE KEY BLOCK-----",
-                   "---- BEGIN SSH2 ENCRYPTED PRIVATE KEY ----", "PuTTY-User-Key-File-")
-DENY_SHA256 = hashlib.sha256("\n".join(DENY_POSIX + ENV_ALLOWED + DENY_WINDOWS + SIGNATURE_LINES).encode()).hexdigest()
+# deny_sha256 covers the path rules, the env-file exceptions, the Windows rules and the key
+# signatures one per line (filecat.agent_expected computes it, as the Rust agent does).
+DENY_SHA256 = deny_sha256()
 # Files the agent serves with credentials blanked (read_file only): path -> keys whose value becomes
 # REDACTED. A table in the binary so a file can be added; not configurable.
 REDACTED = b"<filecat-redacted>"
@@ -270,6 +265,9 @@ class FakeAgent:
         self.protocol = protocol
         self.allow_roots = allow_roots                  # None: this fake imposes no roots (the deny list always applies)
         self.allow_roots_source = "env"
+        self.allowlist_sha256: str | None = None        # capabilities report this instead of the fake's own digest
+        self.deny_sha256: str | None = None             # ... and this instead of DENY_SHA256
+        self.product_type: int | None = None            # a Windows agent's Win32_OperatingSystem.ProductType
         self.requests: list[dict[str, Any]] = []        # every request received, in order
         self.wire: list[tuple[str, str]] = []           # ("in" | "out", the line as text), both ways
         self.log: list[str] = []                        # what the agent would log
@@ -910,8 +908,12 @@ class FakeAgent:
             entries.append({"id": entry, "available": ok, "binary": f"/usr/bin/{entry.split('_')[0]}" if ok else None,
                             "version": None, "arg_kind": kind})
         digest = hashlib.sha256("\0".join(f"{e}={k}" for e, k in sorted(ALLOWLIST.items())).encode()).hexdigest()
-        resp = {"ok": True, "allowlist_version": 1, "allowlist_sha256": digest, "deny_sha256": DENY_SHA256,
+        resp = {"ok": True, "allowlist_version": 1,
+                "allowlist_sha256": self.allowlist_sha256 or digest,
+                "deny_sha256": self.deny_sha256 or DENY_SHA256,
                 "platform": "linux", "entries": entries}
+        if self.product_type is not None:
+            resp["product_type"] = self.product_type
         if self.allow_roots is not None:
             resp.update(allow_roots=list(self.allow_roots), allow_roots_source=self.allow_roots_source)
         return resp
