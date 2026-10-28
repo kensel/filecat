@@ -286,3 +286,24 @@ After the v0.2.0 rollups (stages A and B of [rollups.md](rollups.md)):
 - A per-store level: `[[rollups.backup_store]] path = '...' verify = 2`.
 - Optional rollup measures: size by extension, age buckets, largest matched
   children (never for private rules).
+
+## v0.2.5: file-name search
+
+Use the catalog as a file-name search across every host, as voidtools
+Everything does for one PC (e.g. `eve*.exe` on all NAS shares at once).
+
+- Searches: prefix and wildcard (`eve*.exe`), substring (`*setup*`),
+  extension, size and date filters, root and host filters.
+- Not a MongoDB `$text` index. It matches whole words only, splits names at
+  dots and dashes, and cannot serve `eve*` or `*setup*`.
+- A lowercased name field (`name_lc`) with an ordinary index for
+  case-insensitive prefixes; with the `suffix` index it answers `eve*.exe`
+  without a collection scan. Same on the SQL backends.
+- Substring: a trigram index where the backend has one (PostgreSQL
+  `pg_trgm`), or an in-memory name table in `filecat server`, built from the
+  catalog and kept current from scan deltas (a few GB for ~22M names).
+- A search page on `filecat server --serve`, behind its login.
+- `[REDACTED]` and rollup members never appear in results; a rolled-up folder
+  is found by its own name only.
+- Permissions: one password sees every host's names. Per-user filtering waits
+  for RBAC (multi-user setups).
