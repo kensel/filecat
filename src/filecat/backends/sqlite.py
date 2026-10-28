@@ -115,6 +115,18 @@ CREATE TABLE IF NOT EXISTS storage_topology_history (
     document TEXT NOT NULL
 );
 CREATE INDEX IF NOT EXISTS idx_storage_history_host ON storage_topology_history(host, scanned_at);
+CREATE TABLE IF NOT EXISTS server_jobs (
+    doc_key TEXT PRIMARY KEY,
+    host TEXT NOT NULL,
+    scanned_at TEXT,
+    document TEXT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS server_state (
+    doc_key TEXT PRIMARY KEY,
+    host TEXT NOT NULL,
+    scanned_at TEXT,
+    document TEXT NOT NULL
+);
 
 CREATE TABLE IF NOT EXISTS agg_suffix (
     root_id TEXT NOT NULL, root TEXT NOT NULL,
@@ -661,11 +673,11 @@ class SqliteBackend(Backend):
 
     # --- storage topology ------------------------------------------------
     def _topology_rows(self, store: str) -> list[Document]:
-        assert store in self.TOPOLOGY_STORES
+        assert store in self.DOC_STORES
         return [json.loads(d) for (d,) in self.conn.execute(f"SELECT document FROM {store}")]
 
     def _topology_put(self, store: str, doc: Document) -> None:
-        assert store in self.TOPOLOGY_STORES
+        assert store in self.DOC_STORES
         self.conn.execute(
             f"INSERT INTO {store}(doc_key, host, scanned_at, document) VALUES (?, ?, ?, ?) "
             "ON CONFLICT(doc_key) DO UPDATE SET host=excluded.host, scanned_at=excluded.scanned_at, "
@@ -674,7 +686,7 @@ class SqliteBackend(Backend):
         self.conn.commit()
 
     def _topology_remove(self, store: str, key: str) -> None:
-        assert store in self.TOPOLOGY_STORES
+        assert store in self.DOC_STORES
         self.conn.execute(f"DELETE FROM {store} WHERE doc_key=?", (key,))
         self.conn.commit()
 

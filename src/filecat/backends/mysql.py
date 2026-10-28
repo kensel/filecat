@@ -162,6 +162,22 @@ _SCHEMA = [
     ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
     """,
     """
+    CREATE TABLE IF NOT EXISTS server_jobs (
+        doc_key VARCHAR(191) PRIMARY KEY,
+        host VARCHAR(191) NOT NULL,
+        scanned_at VARCHAR(40),
+        document JSON NOT NULL
+    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
+    """,
+    """
+    CREATE TABLE IF NOT EXISTS server_state (
+        doc_key VARCHAR(191) PRIMARY KEY,
+        host VARCHAR(191) NOT NULL,
+        scanned_at VARCHAR(40),
+        document JSON NOT NULL
+    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
+    """,
+    """
     CREATE TABLE IF NOT EXISTS samples (
         sample_id VARCHAR(64) PRIMARY KEY,
         document JSON NOT NULL
@@ -600,7 +616,7 @@ class MysqlBackend(Backend):
 
     # --- storage topology ------------------------------------------------
     def _topology_rows(self, store: str) -> list[Document]:
-        assert store in self.TOPOLOGY_STORES
+        assert store in self.DOC_STORES
         with self.conn.cursor() as cur:
             cur.execute(f"SELECT document FROM {store}")
             rows = cur.fetchall()
@@ -608,7 +624,7 @@ class MysqlBackend(Backend):
         return [json.loads(d) if isinstance(d, (str, bytes)) else d for (d,) in rows]
 
     def _topology_put(self, store: str, doc: Document) -> None:
-        assert store in self.TOPOLOGY_STORES
+        assert store in self.DOC_STORES
         with self.conn.cursor() as cur:
             cur.execute(
                 f"INSERT INTO {store} (doc_key, host, scanned_at, document) VALUES (%s, %s, %s, %s) "
@@ -618,7 +634,7 @@ class MysqlBackend(Backend):
         self.conn.commit()
 
     def _topology_remove(self, store: str, key: str) -> None:
-        assert store in self.TOPOLOGY_STORES
+        assert store in self.DOC_STORES
         with self.conn.cursor() as cur:
             cur.execute(f"DELETE FROM {store} WHERE doc_key=%s", (key,))
         self.conn.commit()

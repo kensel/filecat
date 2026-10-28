@@ -528,6 +528,11 @@ class Backend(ABC):
     # A backend implements the three row primitives; the rest is written on top of them.
     # Hosts written by hand in filecat.toml are not stored here (they are merged at read time).
     TOPOLOGY_STORES = ("storage_topology", "storage_topology_history")
+    # The same row shape (key, host, scanned_at, document) also holds the filecat server's state:
+    # "server_jobs" (one row per job run, key = "<started_at>#<job>") and "server_state" (the single
+    # lease row and the last agent states). docs/agent-server.md section 6.
+    SERVER_STORES = ("server_jobs", "server_state")
+    DOC_STORES = TOPOLOGY_STORES + SERVER_STORES
 
     def _topology_rows(self, store: str) -> list[Document]:
         """Every document of `store` (one of TOPOLOGY_STORES)."""
@@ -559,6 +564,20 @@ class Backend(ABC):
         """A history row {"host", "scanned_at", ...}; one per (host, scanned_at)."""
         self._topology_put("storage_topology_history",
                            {**row, "key": f"{row['host'].lower()}@{row['scanned_at']}"})
+
+    # --- the filecat server's state (filecat/server_store.py) -------------------------
+    def put_server_doc(self, store: str, doc: Document) -> None:
+        """Insert or replace a document of "server_jobs" or "server_state" (doc["key"], doc["host"])."""
+        assert store in self.SERVER_STORES
+        self._topology_put(store, doc)
+
+    def server_docs(self, store: str) -> list[Document]:
+        assert store in self.SERVER_STORES
+        return self._topology_rows(store)
+
+    def delete_server_doc(self, store: str, key: str) -> None:
+        assert store in self.SERVER_STORES
+        self._topology_remove(store, key)
 
     def topology_history(self, host: str | None = None) -> list[Document]:
         """History rows, oldest first, optionally of one host."""

@@ -140,6 +140,22 @@ _TABLES = {
             document NVARCHAR(MAX) NOT NULL
         )
     """,
+    "server_jobs": """
+        CREATE TABLE server_jobs (
+            doc_key NVARCHAR(400) PRIMARY KEY,
+            host NVARCHAR(400) NOT NULL,
+            scanned_at VARCHAR(40),
+            document NVARCHAR(MAX) NOT NULL
+        )
+    """,
+    "server_state": """
+        CREATE TABLE server_state (
+            doc_key NVARCHAR(400) PRIMARY KEY,
+            host NVARCHAR(400) NOT NULL,
+            scanned_at VARCHAR(40),
+            document NVARCHAR(MAX) NOT NULL
+        )
+    """,
     "storage_topology_history": """
         CREATE TABLE storage_topology_history (
             doc_key NVARCHAR(400) PRIMARY KEY,
@@ -589,13 +605,13 @@ class MssqlBackend(Backend):
 
     # --- storage topology ------------------------------------------------
     def _topology_rows(self, store: str) -> list[Document]:
-        assert store in self.TOPOLOGY_STORES
+        assert store in self.DOC_STORES
         cur = self.conn.cursor()
         cur.execute(f"SELECT document FROM {store}")
         return [json.loads(d) for (d,) in cur.fetchall()]
 
     def _topology_put(self, store: str, doc: Document) -> None:
-        assert store in self.TOPOLOGY_STORES
+        assert store in self.DOC_STORES
         text = json.dumps(doc, ensure_ascii=False)
         cur = self.conn.cursor()
         cur.execute(
@@ -607,7 +623,7 @@ class MssqlBackend(Backend):
         self.conn.commit()
 
     def _topology_remove(self, store: str, key: str) -> None:
-        assert store in self.TOPOLOGY_STORES
+        assert store in self.DOC_STORES
         cur = self.conn.cursor()
         cur.execute(f"DELETE FROM {store} WHERE doc_key=?", (key,))
         self.conn.commit()

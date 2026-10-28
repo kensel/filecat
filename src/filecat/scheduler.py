@@ -1,0 +1,102 @@
+"""What is due, and what may start now: the scheduling rules of docs/agent-server.md section 4.
+
+Pure logic over an injected `now` (a timezone-aware datetime), so it is tested with a fake clock.
+A job's anchor is when it last started (or was last skipped); None means never. Interval jobs
+are due at `anchor + every`; daily jobs when the latest slot at or before `now` is later than the
+anchor (a missed slot runs once, late).
+"""
+from __future__ import annotations
+
+from dataclasses import dataclass, field
+from datetime import datetime, time, timedelta
+from typing import Iterable
+
+from .server_cfg import JobSpec
+
+SKIP_RUNNING = "previous run still running"
+
+
+def latest_slot(now: datetime, times: Iterable[time]) -> datetime | None:
+    """The most recent daily slot at or before `now` (today's or yesterday's)."""
+    best = None
+    for day in (now.date() - timedelta(days=1), now.date()):
+        for t in times:
+            slot = datetime.combine(day, t, tzinfo=now.tzinfo)
+            if slot <= now and (best is None or slot > best):
+                best = slot
+    return best
+
+
+def next_slot(now: datetime, times: Iterable[time]) -> datetime:
+    """The first daily slot after `now`."""
+    for day in (now.date(), now.date() + timedelta(days=1)):
+        for t in sorted(times):
+            slot = datetime.combine(day, t, tzinfo=now.tzinfo)
+            if slot > now:
+                return slot
+    raise ValueError("no slot")        # unreachable for a non-empty `times`
+
+
+def is_due(job: JobSpec, anchor: datetime | None, now: datetime) -> bool:
+    if anchor is None:
+        return True
+    if job.every is not None:
+        return anchor + job.every <= now
+    slot = latest_slot(now, job.at)
+    return slot is not None and slot > anchor
+
+
+def next_due(job: JobSpec, anchor: datetime | None, now: datetime) -> datetime:
+    """When the job is next due (`now` when it already is)."""
+    if is_due(job, anchor, now):
+        return now
+    if job.every is not None:
+        return anchor + job.every      # type: ignore[operator]  (a None anchor is always due)
+    return next_slot(now, job.at)
+
+
+@dataclass
+class Plan:
+    start: list[JobSpec] = field(default_factory=list)
+    skipped: list[tuple[JobSpec, str]] = field(default_factory=list)
+    waiting: list[JobSpec] = field(default_factory=list)        # due, but the agent or the limit is busy
+
+
+class Scheduler:
+    def __init__(self, jobs: Iterable[JobSpec], anchors: dict[str, datetime | None] | None = None) -> None:
+        self.jobs = [j for j in jobs if j.enabled]
+        self.anchors: dict[str, datetime | None] = {j.name: (anchors or {}).get(j.name) for j in self.jobs}
+        self.running: dict[str, str] = {}       # job name -> agent name
+
+    def busy_agents(self) -> set[str]:
+        return set(self.running.values())
+
+    def plan(self, now: datetime, *, max_concurrent: int, down: Iterable[str] = (),
+             unknown: Iterable[str] = (), forced: Iterable[str] = ()) -> Plan:
+        """Decide for every due (or forced) job, in configuration order. Chosen jobs are marked
+        running at once, so a later job of the same agent in this round waits."""
+        down, unknown, forced = set(down), set(unknown), set(forced)
+        plan = Plan()
+        for job in self.jobs:
+            if not (job.name in forced or is_due(job, self.anchors[job.name], now)):
+                continue
+            if job.name in self.running:
+                plan.skipped.append((job, SKIP_RUNNING))
+                self.anchors[job.name] = now
+            elif job.agent in down:
+                plan.skipped.append((job, f"agent {job.agent} is down"))
+                self.anchors[job.name] = now
+            elif (job.agent in unknown or job.agent in self.busy_agents()
+                  or len(self.running) >= max_concurrent):
+                plan.waiting.append(job)
+            else:
+                plan.start.append(job)
+                self.running[job.name] = job.agent
+                self.anchors[job.name] = now
+        return plan
+
+    def finished(self, name: str) -> None:
+        self.running.pop(name, None)
+
+    def next_due(self, job: JobSpec, now: datetime) -> datetime:
+        return next_due(job, self.anchors.get(job.name), now)

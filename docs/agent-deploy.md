@@ -176,6 +176,29 @@ Replace the binary (stop the agent first: `pkill filecat-agent`) and start it ag
 `capabilities` report `agent_version`, `allowlist_version` and `allowlist_sha256`, so the server
 can tell which build it talks to. Keep the `.crt` and `.key` and the fingerprint does not change.
 
+## 9. Scheduled work: `filecat server`
+
+Once `filecat agents status` is green, `filecat server` keeps the agents checked and runs
+`[[server.jobs]]` (storage collects, scans, store re-sums) on a schedule, with its history in the
+catalog and `--serve` for the viewer. Example for one NAS in `filecat.toml`:
+
+```toml
+[[server.jobs]]
+name = "nas3-topology"
+kind = "storage-collect"
+agent = "nas3"
+every = "24h"
+
+[[server.jobs]]
+name = "nas3-nightly"
+kind = "scan"
+agent = "nas3"          # no roots = every root nas3 covers
+at = "02:30"
+```
+
+`filecat server --dry-run` shows the plan; Task Scheduler or cron can run `filecat server --once`
+every 15 minutes instead of a resident process. Everything is in [agent-server.md](agent-server.md).
+
 ## Notes for DSM
 
 - DSM 7.1 and 7.2 run a 4.x kernel with an old glibc; a musl static binary does not care. `statx`

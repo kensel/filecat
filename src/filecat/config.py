@@ -26,6 +26,9 @@ one that covers a UNC path. `filecat agents` lists and tests them.
 counts without listing (docs/rollups.md); load_rollups validates them, and no
 message or `config show` line repeats a pattern.
 
+`[server]` and `[[server.jobs]]` configure `filecat server` (health checks and scheduled scans, storage
+collects and store re-sums); server_cfg.load_server validates them. See docs/agent-server.md.
+
 `[[storage.hosts]]` (a host with no agent) and `[[storage.links]]` (which disk is made of which
 node on another host) are written by hand; load_storage validates them and
 `filecat storage links` checks them against saved topology snapshots. See

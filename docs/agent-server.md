@@ -98,7 +98,7 @@ of `[[server.jobs]]` on their schedules against the catalog (`--backend`, `--out
 
 * `--once` runs every job that is due now once and exits (for Task Scheduler or cron: start it every
   15 minutes and the jobs run when due, because "due" is computed from the persisted history).
-  `--job NAME` (with `--once`) runs the named job whatever its schedule says. Exit 0 when every run
+  `--job NAME` (with `--once`, repeatable) runs only the named jobs, whatever their schedules say. Exit 0 when every run
   ended `ok`, 1 when one ended `errors`, `failed` or `cancelled`, 4 when another server holds the
   lease.
 * `--dry-run` prints the plan (agents, jobs, next due times, what each job would do) and exits; it
@@ -198,8 +198,8 @@ the scan raises `ScanCancelled`, a `KeyboardInterrupt`, at the next entry or pro
 root is marked interrupted, the resume file is kept, and an in-flight `sum_subtree` is stopped with
 the protocol's `cancel` on a second connection, which `fsource` already does for any interrupt);
 wait up to `shutdown_grace` (default 30 s) for the job threads; record each unfinished run
-`cancelled`; save the agent states; release the lease; stop the viewer. A second Ctrl+C exits at
-once (the lease then expires by itself). Exit code 0 for a requested stop.
+`cancelled`; save the agent states; release the lease; stop the viewer. Exit code 0 for a requested stop. (If the process is killed outright the
+lease simply expires after `lease_ttl`, and the next server marks the unfinished runs `lost`.)
 
 ## 5. Configuration
 
@@ -300,7 +300,8 @@ names, agent names, kinds, counts, outcomes, times and the **root** (a configure
 path-looking substring (UNC, drive, POSIX) replaced by `<path>` and cut at 300 characters
 (`agent_status.scrub`); an `OSError`'s file name is never repeated. A scan running in-process prints
 its usual progress lines to stderr (redaction-safe by their own rules, rollups.md 3.2/3.3); the server sets their
-interval to 60 s unless the job's `options` say otherwise.
+interval to 60 s. Each scan job keeps its own resume file next to the catalog
+(`<catalog>.<job>.resume.json`), so jobs that run side by side do not overwrite each other's.
 
 ## 9. ScanServer.ps1
 

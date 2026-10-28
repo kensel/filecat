@@ -58,6 +58,7 @@ class ScanOptions:
     rollup_workers: int = 4             # threads that sum rolled-up folders
     rollup_timeout: float | None = None  # seconds one rollup may take on an SMB or local scan
     new_redaction_key: bool = False     # --new-redaction-key: write a key although sticky entries exist
+    cancel: Any = None                  # threading.Event: when set the scan stops at the next entry (filecat server)
 
     @classmethod
     def from_args(cls, args: Any) -> "ScanOptions":

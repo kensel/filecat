@@ -2,6 +2,11 @@
 .SYNOPSIS
 Scan every disk share on a server into the filecat catalog.
 
+.NOTES
+Legacy, kept for SMB-only servers that run no filecat-agent: it discovers the shares with
+`net view`, maps credentials with `net use` and scans once. For a host with an agent, use
+[[agents]] and [[server.jobs]] with `filecat server` (docs/agent-server.md, section 9).
+
 .EXAMPLE
 .\ScanServer.ps1 -ServerName nas-vm
 

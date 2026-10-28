@@ -22,6 +22,7 @@ COMMANDS = {
     "member-sets": "filecat.member_sets",
     "config": "filecat.config",
     "serve": "filecat.serve",
+    "server": "filecat.server",
     "roots": "filecat.roots_cmd",
     "dropped": "filecat.dropped_cmd",
     "backups": "filecat.backups_cmd",
@@ -446,6 +447,20 @@ def build_parser() -> argparse.ArgumentParser:
                         "of the stored snapshots")
     s.add_argument("--json", action="store_true", help="one JSON object")
     _storage(s)
+
+    p = sub.add_parser("server", help="the coordinator: checks the agents' health and runs the scheduled "
+                                      "[[server.jobs]] (scans, storage collects, store re-sums), records "
+                                      "every run in the catalog; --serve also runs the web viewer")
+    _storage(p)
+    p.add_argument("--serve", nargs="?", const="", default=None, metavar="HOST:PORT",
+                   help="also run the web viewer in this process (default 127.0.0.1:8765, or [server] serve); "
+                        "it gets live /api/agents and /api/jobs")
+    p.add_argument("--once", action="store_true",
+                   help="run every job that is due now once, then exit (for Task Scheduler or cron)")
+    p.add_argument("--job", action="append", metavar="NAME",
+                   help="with --once: run this job whatever its schedule says (repeatable)")
+    p.add_argument("--dry-run", dest="dry_run", action="store_true",
+                   help="print the plan (agents, jobs, next due times) and exit; touches nothing")
 
     p = sub.add_parser("serve", help="web viewer: browse the summary and drill into the records")
     _storage(p)

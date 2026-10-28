@@ -27,6 +27,11 @@ from .walker import resolve_unc, walk_root
 HEAD_BYTES = 8 * 1024
 
 
+class ScanCancelled(KeyboardInterrupt):
+    """options.cancel was set (the filecat server shutting down, or a job over its time). A
+    KeyboardInterrupt so the root is marked interrupted and the resume file is kept, as for Ctrl+C."""
+
+
 def measure_file(root: str, rel_path: str, abs_path: str, st: os.stat_result,
                  options: ScanOptions, identifier: Any) -> dict[str, Any]:
     """Build the full document for one regular file: identity, hash policy,
@@ -147,7 +152,9 @@ class _Progress:
     by its own path (<folder>\\[TAG]), never by what is inside it. Only
     counters are kept, so this costs nothing per file."""
 
-    def __init__(self, root: str, interval: float, stream: Any = None, via: str = "") -> None:
+    def __init__(self, root: str, interval: float, stream: Any = None, via: str = "",
+                 cancel: Any = None) -> None:
+        self.cancel = cancel
         self.root = root + via      # via: " (filecat-agent NAME)" when read through an agent
         self.interval = interval
         self.stream = stream or sys.stderr
@@ -168,6 +175,8 @@ class _Progress:
         self._mark = (0, 0, 0)  # files, measured, measured_bytes at the previous line
 
     def __call__(self, path: str, size: int, how: str = "measured") -> None:
+        if self.cancel is not None and self.cancel.is_set():
+            raise ScanCancelled()
         if how == "resumed":
             self.resumed_dirs += 1
         elif how == "rollup":
@@ -333,7 +342,8 @@ def _scan(paths: list[str], roots: list[str], plans: list[tuple[fsource.AgentSou
             elif path != root:
                 print(f"{root}: reading through {path}", file=sys.stderr)
             progress = _Progress(root, options.progress_interval,
-                                 via=f" (filecat-agent {source.name})" if source else "")
+                                 via=f" (filecat-agent {source.name})" if source else "",
+                                 cancel=options.cancel)
             if resume.resuming(root) and not options.force:
                 print(f"{root}: resuming an unfinished scan; {resume.done_count(root)} finished "
                       "folders are skipped unless they changed", file=sys.stderr)

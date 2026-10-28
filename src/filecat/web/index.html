@@ -123,6 +123,7 @@ tr.hl td { background: var(--hover); }
   <h1>filecat</h1>
   <nav id="nav">
     <a data-view="roots" href="#roots">Roots</a>
+    <a data-view="server" href="#server">Server</a>
     <a data-view="summary" href="#summary">Summary</a>
     <a data-view="graph" href="#graph">Graph</a>
     <a data-view="browse" href="#browse">Browse</a>
@@ -292,6 +293,61 @@ function rootRow(r, now) {
     h("td", {class: "num"}, s ? num(s.total_files) : ""),
     h("td", {class: "num", title: s ? num(s.total_bytes) + " bytes" : ""}, s ? bytes(s.total_bytes) : ""),
     newest, errCell);
+}
+
+// --- server (agents and job history; filecat server) ----------------------
+const AGENT_STATES = {up: ["up", "ok"], down: ["down", "warn"], unknown: ["not checked yet", ""]};
+const OUTCOMES = {ok: "ok", errors: "warn", failed: "warn", lost: "warn", cancelled: "warn", running: "live", skipped: ""};
+let serverTimer = null;
+async function viewServer() {
+  clearTimeout(serverTimer);
+  if (!document.getElementById("server-card")) show(h("div", {class: "loading"}, "Loading server state…"));
+  let agents, jobs;
+  try { [agents, jobs] = await Promise.all([api("/api/agents"), api("/api/jobs", {limit: 50})]); } catch (e) { return show(failed(e)); }
+  if (parseHash().view !== "server") return;
+  const now = agents.updated_at;
+  const lease = agents.server;
+  const who = lease ? `server on ${lease.host || "?"} (pid ${lease.pid}) ${lease.alive ? "holds the catalog" : "lease expired " + ago(lease.expires_at, now)}`
+    : "no filecat server has run against this catalog";
+  const agentCard = h("section", {class: "card", id: "server-card"},
+    h("h2", {}, "Agents", h("small", {}, `${agents.source === "live" ? "live" : "last saved " + ago(agents.updated_at, now)} · ${who}`)),
+    h("div", {class: "scroll"}, h("table", {},
+      h("thead", {}, h("tr", {}, ["agent", "state", "version", "checks", "running", "last error"].map(t => h("th", {}, t)))),
+      h("tbody", {}, agents.agents.length ? agents.agents.map(a => {
+        const [label, cls] = AGENT_STATES[a.state] || [a.state, ""];
+        const warn = (a.warnings || []).length || a.allowlist_match === false || a.deny_match === false;
+        return h("tr", {},
+          h("td", {}, a.name, h("span", {class: "sub mono"}, a.endpoint)),
+          h("td", {}, h("span", {class: "badge " + cls}, label), h("span", {class: "sub"}, a.since ? "since " + stamp(a.since) : "")),
+          h("td", {}, a.version ? `filecat-agent ${a.version}` : "", h("span", {class: "sub"}, a.platform || ""),
+            warn ? h("span", {class: "badge warn"}, "allowlist/deny list differs from this filecat") : null),
+          h("td", {}, a.last_check ? ago(a.last_check, now) : "", a.failures ? h("span", {class: "sub"}, `${a.failures} failed in a row`) : null),
+          h("td", {}, a.running || ""),
+          h("td", {class: "wide"}, a.last_error || ""));
+      }) : h("tr", {}, h("td", {colspan: 6, class: "muted"}, "no agents known (no server has saved any state, or no [[agents]])"))))));
+  const configured = jobs.jobs.length ? h("section", {class: "card"},
+    h("h2", {}, "Jobs", h("small", {}, `${jobs.jobs.length} configured`)),
+    h("div", {class: "scroll"}, h("table", {},
+      h("thead", {}, h("tr", {}, ["job", "kind", "agent", "schedule", "next due", "last"].map(t => h("th", {}, t)))),
+      h("tbody", {}, jobs.jobs.map(j => h("tr", {},
+        h("td", {}, j.name), h("td", {}, j.kind), h("td", {}, j.agent), h("td", {}, j.schedule),
+        h("td", {}, j.running ? "running" : stamp(j.next_due)),
+        h("td", {}, j.last_outcome ? h("span", {class: "badge " + (OUTCOMES[j.last_outcome] || "")}, j.last_outcome) : ""))))))) : null;
+  const recent = h("section", {class: "card"},
+    h("h2", {}, "Recent runs", h("small", {}, `${jobs.recent.length} shown`)),
+    h("div", {class: "scroll"}, h("table", {},
+      h("thead", {}, h("tr", {}, ["job", "started", "took", "outcome", "counts", "note"].map(t => h("th", {}, t)))),
+      h("tbody", {}, jobs.recent.length ? jobs.recent.map(r => h("tr", {},
+        h("td", {}, r.job, h("span", {class: "sub"}, `${r.kind} · ${r.agent || ""}`)),
+        h("td", {}, stamp(r.started_at), h("span", {class: "sub"}, ago(r.started_at, now))),
+        h("td", {}, r.ended_at && r.outcome !== "skipped" ? duration((new Date(r.ended_at) - new Date(r.started_at)) / 1000) : ""),
+        h("td", {}, h("span", {class: "badge " + (OUTCOMES[r.outcome] || "")}, r.outcome)),
+        h("td", {class: "wide"}, Object.entries(r.counts || {}).map(([k, v]) => `${k} ${typeof v === "number" ? num(v) : v}`).join(" · ")),
+        h("td", {class: "wide"}, r.error || ""))) : h("tr", {}, h("td", {colspan: 6, class: "muted"}, "no runs recorded"))))));
+  const y = window.scrollY;
+  fill($main, agentCard, configured, recent);
+  window.scrollTo(0, y);
+  serverTimer = setTimeout(() => { if (parseHash().view === "server") viewServer(); }, 15000);
 }
 
 // --- summary ---------------------------------------------------------
@@ -1252,7 +1308,7 @@ async function loadMembers(card, root, rel, offset, tbody) {
 }
 
 // --- shell -----------------------------------------------------------
-const VIEWS = {roots: viewRoots, summary: viewSummary, graph: viewGraph, records: viewRecords, browse: viewBrowse,
+const VIEWS = {roots: viewRoots, server: viewServer, summary: viewSummary, graph: viewGraph, records: viewRecords, browse: viewBrowse,
                record: viewRecord};
 async function render() {
   const {view, params} = parseHash();
@@ -1261,7 +1317,7 @@ async function render() {
     a.classList.toggle("on", a.dataset.view === (view === "record" ? "browse" : view));
     a.href = route(a.dataset.view, a.dataset.view === "graph" ? {} : {root: $root.value});  // Graph opens on every root
   }
-  if (!INFO.roots.length) return show(h("div", {class: "empty"}, "This catalog has no records yet."));
+  if (!INFO.roots.length && view !== "server") return show(h("div", {class: "empty"}, "This catalog has no records yet."));
   (VIEWS[view] || viewRoots)(params);
 }
 $root.addEventListener("change", () => {

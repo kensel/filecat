@@ -14,6 +14,9 @@ Read-only. Serves one page (filecat/web/index.html) and a JSON API:
     GET /api/members?root=&rel_path=&offset=&limit=   archive members
     GET /api/backends                  the backends in filecat.toml (plus the one served), which is active
     POST /api/backend  {"key": ...}    switch the viewer to one of them; returns /api/info
+    GET /api/agents                    filecat server: agent health (live when `filecat server --serve`
+                                       runs this viewer, else the last state saved in the catalog)
+    GET /api/jobs?limit=&job=&agent=   filecat server: the configured jobs and the recent run history
     POST /api/pin    {"ids": [...], "label": ...}   pin treemap snapshots together
     POST /api/unpin  {"ids": [...]} or {"at": ...}  unpin snapshots, or a whole pin
 
@@ -112,6 +115,7 @@ class Catalog:
         self._summaries: dict[tuple[str, int], dict[str, Any]] = {}
         self._treemaps: dict[tuple[str, str, int], dict[str, Any]] = {}
         self._started = (self.args.backend, self.args.out, self.args.dsn)
+        self.coordinator: Any = None    # set by `filecat server --serve`: the live agents and jobs
         minutes = getattr(self.args, "graph_max_age", None)
         self.max_age = timedelta(minutes=minutes) if minutes is not None else treemap.MAX_AGE
         self.call(lambda b: None)  # open now, so a bad DSN fails at startup
@@ -229,6 +233,32 @@ class Catalog:
             self._summaries = {}  # computed summaries belong to the old catalog
             self._treemaps = {}
         return self.info({})
+
+    def _server_state(self, read: Callable[[Any], Any]) -> Any:
+        """Something the filecat server saved in the catalog; None when the backend keeps none."""
+        try:
+            return self.call(read)
+        except NotImplementedError:
+            return None
+
+    def agents(self, p: dict[str, str]) -> dict[str, Any]:
+        from . import server_store
+        lease = self._server_state(server_store.read_lease)
+        if self.coordinator is not None:
+            return {"source": "live", "server": lease, "agents": self.coordinator.agents_snapshot(),
+                    "updated_at": server_store.iso(datetime.now(timezone.utc))}
+        saved = self._server_state(server_store.read_agents) or {}
+        return {"source": "catalog", "server": lease, "agents": saved.get("agents", []),
+                "updated_at": saved.get("updated_at")}
+
+    def jobs(self, p: dict[str, str]) -> dict[str, Any]:
+        from . import server_store
+        limit = min(max(int(p.get("limit") or 50), 1), 500)
+        recent = self._server_state(lambda b: server_store.recent_runs(b, limit, p.get("job") or None,
+                                                                       p.get("agent") or None)) or []
+        live = self.coordinator is not None
+        return {"source": "live" if live else "catalog", "server": self._server_state(server_store.read_lease),
+                "jobs": self.coordinator.jobs_snapshot() if live else [], "recent": recent}
 
     def roots(self, p: dict[str, str]) -> dict[str, Any]:
         from . import rootinfo
@@ -421,7 +451,7 @@ class Catalog:
 
 ROUTES = {"/api/info": "info", "/api/roots": "roots", "/api/summary": "summary", "/api/records": "records",
           "/api/subtree": "subtree", "/api/treemap": "treemap", "/api/record": "record", "/api/members": "members",
-          "/api/backends": "backends", "/api/pins": "pins"}
+          "/api/backends": "backends", "/api/pins": "pins", "/api/agents": "agents", "/api/jobs": "jobs"}
 POST_ROUTES = {"/api/backend": "select", "/api/pin": "pin", "/api/unpin": "unpin"}
 MAX_BODY = 64 * 1024
 
@@ -488,6 +518,46 @@ def make_handler(catalog: Catalog, page: bytes) -> type[BaseHTTPRequestHandler]:
             self._json(HTTPStatus.OK, data)
 
     return Handler
+
+
+class Viewer:
+    """A viewer running in a thread of this process (`filecat server --serve`)."""
+
+    def __init__(self, httpd: ThreadingHTTPServer, catalog: Catalog) -> None:
+        self.httpd, self.catalog = httpd, catalog
+        self.url = f"http://{'127.0.0.1' if httpd.server_address[0] in ('', '0.0.0.0') else httpd.server_address[0]}:" \
+                   f"{httpd.server_address[1]}/"
+        self._thread = threading.Thread(target=httpd.serve_forever, name="filecat-viewer", daemon=True)
+        self._thread.start()
+
+    def stop(self) -> None:
+        self.httpd.shutdown()
+        self.httpd.server_close()
+        self.catalog.close()
+
+
+def start_viewer(args: Any, coordinator: Any = None) -> Viewer | None:
+    """Open the catalog and serve the page on args.host:args.port in a thread; None (after saying
+    why) when either fails. With a coordinator the agent and job endpoints are live."""
+    page = resources.files("filecat").joinpath("web/index.html").read_bytes()
+    try:
+        catalog = Catalog(args)
+    except Exception as exc:
+        print(f"filecat serve: cannot open {args.backend} backend: {exc}", file=sys.stderr)
+        return None
+    catalog.coordinator = coordinator
+    try:
+        httpd = ThreadingHTTPServer((args.host, args.port), make_handler(catalog, page))
+    except OSError as exc:
+        catalog.close()
+        print(f"filecat serve: cannot listen on {args.host}:{args.port}: {exc}", file=sys.stderr)
+        return None
+    viewer = Viewer(httpd, catalog)
+    if args.host not in ("127.0.0.1", "localhost", "::1"):
+        print(f"filecat serve: warning: listening on {args.host or 'all interfaces'} with no "
+              "authentication; anyone who can reach it can read the catalog", file=sys.stderr)
+    print(f"filecat serve: {args.backend} ({_location(args)}) at {viewer.url}", file=sys.stderr)
+    return viewer
 
 
 def run(args: Any) -> int:

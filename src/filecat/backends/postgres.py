@@ -155,6 +155,18 @@ CREATE TABLE IF NOT EXISTS storage_topology_history (
     document JSONB NOT NULL
 );
 CREATE INDEX IF NOT EXISTS idx_storage_history_host ON storage_topology_history(host, scanned_at);
+CREATE TABLE IF NOT EXISTS server_jobs (
+    doc_key TEXT PRIMARY KEY,
+    host TEXT NOT NULL,
+    scanned_at TEXT,
+    document JSONB NOT NULL
+);
+CREATE TABLE IF NOT EXISTS server_state (
+    doc_key TEXT PRIMARY KEY,
+    host TEXT NOT NULL,
+    scanned_at TEXT,
+    document JSONB NOT NULL
+);
 """
 
 _UPSERT_SQL = """
@@ -506,7 +518,7 @@ class PostgresBackend(Backend):
 
     # --- storage topology ------------------------------------------------
     def _topology_rows(self, store: str) -> list[Document]:
-        assert store in self.TOPOLOGY_STORES
+        assert store in self.DOC_STORES
         with self.conn.cursor() as cur:
             cur.execute(f"SELECT document FROM {store}")
             rows = cur.fetchall()
@@ -514,7 +526,7 @@ class PostgresBackend(Backend):
         return [d if isinstance(d, dict) else json.loads(d) for (d,) in rows]
 
     def _topology_put(self, store: str, doc: Document) -> None:
-        assert store in self.TOPOLOGY_STORES
+        assert store in self.DOC_STORES
         with self.conn.cursor() as cur:
             cur.execute(
                 f"INSERT INTO {store} (doc_key, host, scanned_at, document) VALUES (%s, %s, %s, %s::jsonb) "
@@ -524,7 +536,7 @@ class PostgresBackend(Backend):
         self.conn.commit()
 
     def _topology_remove(self, store: str, key: str) -> None:
-        assert store in self.TOPOLOGY_STORES
+        assert store in self.DOC_STORES
         with self.conn.cursor() as cur:
             cur.execute(f"DELETE FROM {store} WHERE doc_key=%s", (key,))
         self.conn.commit()

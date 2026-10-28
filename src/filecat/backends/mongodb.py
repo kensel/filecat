@@ -125,7 +125,7 @@ class MongoBackend(Backend):
         self.redaction_docs = self.db["redactions"]
         self.redaction_docs.create_index("id", unique=True)
         self.redaction_docs.create_index([("root_id", 1), ("path_hash", 1)], unique=True)
-        self.topology_docs = {store: self.db[store] for store in self.TOPOLOGY_STORES}
+        self.topology_docs = {store: self.db[store] for store in self.DOC_STORES}
         for coll in self.topology_docs.values():
             coll.create_index("key", unique=True)
         self.topology_docs["storage_topology_history"].create_index([("host", 1), ("scanned_at", 1)])
