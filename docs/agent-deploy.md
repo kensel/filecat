@@ -58,7 +58,11 @@ chmod 750 /usr/local/filecat-agent/filecat-agent
 The quick way: on the filecat host, `filecat agents enroll nas3 --host nas3.lan` makes a token and
 prints the `.env` lines for the NAS, the `[[agents]]` stanza (`token = "${FILECAT_NAS3_TOKEN}"`,
 never the token itself) and how to set `FILECAT_NAS3_TOKEN`; it also reads the certificate
-fingerprint once if the agent is already running. The token is printed once. The whole workflow:
+fingerprint once if the agent is already running. The token is printed once. To reuse a token you
+already made (say the agent's `.env` exists), pass `--token HEX` (64 hex digits, as `openssl rand
+-hex 32` prints) or `--token -` to read it from stdin; a supplied token is validated and is **not
+printed back** (the `.env` and environment lines show `<the token you supplied>`), and never
+written to filecat.toml. A command-line value stays in shell history and `ps`, so prefer `-`. The whole workflow:
 
 1. `filecat agents enroll nas3 --host nas3.lan` while the agent is not running yet: the stanza has a
    placeholder fingerprint and nothing is written. Put `FILECAT_AGENT_TOKEN=...` in the NAS's `.env`

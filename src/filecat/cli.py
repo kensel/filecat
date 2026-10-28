@@ -378,6 +378,9 @@ def build_parser() -> argparse.ArgumentParser:
     a.add_argument("--alias", dest="agent_alias", metavar="\\\\SERVER", help="the server name SMB scans record the shares under")
     a.add_argument("--write", action="store_true",
                    help="append the stanza to filecat.toml (refuses when NAME exists); the token is never written")
+    a.add_argument("--token", metavar="HEX|-",
+                   help="reuse this token (64 hex digits) instead of making one; it is not printed back. "
+                        "A command-line value stays in shell history and `ps`: `-` reads it from stdin")
     a.add_argument("--cert-sha256", dest="cert_sha256", metavar="HEX",
                    help="use this fingerprint instead of connecting to fetch it")
     a.add_argument("--no-connect", dest="no_connect", action="store_true", help="do not connect to the agent")

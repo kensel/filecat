@@ -119,6 +119,27 @@ def test_enroll_rejects_bad_names_and_fingerprint_command(agent, fixture_dir, ca
     assert code == 0 and out.strip() == cert_fingerprint()
 
 
+def test_enroll_reuses_a_supplied_token_validates_it_and_never_prints_it_back(agent, fixture_dir, capsys, monkeypatch):
+    import io
+    cfg = toml_for(fixture_dir, agent)
+    mine = "AB" * 32                                                  # uppercase hex is accepted, stored lowercase
+    host = f"127.0.0.1:{agent.port}"
+    code, out, err = run(capsys, "--config", cfg, "agents", "enroll", "nas9", "--host", host, "--token", mine)
+    assert code == 0, err
+    assert mine not in out and mine.lower() not in out and mine not in err
+    assert "FILECAT_AGENT_TOKEN=<the token you supplied>" in out and "not stored" in out
+    assert "FILECAT_NAS9_TOKEN" in out and "${FILECAT_NAS9_TOKEN}" in out
+    for bad in ("short", "g" * 64, "ab" * 31, "ab" * 33):
+        code, out, err = run(capsys, "--config", cfg, "agents", "enroll", "nas9", "--host", host, "--token", bad)
+        assert code == 2 and "64 hex digits" in err and "FILECAT_AGENT_TOKEN" not in out and bad not in err
+    monkeypatch.setattr("sys.stdin", io.StringIO("cd" * 32 + "\n"))   # `--token -`: not on the command line
+    code, out, err = run(capsys, "--config", cfg, "agents", "enroll", "nas9", "--host", host, "--token", "-")
+    assert code == 0 and "cd" * 32 not in out
+    # --write still appends only the stanza, never the token
+    code, out, err = run(capsys, "--config", cfg, "agents", "enroll", "nas8", "--host", host, "--token", mine, "--write")
+    assert code == 0 and mine.lower() not in (fixture_dir / "filecat.toml").read_text()
+
+
 # --- status -------------------------------------------------------------------------------------
 def test_status_matching_and_mismatching_hashes(agent, fixture_dir, capsys):
     cfg = toml_for(fixture_dir, agent)

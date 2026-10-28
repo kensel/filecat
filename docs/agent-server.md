@@ -26,7 +26,7 @@ own. `filecat server` is the process that does things.
 ## 2. Enrolling an agent
 
 ```
-filecat agents enroll nas3 --host nas3.lan[:9876] [--alias \\nas3] [--write] [--cert-sha256 HEX] [--no-connect]
+filecat agents enroll nas3 --host nas3.lan[:9876] [--alias \\nas3] [--write] [--cert-sha256 HEX] [--no-connect] [--token HEX|-]
 ```
 
 1. A token: 32 random bytes from `secrets` as 64 hex digits.

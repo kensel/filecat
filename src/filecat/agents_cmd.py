@@ -11,8 +11,9 @@
                    available, and whether the agent's allowlist_sha256 and deny_sha256 are the
                    ones this filecat expects (data/agent_expected.json). A mismatch is a warning;
                    --strict makes it exit 1. Unreachable agents always exit 1.
-    enroll NAME --host HOST[:PORT] [--alias \\\\SERVER] [--write]
-                   make a token, print the agent's .env lines and the [[agents]] stanza (the
+    enroll NAME --host HOST[:PORT] [--alias \\\\SERVER] [--write] [--token HEX|-]
+                   make a token (or reuse the 64 hex digits of --token, `-` reads stdin; a supplied
+                   token is never printed back), print the agent's .env lines and the [[agents]] stanza (the
                    token is never in the toml: token = "${FILECAT_<NAME>_TOKEN}"), fetch the
                    certificate fingerprint once (trust on first use) for the admin to compare
                    with what the agent printed. Writes filecat.toml only with --write.
@@ -198,18 +199,30 @@ def _enroll(args: Any) -> int:
             cert = fetch_fingerprint(host, port, args.timeout)
         except OSError as exc:
             cert_note = f"could not connect to {host}:{port} ({agent_status.error_text(exc)})"
-    token = secrets.token_hex(32)
+    given = getattr(args, "token", None)
+    if given is not None:
+        if given == "-":
+            given = sys.stdin.readline().strip()
+        if not re.fullmatch(r"[0-9a-fA-F]{64}", given):
+            raise config.ConfigError("--token: want 64 hex digits (32 bytes, what `openssl rand -hex 32` "
+                                     "prints); nothing written")
+    token = given.lower() if given else secrets.token_hex(32)
+    # a token the admin supplied is not printed back: it is in their shell history already, and
+    # anything we print lands in the terminal scrollback and logs once more
+    shown_token = "<the token you supplied>" if given else token
     var = env_var_for(name)
     shown = cert or "<cert_sha256 the agent prints at its first start>"
     print(f"Enrolling agent {name!r} at {host}:{port}\n")
-    print("1. On the agent host, in the .env next to filecat-agent (shown once; it is not stored anywhere):")
-    print(f"     FILECAT_AGENT_TOKEN={token}")
+    print("1. On the agent host, in the .env next to filecat-agent "
+          + ("(the token you supplied; it is not repeated here):" if given
+             else "(shown once; it is not stored anywhere):"))
+    print(f"     FILECAT_AGENT_TOKEN={shown_token}")
     print("     # FILECAT_AGENT_ALLOW_ROOTS=/volume1/Share:/proc:/sys:/dev/disk:/etc/samba:/etc/space:/etc/VERSION")
     print("     chmod 600 .env, then start the agent. It prints its cert_sha256 at first start.\n")
     print(f"2. On the filecat host, put the token in the environment of the process that runs filecat "
           f"({var}):")
-    print(f'     PowerShell:  [Environment]::SetEnvironmentVariable("{var}", "{token}", "User")')
-    print(f'     sh:          export {var}={token}\n')
+    print(f'     PowerShell:  [Environment]::SetEnvironmentVariable("{var}", "{shown_token}", "User")')
+    print(f'     sh:          export {var}={shown_token}\n')
     print("3. filecat.toml:\n")
     print("".join("     " + line + "\n" for line in stanza(name, host, port, shown, args.agent_alias).splitlines()))
     if cert:
@@ -230,7 +243,7 @@ def _enroll(args: Any) -> int:
         print(f"\nAppended [[agents]] {name!r} to {path}. Set {var} before `filecat agents test {name}`.")
     else:
         print("\nNothing written (use --write to append the stanza to filecat.toml). "
-              "The token above is shown only now.")
+              + ("The token you supplied is not stored." if given else "The token above is shown only now."))
     return 0
 
 
