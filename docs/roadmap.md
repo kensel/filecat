@@ -143,7 +143,12 @@ server keeps store detection, manifest verification, probing and Ollama.
     under the NAS's spelling (`filecat roots case-check` / `case-merge`); new
     scans record the NAS spelling through an agent and reuse the catalog's over
     SMB ([scanning.md](scanning.md#one-share-two-spellings)).
-  - [ ] `filecat-agent` itself changed to match the protocol page.
+  - [x] `filecat-agent` itself changed to match the protocol page: phase 1, the Linux and DSM
+    agent, is built (`agent/`, static musl x86_64, all protocol 1 commands but `wmi`, the
+    allowlist as a compiled table; cargo tests plus the Python agent tests run against the
+    binary, [agent/README.md](../agent/README.md); deployment: [agent-deploy.md](agent-deploy.md)).
+  - [ ] The Windows agent (phase 2: `wmi`, cloud placeholders, `ProductType` roots, Windows
+    deny paths) and the armv7 build.
 - RPCs: list a directory (lstat, inode, `st_blocks`), measure (hash plus
   the 8 KiB head), read a range, sum a subtree. The agent records
   allocated size and deduplicates hardlinks by inode.

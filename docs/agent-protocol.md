@@ -1027,3 +1027,74 @@ recorded raw sources (`tests/data/raw`). Reads stay read-only; a source that
 cannot be read (a root-only file, a missing tool) leaves its nodes or fields
 out and puts a note in the snapshot's `collector.notes`, never a failed
 collection.
+
+## Settled by the Linux agent (0.2.0)
+
+Details the page above left open, as the Rust agent (`agent/`, phase 1: Linux and DSM)
+implements them. The fake agent (`tests/_fake_agent.py`) and the Rust agent agree on all of
+them; the conformance run of the Python agent tests against the binary
+([agent/README.md](../agent/README.md)) is what keeps them in step.
+
+- **`allowlist_sha256`** is the SHA-256 of the table as compiled: for each entry in id order six
+  fields joined with NUL (the id; the candidate paths joined with `\x1f`; the argument vector
+  joined with `\x1f`; the argument kind name, empty for none; the timeout in seconds in decimal;
+  the version-probe vector joined with `\x1f`, empty for none), the records joined with NUL as
+  well, no trailing separator. A cargo test pins the value; changing an entry means bumping
+  `allowlist_version` and the pin. The Linux table has 39 entries: the 60 of
+  [agent-allowlist.md](agent-allowlist.md) less the 19 `wmi` ones (phase 2) and the two
+  Synology tools whose arguments are not committed. The Python fake's `allowlist_sha256` is its
+  own placeholder; nothing compares the two.
+- **`deny_sha256`** is the SHA-256 of `DENY_POSIX`, the three `.env` exceptions, the two Windows
+  path rules and the four key signatures (`secretfiles.SIGNATURES`, spelled with `*` for the
+  free part of the first), one per line joined with `\n`, no trailing newline. One value for a
+  given agent version on every platform; the fake computes the same bytes.
+- **Links.** The scope check resolves every symbolic link, the last component included (so
+  `/proc/mounts`, a link to `self/mounts`, is readable), and the operation then runs on the
+  resolved path with `O_NOFOLLOW`. `list_dir`, `sum_subtree` and `statfs` of a link to a
+  directory describe the directory. A link that resolves outside the roots is `refused`; a
+  dangling one is `bad_request`.
+- **Paths** are validated before anything else: a path with an empty, `.` or `..` component, a
+  trailing `/` (other than `/`) or a NUL is `bad_request`, as the Paths section says. `list_dir`
+  answers with the request's `path` (and `path_b64` when the request used it and the bytes are
+  not UTF-8).
+- **Rules.** `configure_policy` rejects (`bad_request`) a rule that has no tag and is not a
+  `keep` rule, a tag that is not `[A-Z][A-Z0-9_-]{0,31}` in brackets, a `type` or `case` outside
+  the documented values, and a marker whose name is empty, `.`, `..` or has a `/`. Patterns are
+  matched against names and paths in the catalog's spelling (an invalid UTF-8 byte is U+F700 +
+  byte), so `?` is one character even there.
+- **`list_dir`.** Entries, rollups and errors are sorted together by name bytes. `ctime_ns` is
+  the birth time where the kernel and file system give one (`statx`; DSM's 4.4 kernel has none,
+  so it is the inode change time there). Rollups carry `newest_mtime_ns` always (0 when no file)
+  and `oldest_mtime_ns` only with files; the sum of one rollup shares one deadline and one
+  cancel flag. The agent writes no log line about any path.
+- **Sums.** `progress_ms` below 500 is raised to 500; `threads` is validated (1 to 16) and
+  accepted, the walk itself is single-threaded (a `lstat`-bound walk of 95,000 files takes about
+  a quarter of a second on ext4). `deadline_ms` above 86,400,000 and an `id` over 64 characters
+  are `bad_request`. At most 4 long sums run at once across connections. The walk is iterative
+  with a depth limit of 4096; a deeper directory is counted as an `io` error.
+- **`read_file`** reads on its own thread with the 10 second deadline; a blanked file
+  (`iscsi_target.conf`) is read whole (at most 4 MiB, else `io`) before the credentials are
+  replaced, then cut at `max`. The line splitting of the blanking follows `bytes.splitlines`
+  (`\n`, `\r\n`, a lone `\r`).
+- **`run`.** A binary is the first candidate that is a regular file with the execute bit. The
+  `block_device` kind accepts `/dev/<name>` with `<name>` made of letters, digits, `.`, `_`
+  and `-`, not starting with `.`, `loop` or `ram`, and a directory in `/sys/block`;
+  `md_device` accepts `/dev/md<digits>` listed in `/proc/mdstat`; `btrfs_mount` reads
+  `/proc/self/mountinfo` (then `/proc/mounts`), unescaping `\040`-style octal. The version
+  probe (`--version`, 3 s) covers `lsblk`, `blkid`, `findmnt`, `btrfs`, `mdadm`, `smartctl`
+  and the LVM tools; the first number printed is cached for the life of the process.
+  `wmi` is `bad_request` ("wmi is only available on Windows agents").
+- **Connections.** A client has 20 seconds to finish the TLS handshake and send its first line,
+  and 15 minutes of silence before the agent closes; at most 64 connections at once (the rest
+  are dropped at accept). A request line over 8 MiB is answered `bad_request` and the
+  connection closed. A wrong token is answered after one second and the connection closed.
+- **TLS and the certificate.** TLS 1.2 and 1.3 through rustls with the `ring` provider; the
+  first start generates an ECDSA P-256 self-signed certificate (`CN=filecat-agent`) and its key
+  (mode 0600) next to the binary (or where `--cert` / `--key` say) and prints
+  `cert_sha256 <hex>`. If only one of the two files exists the agent refuses to start rather
+  than replace half a pair and change the fingerprint the clients pinned.
+- **Configuration** is the command line, then the environment, then the `.env` next to the
+  binary: `FILECAT_AGENT_TOKEN` (or `FILECAT_AGENT_TOKEN_FILE`, first line), `FILECAT_AGENT_LISTEN`
+  (default `0.0.0.0:9876`), `FILECAT_AGENT_CERT`, `FILECAT_AGENT_KEY`,
+  `FILECAT_AGENT_ALLOW_ROOTS`. The token is never an argument. Deployment:
+  [agent-deploy.md](agent-deploy.md).
