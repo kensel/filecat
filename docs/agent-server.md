@@ -159,10 +159,21 @@ rejected in `options`. `[rollups]`, `[aliases]` and `[[agents]]` are the file's,
 ### Scheduling
 
 Per job exactly one of `every = "24h"` (units `s m h d`) or `at = "02:30"` (a daily local time; a list
-of times is allowed). A job's **anchor** is when it last started (from the persisted history; none
-means never, so it is due at once). Interval: due when `anchor + every <= now`. Daily: due when the
-most recent slot at or before `now` is later than the anchor (a missed slot runs once, late, not
-once per missed day). Rules, in this order for each due job (config order):
+of times is allowed). A job's **anchor** is when it last started (from the persisted history).
+Interval: due when `anchor + every <= now`. Daily: due when the most recent slot at or before `now`
+is later than the anchor (a missed slot runs once, late, not once per missed day).
+
+**First run.** A job that never ran **waits for its first slot**: `at = "02:30"` runs at the next
+02:30; `every = "24h"` runs 24 h after the server first saw the job. "First saw" is saved in the
+catalog (`server_state`, key `first_seen`) the first time the server starts with the job, and is the
+anchor until the job has a run in the history; so restarting the server does not keep pushing the
+first run away. (A job whose runs were all skipped has no start in the history either, so its first
+run is still anchored on that saved time.) Per job `run_on_start = true` restores the old
+behaviour: a never-run job is due at once when the server starts. `--dry-run` says which applies
+("first run 1d after the server first starts", "first run 2026-10-29 02:30", "at server start").
+`--once` follows the same rule (use `--job NAME` to force a job).
+
+Rules, in this order for each due job (config order):
 
 1. **Same job still running: skip.** Recorded as a `skipped` run ("previous run still running"),
    logged, and the anchor moves to now so it is not logged again every tick.
@@ -186,10 +197,25 @@ another holder (it stalled past the ttl and was replaced) it stops everything an
 no more jobs). A server that cannot acquire exits 4 and says who holds it and until when. On
 acquiring, runs left `running` by a dead server are marked `lost`.
 
-It is "check, write, read back": simple, portable to every backend, but not an atomic
-compare-and-swap, so two processes starting in the same few milliseconds could both think they won;
-the read-back makes that very unlikely and the renewal check repairs it within `ttl / 3`. A real
-atomic acquire per SQL backend is a possible refinement (section 11).
+Acquiring and renewing are **one atomic conditional write** in the backend
+(`Backend.claim_server_doc`): the lease row is written only when it is absent, held by the caller,
+or (acquire only) expired; the caller learns from the affected-row count whether it won. Renewal is
+the same write with "expired" taken out: only the holder renews, and a server whose lease lapsed
+and was taken over cannot take it back by renewing.
+
+| backend | how |
+|---|---|
+| SQLite, PostgreSQL | one `INSERT ... ON CONFLICT (doc_key) DO UPDATE ... WHERE holder = me OR expires_at < now`; rowcount 1 = won |
+| MySQL, SQL Server | `UPDATE ... WHERE doc_key = k AND (holder = me OR expires_at < now)`; when it matched nothing, `INSERT`; the primary key makes a racing second insert fail with a duplicate-key / integrity error = lost |
+| MongoDB | `replace_one({key, $or: [{holder: me}, {expires_at: {$lt: now}}]}, doc, upsert=True)`; the unique index on `key` turns the upsert against a live holder into `DuplicateKeyError` = lost |
+| memory | a lock |
+| JSONL files | best-effort read-check-write (single host only: those layouts cannot arbitrate between machines anyway) |
+
+The holder and expiry are compared as the UTC ISO strings the server writes (same width, so text
+order is time order); the comparison uses the claiming server's clock, so servers sharing a catalog
+need clocks within a few seconds of each other (the ttl is 90 s by default). The PostgreSQL, MySQL,
+SQL Server and MongoDB paths run only in CI (`tests/test_lease_contract.py` under the `backends`
+job: two holders racing on separate connections, expiry takeover, renewal by a non-holder).
 
 ### Shutdown
 
@@ -214,12 +240,20 @@ shutdown_grace      = "30s"
 history_keep        = 500       # job runs kept, newest first...
 history_days        = 90        # ...and none older than this
 serve               = "127.0.0.1:8765"   # optional: same as --serve
+# "Run now" in the viewer (section 7): off unless a password hash is set. Never the password itself.
+# control_password_hash = "${FILECAT_SERVER_PASSWORD_HASH}"   # or the scrypt$... line `set-password` prints
+# login_max_failures = 5         # failed logins per address within login_window, then blocked...
+# login_window = "15m"
+# login_block = "15m"            # ...for this long (doubling on every try while blocked, up to 24h)
+# login_global_max_failures = 20 # across all addresses within login_window: every login refused
+# login_required_for_view = false  # true: the whole viewer needs a login, not only "run now"
 
 [[server.jobs]]
 name      = "nas3-topology"     # unique; shown in history and the viewer
 kind      = "storage-collect"   # storage-collect | scan | store-resum
 agent     = "nas3"              # an [[agents]] name, or "*" for one job per agent
 every     = "24h"               # or: at = "02:30"  (or at = ["02:30", "14:30"])
+# run_on_start = true           # a never-run job runs at server start, not at its first slot
 options   = ["--measure-shares"]
 
 [[server.jobs]]
@@ -289,7 +323,61 @@ can lose one of the two updates. Use SQLite or a server backend for a long-runni
   `jobs` is empty when the server is not in this process.
 
 A **Server** view in the page (nav link next to Roots) shows both as two tables, refreshed every 15
-seconds. No endpoint starts, stops or edits anything: the viewer has no authentication.
+seconds. `/api/jobs` also carries `control: {available, reason}`.
+
+### Run now (and the login it needs)
+
+Each configured job has a **Run now** button on the Server page. The rest of the viewer has no
+authentication, so this is the one action that starts work, and it is guarded:
+
+* **Only inside `filecat server --serve`.** A plain `filecat serve` has no coordinator: the
+  endpoints answer 404 and the button is disabled with that reason.
+* **Off unless a password hash is configured.** `[server] control_password_hash` takes a hash, never
+  the password: `filecat server set-password` asks twice (`getpass`, no echo, at least 12
+  characters) and prints the line for filecat.toml (or `${FILECAT_SERVER_PASSWORD_HASH}` and the
+  environment line, to keep the hash out of the file); `--write` puts it into the `[server]` table
+  of filecat.toml itself. The hash is `scrypt$n$r$p$salt_b64$hash_b64` (`hashlib.scrypt`, n=2^14,
+  r=8, p=1, 16-byte random salt, 32-byte key), checked with `hmac.compare_digest`. **Decision: no
+  hash means disabled, with no loopback exception.** A loopback bind does not stop other local users,
+  other local software, or a web page that rebinds its DNS name to 127.0.0.1.
+* **Login, then a session.** `POST /api/login {"password": ...}` (JSON; the CSRF checks below).
+  Success sets cookie `filecat_session=<secrets.token_urlsafe(32)>; HttpOnly; SameSite=Strict;
+  Path=/` (plus `Secure` when the request's Origin is https, i.e. behind a TLS proxy). Sessions are
+  kept in the server's memory (a restart logs everyone out), expire after 30 minutes idle and 12
+  hours absolute, and end with `POST /api/logout`. The page shows a login form when Run now is
+  clicked without a session; no password or token goes into `sessionStorage`/`localStorage`.
+* **Run now** is `POST /api/jobs/<name>/run` and needs a valid session **and** the CSRF checks. `GET`
+  is 405. Unknown job 404, disabled job 409, already running or queued 409, the agent down 409,
+  accepted 202. The job is queued with the scheduler: the next tick starts it subject to the
+  per-agent exclusivity and the global limit (a job whose agent is busy shows `queued` until it can
+  start). The run is stored with `trigger: "manual"` and `requested_from`: the caller's address,
+  nothing else.
+* **CSRF.** Login, logout and run require the header `X-Filecat-Control: run`, a JSON content type
+  (form posts get 415), an `Origin` (when sent) whose host:port equals the request's `Host`, and,
+  when bound to loopback, a loopback `Host` (DNS rebinding). The server answers no CORS preflight
+  and sends no CORS headers, so another site's page cannot send the header; the cookie is
+  `SameSite=Strict` as a second line.
+* **Rate limiting** (in memory; a restart resets it; thresholds in `[server]`):
+  per address, `login_max_failures` (5) failed logins within `login_window` (15 min) block that
+  address for `login_block` (15 min): 429 with `Retry-After`; every further try while blocked doubles
+  the block, up to 24 h. Globally, `login_global_max_failures` (20) failures across all addresses in
+  the window refuse every login for `login_block` (429); sessions already logged in keep working.
+  Every failed attempt waits 0.5 s; scrypt runs even for a malformed body, so timing says nothing. A
+  success clears that address's counter, not the global one. Each failure and block is logged with
+  the remote address only, the global block as a warning; the attempted password is never logged.
+  Behind a reverse proxy every client has the proxy's address: a shared counter (a few typos block
+  everyone for 15 minutes). That is the safe direction; this server does not trust
+  `X-Forwarded-For`.
+* **`login_required_for_view = true`** makes the whole viewer need a session: every API route answers
+  401 until login (the page itself is only the shell and shows the login form). It needs a password
+  hash (the server refuses to start without).
+* **Re-anchoring.** A manual run is a start, so an `every` job counts its interval from it (the
+  anchor is the last start); an `at` job is unaffected (its next slot still comes). Shell
+  equivalent: `filecat server --once --job NAME`. Not done: picking up a manual trigger written by
+  another process (the viewer and the coordinator share a process, so it is not needed).
+
+Residual risk: HTTP carries the password and the cookie in clear text. Bind to loopback (the
+default), or put a TLS reverse proxy in front before using this over a network.
 
 ## 8. What is logged and stored (rollups.md section 3)
 
@@ -325,12 +413,9 @@ expected-hash tests.
 
 ## 11. Open questions
 
-* An atomic lease acquire per backend (`INSERT ... WHERE expired` on SQL, `findOneAndUpdate` on
-  MongoDB). The portable read-back is enough for one admin and two accidental starts.
 * `ScanServer.ps1`: retire it with the Windows agent, or fold `net view` share discovery into a
   `scan` job kind (`shares = "discover"`)?
-* A manual trigger from the viewer ("run now") is deliberately absent: the viewer has no
-  authentication. A `filecat server --once --job NAME` does it from the shell.
+* The login is for one admin (one password). Per-user accounts, TLS in the viewer itself and
+  persisted sessions/counters are not designed.
 * Alerting (mail, webhook) on an agent going down or a job failing: not designed here.
-* The anchor of a first-ever run is "now": a freshly configured `scan` job starts a full scan the
-  first time the server runs. `--dry-run` shows it before.
+* (Settled: a never-run job waits for its first slot unless `run_on_start = true`, section 4.)

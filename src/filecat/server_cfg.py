@@ -13,12 +13,15 @@ from dataclasses import dataclass, field
 from datetime import time, timedelta
 from typing import Any, Iterator
 
-from .config import AgentConfig, ConfigError
+from . import control_auth
+from .config import AgentConfig, ConfigError, expand
 
 KINDS = ("storage-collect", "scan", "store-resum")
 SERVER_KEYS = ("health_interval", "health_timeout", "health_backoff_max", "max_concurrent", "lease_ttl",
-               "shutdown_grace", "history_keep", "history_days", "serve", "jobs")
-JOB_KEYS = ("name", "kind", "agent", "roots", "every", "at", "options", "enabled", "min_age", "max_runtime")
+               "shutdown_grace", "history_keep", "history_days", "serve", "control_password_hash", "login_max_failures", "login_window", "login_block",
+               "login_global_max_failures", "login_required_for_view", "jobs")
+JOB_KEYS = ("name", "kind", "agent", "roots", "every", "at", "options", "enabled", "min_age", "max_runtime",
+            "run_on_start")
 # the catalog and the agent are the server's to decide
 FORBIDDEN_OPTIONS = ("--backend", "--out", "--dsn", "--agent", "--no-agent", "--check", "--config")
 MIN_EVERY = timedelta(minutes=1)
@@ -60,6 +63,7 @@ class JobSpec:
     enabled: bool = True
     min_age: timedelta | None = None
     max_runtime: timedelta | None = None
+    run_on_start: bool = False              # never ran: run at server start, not at its first slot
 
     @property
     def schedule_text(self) -> str:
@@ -74,7 +78,8 @@ class JobSpec:
     def to_dict(self) -> dict[str, Any]:
         return {"name": self.name, "kind": self.kind, "agent": self.agent,
                 "roots": list(self.roots) if self.roots is not None else None,
-                "schedule": self.schedule_text, "options": list(self.options), "enabled": self.enabled}
+                "schedule": self.schedule_text, "options": list(self.options), "enabled": self.enabled,
+                "run_on_start": self.run_on_start}
 
 
 @dataclass(frozen=True)
@@ -88,7 +93,17 @@ class ServerConfig:
     history_keep: int = 500
     history_days: int = 90
     serve: str | None = None
+    control_password_hash: str | None = None    # as written (a hash or ${NAME}); resolve_password_hash()
+    login_max_failures: int = 5                 # per address, within login_window: then blocked
+    login_window: timedelta = timedelta(minutes=15)
+    login_block: timedelta = timedelta(minutes=15)
+    login_global_max_failures: int = 20         # across all addresses within login_window: all logins refused
+    login_required_for_view: bool = False       # the whole viewer needs a session, not only "run now"
     jobs: tuple[JobSpec, ...] = field(default_factory=tuple)
+
+    def resolve_password_hash(self) -> str | None:
+        """The stored scrypt hash for the viewer's login, from the environment when it is a ${NAME}."""
+        return expand(self.control_password_hash).strip() if self.control_password_hash else None
 
 
 @contextmanager
@@ -166,13 +181,16 @@ def _job(table: Any, index: int, agents: dict[str, AgentConfig]) -> list[JobSpec
     enabled = table.get("enabled", True)
     if not isinstance(enabled, bool):
         raise bad("enabled wants true or false")
+    run_on_start = table.get("run_on_start", False)
+    if not isinstance(run_on_start, bool):
+        raise bad("run_on_start wants true or false")
     names = list(agents) if agent == "*" else [agent]
     specs = []
     for target in names:
         spec = JobSpec(
             name=name if agent != "*" else f"{name}@{target}", kind=kind, agent=target,
             roots=tuple(roots) if roots is not None else None, every=every, at=at, options=tuple(options),
-            enabled=enabled,
+            enabled=enabled, run_on_start=run_on_start,
             min_age=parse_duration(min_age, f"{label}: min_age") if min_age is not None else None,
             max_runtime=(parse_duration(table["max_runtime"], f"{label}: max_runtime")
                          if "max_runtime" in table else None))
@@ -222,6 +240,17 @@ def load_server(cfg: dict[str, Any], agents: list[AgentConfig]) -> ServerConfig:
     serve = section.get("serve")
     if serve is not None and (not isinstance(serve, str) or not parse_listen(serve)):
         raise ConfigError(f"[server] serve = {serve!r}; want HOST:PORT")
+    pw_hash = section.get("control_password_hash")
+    if pw_hash is not None:
+        if not isinstance(pw_hash, str) or not pw_hash.strip():
+            raise ConfigError('[server] control_password_hash wants a string: the line `filecat server '
+                              'set-password` prints, or "${FILECAT_SERVER_PASSWORD_HASH}"')
+        if "${" not in pw_hash and not control_auth.valid_hash(pw_hash):
+            raise ConfigError("[server] control_password_hash is not a scrypt$n$r$p$salt$hash string: "
+                              "make one with `filecat server set-password` (never write the password itself)")
+    required = section.get("login_required_for_view", False)
+    if not isinstance(required, bool):
+        raise ConfigError("[server] login_required_for_view wants true or false")
     tables = section.get("jobs", [])
     if not isinstance(tables, list):
         raise ConfigError("server.jobs: write one [[server.jobs]] table per job (double brackets)")
@@ -242,7 +271,12 @@ def load_server(cfg: dict[str, Any], agents: list[AgentConfig]) -> ServerConfig:
         shutdown_grace=duration("shutdown_grace", ServerConfig.shutdown_grace),
         history_keep=count("history_keep", 500, 1) or 500,
         history_days=count("history_days", 90, 1) or 90,
-        serve=serve, jobs=tuple(jobs))
+        serve=serve, control_password_hash=pw_hash,
+        login_max_failures=count("login_max_failures", 5, 1) or 5,
+        login_window=duration("login_window", ServerConfig.login_window),
+        login_block=duration("login_block", ServerConfig.login_block),
+        login_global_max_failures=count("login_global_max_failures", 20, 1) or 20,
+        login_required_for_view=required, jobs=tuple(jobs))
 
 
 def parse_listen(text: str | None) -> tuple[str, int] | None:

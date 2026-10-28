@@ -184,8 +184,34 @@ function parseHash() {
 async function api(path, params) {
   const res = await fetch(path + "?" + new URLSearchParams(params || {}));
   const data = await res.json().catch(() => ({error: res.statusText}));
-  if (!res.ok) throw new Error(data.error || res.statusText);
+  if (!res.ok) { const e = new Error(data.error || res.statusText); e.login = !!data.login; throw e; }
   return data;
+}
+// POST with the headers the server's CSRF check wants; the session is an HttpOnly cookie, so no
+// password or token is ever kept in the page's storage.
+async function post(path, body) {
+  const res = await fetch(path, {method: "POST", credentials: "same-origin",
+    headers: {"Content-Type": "application/json", "X-Filecat-Control": "run"}, body: JSON.stringify(body || {})});
+  const data = await res.json().catch(() => ({error: res.statusText}));
+  if (!res.ok) {
+    const e = new Error(data.error || res.statusText);
+    e.status = res.status; e.login = !!data.login; e.retry = data.retry_after;
+    throw e;
+  }
+  return data;
+}
+function loginForm(done) {
+  const pw = h("input", {type: "password", autocomplete: "current-password", placeholder: "password", required: true});
+  const msg = h("div", {class: "muted"});
+  return h("form", {class: "card", onsubmit: async ev => {
+      ev.preventDefault();
+      try { await post("/api/login", {password: pw.value}); pw.value = ""; done(); }
+      catch (e) {
+        pw.value = "";
+        msg.textContent = e.status === 429 ? `Too many failed logins: try again in ${duration(e.retry || 0)}.` : e.message;
+      }
+    }},
+    h("h2", {}, "Log in"), h("div", {}, pw, " ", h("button", {type: "submit"}, "Log in")), msg);
 }
 function pctCell(p) {
   return h("td", {class: "num pct"}, h("i", {style: `width:${Math.min(100, p || 0).toFixed(1)}%`}),
@@ -193,7 +219,10 @@ function pctCell(p) {
 }
 function fill(el, ...kids) { el.replaceChildren(...kids.flat().filter(k => k != null && k !== false)); return el; }
 function show(...nodes) { fill($main, ...nodes); window.scrollTo(0, 0); }
-function failed(err) { return h("div", {class: "error"}, "Error: " + err.message); }
+function failed(err) {
+  if (err.login) return loginForm(() => location.reload());      // [server] login_required_for_view
+  return h("div", {class: "error"}, "Error: " + err.message);
+}
 function curRoot(params) { return params.root || $root.value; }
 function dirOf(rel) { const i = rel.lastIndexOf("/"); return i < 0 ? "" : rel.slice(0, i); }
 
@@ -299,6 +328,19 @@ function rootRow(r, now) {
 const AGENT_STATES = {up: ["up", "ok"], down: ["down", "warn"], unknown: ["not checked yet", ""]};
 const OUTCOMES = {ok: "ok", errors: "warn", failed: "warn", lost: "warn", cancelled: "warn", running: "live", skipped: ""};
 let serverTimer = null;
+async function runNow(name, loggedIn) {
+  const msg = document.getElementById("run-msg");
+  try {
+    const res = await post("/api/jobs/" + encodeURIComponent(name) + "/run");
+    msg.textContent = res.message || "started";
+    viewServer();
+  } catch (e) {
+    if (e.status === 401 && e.login) {       // no session yet: ask for the password, then run
+      msg.replaceChildren(loginForm(() => runNow(name)));
+      msg.querySelector("input").focus();
+    } else msg.textContent = e.message;
+  }
+}
 async function viewServer() {
   clearTimeout(serverTimer);
   if (!document.getElementById("server-card")) show(h("div", {class: "loading"}, "Loading server state…"));
@@ -328,11 +370,15 @@ async function viewServer() {
   const configured = jobs.jobs.length ? h("section", {class: "card"},
     h("h2", {}, "Jobs", h("small", {}, `${jobs.jobs.length} configured`)),
     h("div", {class: "scroll"}, h("table", {},
-      h("thead", {}, h("tr", {}, ["job", "kind", "agent", "schedule", "next due", "last"].map(t => h("th", {}, t)))),
+      h("thead", {}, h("tr", {}, ["job", "kind", "agent", "schedule", "next due", "last", ""].map(t => h("th", {}, t)))),
       h("tbody", {}, jobs.jobs.map(j => h("tr", {},
         h("td", {}, j.name), h("td", {}, j.kind), h("td", {}, j.agent), h("td", {}, j.schedule),
-        h("td", {}, j.running ? "running" : stamp(j.next_due)),
-        h("td", {}, j.last_outcome ? h("span", {class: "badge " + (OUTCOMES[j.last_outcome] || "")}, j.last_outcome) : ""))))))) : null;
+        h("td", {}, j.running ? "running" : j.queued ? "queued" : stamp(j.next_due)),
+        h("td", {}, j.last_outcome ? h("span", {class: "badge " + (OUTCOMES[j.last_outcome] || "")}, j.last_outcome) : ""),
+        h("td", {}, h("button", {disabled: !jobs.control.available || j.running || j.queued,
+          title: jobs.control.available ? "start this job now" : jobs.control.reason,
+          onclick: () => runNow(j.name)}, "Run now"))))))),
+    h("div", {id: "run-msg", class: "muted"}, jobs.control.available ? "" : jobs.control.reason)) : null;
   const recent = h("section", {class: "card"},
     h("h2", {}, "Recent runs", h("small", {}, `${jobs.recent.length} shown`)),
     h("div", {class: "scroll"}, h("table", {},
@@ -347,7 +393,8 @@ async function viewServer() {
   const y = window.scrollY;
   fill($main, agentCard, configured, recent);
   window.scrollTo(0, y);
-  serverTimer = setTimeout(() => { if (parseHash().view === "server") viewServer(); }, 15000);
+  // not while the login form is open: a refresh would wipe what is being typed
+  serverTimer = setTimeout(() => { if (parseHash().view === "server" && !document.querySelector("#run-msg input")) viewServer(); }, 15000);
 }
 
 // --- summary ---------------------------------------------------------

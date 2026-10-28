@@ -19,6 +19,9 @@ Read-only. Serves one page (filecat/web/index.html) and a JSON API:
     GET /api/jobs?limit=&job=&agent=   filecat server: the configured jobs and the recent run history
     POST /api/pin    {"ids": [...], "label": ...}   pin treemap snapshots together
     POST /api/unpin  {"ids": [...]} or {"at": ...}  unpin snapshots, or a whole pin
+    POST /api/login {"password": ...}  filecat server --serve only: a session cookie (docs/agent-server.md)
+    POST /api/logout                   end the session
+    POST /api/jobs/<name>/run          start a job now (needs the session, custom header, same origin)
 
 The HTTP side is threaded, but every backend call runs on one worker
 thread that owns the connection: sqlite3 connections (and some drivers)
@@ -44,17 +47,19 @@ import os
 import re
 import sys
 import threading
+import time
 import webbrowser
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timedelta, timezone
 from http import HTTPStatus
+from http.cookies import SimpleCookie
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from importlib import resources
 from pathlib import Path, PureWindowsPath
 from typing import Any, Callable
 from urllib.parse import parse_qs, urlsplit
 
-from . import browse, treemap
+from . import browse, control_auth, treemap
 from .backends import open_backend
 
 _EMPTY = {"suffix": [], "mime": [], "dir": [], "total_files": 0, "total_bytes": 0, "unreadable": 0}
@@ -116,6 +121,8 @@ class Catalog:
         self._treemaps: dict[tuple[str, str, int], dict[str, Any]] = {}
         self._started = (self.args.backend, self.args.out, self.args.dsn)
         self.coordinator: Any = None    # set by `filecat server --serve`: the live agents and jobs
+        self.auth: Any = getattr(self.args, "control_auth", None)   # control_auth.ControlAuth or None
+        self.args.control_auth = None
         minutes = getattr(self.args, "graph_max_age", None)
         self.max_age = timedelta(minutes=minutes) if minutes is not None else treemap.MAX_AGE
         self.call(lambda b: None)  # open now, so a bad DSN fails at startup
@@ -258,7 +265,18 @@ class Catalog:
                                                                        p.get("agent") or None)) or []
         live = self.coordinator is not None
         return {"source": "live" if live else "catalog", "server": self._server_state(server_store.read_lease),
-                "jobs": self.coordinator.jobs_snapshot() if live else [], "recent": recent}
+                "jobs": self.coordinator.jobs_snapshot() if live else [], "recent": recent,
+                "control": self.control()}
+
+    def control(self) -> dict[str, Any]:
+        """Whether "run now" works here, and if not why (the page shows the reason)."""
+        if self.coordinator is None:
+            return {"available": False, "reason": "read-only: run `filecat server --serve` to control jobs "
+                                                  "(a plain `filecat serve` only shows them)"}
+        if self.auth is None or not self.auth.enabled:
+            return {"available": False, "reason": "disabled: run `filecat server set-password` and put "
+                                                  "control_password_hash in [server] to enable \"run now\""}
+        return {"available": True, "reason": None}
 
     def roots(self, p: dict[str, str]) -> dict[str, Any]:
         from . import rootinfo
@@ -453,6 +471,9 @@ ROUTES = {"/api/info": "info", "/api/roots": "roots", "/api/summary": "summary",
           "/api/subtree": "subtree", "/api/treemap": "treemap", "/api/record": "record", "/api/members": "members",
           "/api/backends": "backends", "/api/pins": "pins", "/api/agents": "agents", "/api/jobs": "jobs"}
 POST_ROUTES = {"/api/backend": "select", "/api/pin": "pin", "/api/unpin": "unpin"}
+RUN_PATH = re.compile(r"^/api/jobs/([A-Za-z0-9._@-]{1,128})/run$")      # POST only: "run now"
+CONTROL_HEADER = "X-Filecat-Control"
+LOOPBACK_HOSTS = ("127.0.0.1", "localhost", "::1", "[::1]")
 MAX_BODY = 64 * 1024
 
 
@@ -464,30 +485,147 @@ def make_handler(catalog: Catalog, page: bytes) -> type[BaseHTTPRequestHandler]:
             if not catalog.args.quiet:
                 sys.stderr.write(f"{self.address_string()} {fmt % a}\n")
 
-        def _send(self, status: int, body: bytes, ctype: str) -> None:
+        def _send(self, status: int, body: bytes, ctype: str, headers: dict[str, str] | None = None) -> None:
             self.send_response(status)
+            for name, value in (headers or {}).items():
+                self.send_header(name, value)
             self.send_header("Content-Type", ctype)
             self.send_header("Content-Length", str(len(body)))
             self.send_header("Cache-Control", "no-store")
             self.end_headers()
             self.wfile.write(body)
 
-        def _json(self, status: int, data: Any) -> None:
+        def _json(self, status: int, data: Any, headers: dict[str, str] | None = None) -> None:
             body = json.dumps(data, ensure_ascii=False, default=str).encode("utf-8")
-            self._send(status, body, "application/json; charset=utf-8")
+            self._send(status, body, "application/json; charset=utf-8", headers)
 
         def do_GET(self) -> None:
             url = urlsplit(self.path)
             if url.path in ("/", "/index.html"):
                 return self._send(HTTPStatus.OK, page, "text/html; charset=utf-8")
+            if RUN_PATH.match(url.path) or url.path in ("/api/login", "/api/logout"):
+                return self._json(HTTPStatus.METHOD_NOT_ALLOWED, {"error": "POST only"}, {"Allow": "POST"})
             method = ROUTES.get(url.path)
             if method is None:
                 return self._json(HTTPStatus.NOT_FOUND, {"error": f"no such path {url.path}"})
+            if catalog.auth is not None and catalog.auth.login_required_for_view and not self._logged_in():
+                return self._json(HTTPStatus.UNAUTHORIZED, {"error": "log in first", "login": True})
             params = {k: v[-1] for k, v in parse_qs(url.query, keep_blank_values=True).items()}
             self._respond(method, params)
 
+        # --- control: login, logout, run now (docs/agent-server.md "Run now") ---------------------
+        def _session(self) -> str | None:
+            try:
+                jar = SimpleCookie(self.headers.get("Cookie") or "")
+            except Exception:
+                return None
+            return jar[control_auth.COOKIE].value if control_auth.COOKIE in jar else None
+
+        def _logged_in(self) -> bool:
+            return bool(catalog.auth is not None and catalog.auth.sessions.valid(self._session()))
+
+        def _csrf_ok(self) -> bool:
+            """Same-origin, custom header, JSON: a browser cannot send this cross-site without a CORS
+            preflight, which this server never answers. Sends the refusal and returns False."""
+            if self.headers.get(CONTROL_HEADER) != "run":
+                self._json(HTTPStatus.FORBIDDEN, {"error": f"missing header {CONTROL_HEADER}: run"})
+                return False
+            if self.headers.get_content_type() != "application/json":
+                self._json(HTTPStatus.UNSUPPORTED_MEDIA_TYPE, {"error": "send application/json"})
+                return False
+            host = self.headers.get("Host") or ""
+            origin = self.headers.get("Origin")
+            if origin is not None:
+                parts = urlsplit(origin)
+                if parts.scheme not in ("http", "https") or parts.netloc != host:
+                    self._json(HTTPStatus.FORBIDDEN, {"error": "cross-origin request refused"})
+                    return False
+            # DNS rebinding: bound to loopback, the Host must be a loopback name
+            if catalog.args.host in LOOPBACK_HOSTS and host.rpartition(":")[0].lower() not in LOOPBACK_HOSTS \
+                    and host.lower() not in LOOPBACK_HOSTS:
+                self._json(HTTPStatus.FORBIDDEN, {"error": "unexpected Host header"})
+                return False
+            return True
+
+        def _body(self) -> dict[str, Any] | None:
+            """The JSON object body (empty = {}); sends the 400 and returns None when it is not one."""
+            try:
+                length = int(self.headers.get("Content-Length") or 0)
+                if not 0 <= length <= MAX_BODY:
+                    raise ValueError("body too large")
+                body = json.loads(self.rfile.read(length)) if length else {}
+                if not isinstance(body, dict):
+                    raise ValueError("body must be a JSON object")
+                return body
+            except ValueError as exc:
+                self._json(HTTPStatus.BAD_REQUEST, {"error": f"{type(exc).__name__}: {exc}"})
+                return None
+
+        def _control_ready(self) -> bool:
+            control = catalog.control()
+            if not control["available"]:
+                code = HTTPStatus.NOT_FOUND if catalog.coordinator is None else HTTPStatus.FORBIDDEN
+                self._json(code, {"error": control["reason"]})
+                return False
+            return self._csrf_ok()
+
+        def _login(self) -> None:
+            auth = catalog.auth
+            if not self._control_ready():
+                return
+            body = self._body()
+            if body is None:
+                return
+            ip = self.client_address[0]
+            wait = auth.guard.retry_after(ip)
+            if wait:
+                auth.guard.fail(ip)                 # trying while blocked lengthens the block
+                wait = auth.guard.retry_after(ip) or wait
+                return self._json(HTTPStatus.TOO_MANY_REQUESTS, {"error": "too many failed logins; try later",
+                                                                 "retry_after": wait}, {"Retry-After": str(wait)})
+            # always one scrypt, whatever the request looks like, so timing says nothing
+            if control_auth.verify_password(body.get("password"), auth.password_hash):
+                auth.guard.success(ip)
+                sid = auth.sessions.create()
+                secure = "; Secure" if (self.headers.get("Origin") or "").startswith("https:") else ""
+                cookie = f"{control_auth.COOKIE}={sid}; HttpOnly; SameSite=Strict; Path=/{secure}"
+                return self._json(HTTPStatus.OK, {"ok": True}, {"Set-Cookie": cookie})
+            auth.guard.fail(ip)
+            time.sleep(auth.fail_delay)
+            wait = auth.guard.retry_after(ip)
+            extra = {"Retry-After": str(wait)} if wait else None
+            self._json(HTTPStatus.UNAUTHORIZED, {"error": "wrong password"}, extra)
+
+        def _logout(self) -> None:
+            if not self._control_ready():
+                return
+            catalog.auth.sessions.drop(self._session())
+            cookie = f"{control_auth.COOKIE}=; HttpOnly; SameSite=Strict; Path=/; Max-Age=0"
+            self._json(HTTPStatus.OK, {"ok": True}, {"Set-Cookie": cookie})
+
+        def _run_job(self, name: str) -> None:
+            """POST /api/jobs/<name>/run: a valid session AND the CSRF checks; nothing is started
+            otherwise."""
+            if not self._control_ready():
+                return
+            if not self._logged_in():
+                return self._json(HTTPStatus.UNAUTHORIZED, {"error": "log in first", "login": True})
+            if self._body() is None:
+                return
+            status, data = catalog.coordinator.request_run(name, self.client_address[0])
+            self._json(status, data)
+
         def do_POST(self) -> None:
             path = urlsplit(self.path).path
+            run = RUN_PATH.match(path)
+            if run:
+                return self._run_job(run.group(1))
+            if path == "/api/login":
+                return self._login()
+            if path == "/api/logout":
+                return self._logout()
+            if catalog.auth is not None and catalog.auth.login_required_for_view and not self._logged_in():
+                return self._json(HTTPStatus.UNAUTHORIZED, {"error": "log in first", "login": True})
             method = POST_ROUTES.get(path)
             if method is None:
                 return self._json(HTTPStatus.NOT_FOUND, {"error": f"no such path {path}"})

@@ -23,7 +23,7 @@ from dataclasses import dataclass, field
 from datetime import datetime, timedelta
 from typing import Any, Callable
 
-from . import agent_status, config, scheduler, server_cfg, server_store
+from . import agent_status, config, control_auth, scheduler, server_cfg, server_store
 from .server_cfg import JobSpec, ServerConfig
 from .server_store import ServerStore, iso
 
@@ -245,7 +245,9 @@ class Coordinator:
         self.log = logger
         self.holder = holder or uuid.uuid4().hex[:16]
         self.max_concurrent = cfg.max_concurrent or (1 if (catalog.backend or "sqlite") in FILE_BACKENDS else 2)
-        self.sched = scheduler.Scheduler(cfg.jobs, store.last_starts())
+        last = store.last_starts()
+        self.sched = scheduler.Scheduler(cfg.jobs, last, self._first_seen(last))
+        self.manual: dict[str, str] = {}        # job -> remote address: "run now" requests not started yet
         self.health: dict[str, AgentState] = {n: AgentState(n, a.endpoint) for n, a in self.agents.items()}
         self.runs: dict[str, Run] = {}
         self.last_outcome: dict[str, str] = {}
@@ -259,6 +261,43 @@ class Coordinator:
         self._last_prune: datetime | None = None
         for row in reversed(store.recent(500)):
             self.last_outcome[row["job"]] = row["outcome"]
+
+    def _first_seen(self, last: dict[str, datetime]) -> dict[str, datetime]:
+        """When each job that never ran was first seen: saved in the catalog the first time, so a
+        restart does not keep postponing its first run (jobs with run_on_start need none)."""
+        try:
+            seen = self.store.first_seen()
+            new = {j.name: self.clock() for j in self.cfg.jobs
+                   if j.enabled and not j.run_on_start and j.name not in last and j.name not in seen}
+            if new:
+                seen = {**seen, **new}
+                self.store.save_first_seen(seen)
+        except NotImplementedError:
+            return {}
+        return seen
+
+    # --- "run now" (the viewer's POST /api/jobs/<name>/run) ---
+    def request_run(self, name: str, remote: str) -> tuple[int, dict[str, Any]]:
+        """Queue a manual run of `name`: (http status, body). The next tick starts it through the
+        scheduler, so the per-agent exclusivity and the concurrency limit still apply."""
+        spec = next((j for j in self.cfg.jobs if j.name == name), None)
+        if spec is None:
+            return 404, {"error": f"no such job {name!r}"}
+        if not spec.enabled:
+            return 409, {"error": f"job {name} is disabled in filecat.toml"}
+        if self.lost or self.stopping:
+            return 409, {"error": "this server is stopping or has lost the catalog lease"}
+        with self._lock:
+            if name in self.runs or name in self.manual:
+                return 409, {"error": f"job {name} is already running" if name in self.runs
+                             else f"job {name} is already queued to run"}
+            if self.health[spec.agent].state == "down":
+                return 409, {"error": f"agent {spec.agent} is down"}
+            self.manual[name] = remote
+        self.log(f"job {name}: run requested from {remote}")
+        return 202, {"job": name, "queued": True,
+                     "message": f"{name} will start now, or as soon as agent {spec.agent} and the "
+                                "concurrency limit allow"}
 
     # --- lease ---
     def acquire(self) -> server_store.LeaseResult:
@@ -336,17 +375,20 @@ class Coordinator:
             self._dirty = True
 
     # --- running jobs ---
-    def _row(self, spec: JobSpec, now: datetime, trigger: str, outcome: str, error: str | None = None) -> dict[str, Any]:
+    def _row(self, spec: JobSpec, now: datetime, trigger: str, outcome: str, error: str | None = None,
+             remote: str | None = None) -> dict[str, Any]:
         row = {"run": uuid.uuid4().hex[:8], "job": spec.name, "kind": spec.kind, "agent": spec.agent,
                "roots": list(spec.roots) if spec.roots else None, "started_at": iso(now), "ended_at": None,
                "outcome": outcome, "exit_code": None, "trigger": trigger, "counts": {}, "error": error,
                "server": self.holder}
+        if remote:
+            row["requested_from"] = remote        # the web viewer's "run now": the caller's address only
         if outcome == "skipped":
             row["ended_at"] = row["started_at"]
         return row
 
-    def _start(self, spec: JobSpec, now: datetime, trigger: str) -> None:
-        run = Run(spec, self._row(spec, now, trigger, "running"), threading.Event(), time.monotonic())
+    def _start(self, spec: JobSpec, now: datetime, trigger: str, remote: str | None = None) -> None:
+        run = Run(spec, self._row(spec, now, trigger, "running", remote=remote), threading.Event(), time.monotonic())
         self.store.put_run(run.row)
         self.runs[spec.name] = run
         self.last_outcome[spec.name] = "running"
@@ -410,23 +452,34 @@ class Coordinator:
             with self._lock:
                 down = {n for n, s in self.health.items() if s.state == "down"}
                 unknown = {n for n, s in self.health.items() if s.state == "unknown"}
+            with self._lock:
+                manual = dict(self.manual)
             plan = self.sched.plan(now, max_concurrent=self.max_concurrent, down=down, unknown=unknown,
-                                   forced=forced or ())
+                                   forced=set(forced or ()) | set(manual))
             for spec, reason in plan.skipped:
                 self.log(f"job {spec.name} skipped: {reason}")
-                self.store.put_run(self._row(spec, now, trigger, "skipped", reason))
+                self.store.put_run(self._row(spec, now, self._trigger(spec, trigger, manual), "skipped", reason,
+                                             manual.get(spec.name)))
                 self.last_outcome[spec.name] = "skipped"
                 self.outcomes.append("skipped")
-                if forced:
-                    forced.discard(spec.name)
+                self._consumed(spec, forced)
             for spec in plan.start:
-                self._start(spec, now, trigger)
-                if forced:
-                    forced.discard(spec.name)
+                self._start(spec, now, self._trigger(spec, trigger, manual), manual.get(spec.name))
+                self._consumed(spec, forced)
         if self._dirty:
             self._save_agents()
         self._prune(now)
         return plan
+
+    @staticmethod
+    def _trigger(spec: JobSpec, trigger: str, manual: dict[str, str]) -> str:
+        return "manual" if spec.name in manual else trigger
+
+    def _consumed(self, spec: JobSpec, forced: set[str] | None) -> None:
+        with self._lock:
+            self.manual.pop(spec.name, None)
+        if forced:
+            forced.discard(spec.name)
 
     def _save_agents(self) -> None:
         self._dirty = False
@@ -497,7 +550,8 @@ class Coordinator:
         out = []
         for spec in self.sched.jobs:
             out.append({**spec.to_dict(), "next_due": iso(self.sched.next_due(spec, now)),
-                        "running": spec.name in self.runs, "last_outcome": self.last_outcome.get(spec.name)})
+                        "running": spec.name in self.runs, "queued": spec.name in self.manual,
+                        "last_outcome": self.last_outcome.get(spec.name)})
         return out
 
     def lease_snapshot(self) -> dict[str, Any] | None:
@@ -506,17 +560,27 @@ class Coordinator:
 
 # --- the command ----------------------------------------------------------------------------------
 def print_plan(cfg: ServerConfig, agents: list[config.AgentConfig], anchors: dict[str, datetime],
-               max_concurrent: int, now: datetime) -> None:
+               max_concurrent: int, now: datetime, first_seen: dict[str, datetime] | None = None) -> None:
     print(f"filecat server plan: {len(agents)} agent(s), {len(cfg.jobs)} job(s), up to {max_concurrent} at a time")
     print(f"  health: every {int(cfg.health_interval.total_seconds())}s per agent, backoff up to "
           f"{int(cfg.health_backoff_max.total_seconds())}s when down")
     for a in agents:
         print(f"  agent {a.name}  {a.endpoint}")
-    sched = scheduler.Scheduler(cfg.jobs, anchors)
+    first_seen = first_seen or {}
+    # a job never seen before is first seen when the server starts: now
+    sched = scheduler.Scheduler(cfg.jobs, anchors, {j.name: first_seen.get(j.name, now) for j in cfg.jobs})
     for spec in sched.jobs:
         due = sched.next_due(spec, now)
-        when = "at start (never ran)" if anchors.get(spec.name) is None else (
-            "due now" if due <= now else f"next {due:%Y-%m-%d %H:%M}")
+        if anchors.get(spec.name) is not None:
+            when = "due now" if due <= now else f"next {due:%Y-%m-%d %H:%M}"
+        elif spec.run_on_start:
+            when = "at server start (never ran; run_on_start)"
+        elif spec.name in first_seen:
+            when = f"first run {due:%Y-%m-%d %H:%M} (never ran; waits for its slot)"
+        elif spec.every is not None:
+            when = f"first run {spec.schedule_text[6:]} after the server first starts (never ran)"
+        else:
+            when = f"first run {due:%Y-%m-%d %H:%M} (never ran; waits for its slot)"
         what = {"storage-collect": "collect the storage topology",
                 "scan": "scan " + (", ".join(spec.roots) if spec.roots else "every root the agent covers"),
                 "store-resum": "re-sum backup/database store rollups older than "
@@ -533,6 +597,8 @@ def print_plan(cfg: ServerConfig, agents: list[config.AgentConfig], anchors: dic
 
 
 def run(args: Any) -> int:
+    if getattr(args, "action", None) == "set-password":
+        return control_auth.set_password(args)
     try:
         cfg_dict = config.load(config.find(getattr(args, "config", None)))
         agents = config.load_agents(cfg_dict)
@@ -549,6 +615,18 @@ def run(args: Any) -> int:
             listen = cfg.serve or "127.0.0.1:8765"
         if listen is not None and not server_cfg.parse_listen(listen):
             raise config.ConfigError(f"--serve {listen!r}: want HOST:PORT")
+        pw_hash = cfg.resolve_password_hash()
+        if pw_hash is not None and not control_auth.valid_hash(pw_hash):
+            raise config.ConfigError("[server] control_password_hash is not a scrypt$n$r$p$salt$hash string "
+                                     "(make one with `filecat server set-password`)")
+        if cfg.login_required_for_view and pw_hash is None:
+            raise config.ConfigError("[server] login_required_for_view needs control_password_hash "
+                                     "(`filecat server set-password`)")
+        auth = control_auth.ControlAuth(
+            pw_hash, control_auth.LoginGuard(
+                max_failures=cfg.login_max_failures, window=cfg.login_window.total_seconds(),
+                block=cfg.login_block.total_seconds(), global_max_failures=cfg.login_global_max_failures, log=log),
+            control_auth.Sessions(), cfg.login_required_for_view)
     except config.ConfigError as exc:
         print(f"filecat server: {exc}", file=sys.stderr)
         return 2
@@ -557,16 +635,18 @@ def run(args: Any) -> int:
     max_concurrent = cfg.max_concurrent or (1 if (catalog.backend or "sqlite") in FILE_BACKENDS else 2)
     if args.dry_run:
         anchors: dict[str, datetime] = {}
+        seen: dict[str, datetime] = {}
         from . import storage_cmd
         backend = storage_cmd._open_catalog(args)
         if backend is not None:
             try:
                 anchors = server_store.last_starts(backend)
+                seen = server_store.read_first_seen(backend)
             except NotImplementedError:
                 pass
             finally:
                 backend.close()
-        print_plan(cfg, agents, anchors, max_concurrent, clock())
+        print_plan(cfg, agents, anchors, max_concurrent, clock(), seen)
         return 0
     from .backends import open_backend
     handle = server_store.Handle(lambda: open_backend(catalog.backend, catalog.out, catalog.dsn))
@@ -589,7 +669,7 @@ def run(args: Any) -> int:
             host, port = server_cfg.parse_listen(listen)             # type: ignore[misc]
             viewer = serve.start_viewer(argparse.Namespace(
                 backend=catalog.backend, out=catalog.out, dsn=catalog.dsn, host=host, port=port, quiet=True,
-                no_save=False, graph_max_age=120, open=False), coord)
+                no_save=False, graph_max_age=120, open=False, control_auth=auth), coord)
             if viewer is None:
                 coord.shutdown()
                 return 2

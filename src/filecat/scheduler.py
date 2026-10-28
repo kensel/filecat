@@ -63,9 +63,18 @@ class Plan:
 
 
 class Scheduler:
-    def __init__(self, jobs: Iterable[JobSpec], anchors: dict[str, datetime | None] | None = None) -> None:
+    def __init__(self, jobs: Iterable[JobSpec], anchors: dict[str, datetime | None] | None = None,
+                 first_seen: dict[str, datetime] | None = None) -> None:
+        """`anchors`: when each job last started. A job that never ran waits for its first slot
+        (anchor = when the server first saw it, so `every` is due a full interval later and `at`
+        at its next time of day), unless it has `run_on_start`: then it has no anchor and is due."""
         self.jobs = [j for j in jobs if j.enabled]
-        self.anchors: dict[str, datetime | None] = {j.name: (anchors or {}).get(j.name) for j in self.jobs}
+        self.anchors: dict[str, datetime | None] = {}
+        for j in self.jobs:
+            anchor = (anchors or {}).get(j.name)
+            if anchor is None and not j.run_on_start:
+                anchor = (first_seen or {}).get(j.name)
+            self.anchors[j.name] = anchor
         self.running: dict[str, str] = {}       # job name -> agent name
 
     def busy_agents(self) -> set[str]:

@@ -38,6 +38,7 @@ class Clock:
 
 def spec(name="j", agent="a", kind="scan", **kw) -> JobSpec:
     kw.setdefault("every", timedelta(hours=1))
+    kw.setdefault("run_on_start", True)     # most tests want a never-run job due at once
     return JobSpec(name=name, kind=kind, agent=agent, **kw)
 
 
@@ -63,6 +64,7 @@ name = "topology"
 kind = "storage-collect"
 agent = "*"
 every = "24h"
+run_on_start = true
 options = ["--measure-shares"]
 [[server.jobs]]
 name = "nightly"
@@ -486,6 +488,7 @@ name = "topology"
 kind = "storage-collect"
 agent = "nas3"
 every = "24h"
+run_on_start = true
 options = ["--measure-shares"]
 [[server.jobs]]
 name = "scan-backup"
@@ -493,6 +496,7 @@ kind = "scan"
 agent = "nas3"
 roots = ['\\\\nas3\\Backup']
 every = "24h"
+run_on_start = true
 options = ["--identify", "never"]
 """
 
@@ -570,7 +574,7 @@ def test_a_second_server_is_refused_and_dry_run_touches_nothing(nas3, fixture_di
     db = str(fixture_dir / "cat.sqlite")
     base = ["--config", cfg, "server", "--backend", "sqlite", "--out", db]
     code, out, err = run_cli(capsys, *base, "--dry-run")
-    assert code == 0 and "2 job(s)" in out and "job topology: every 1d" in out and "at start (never ran)" in out
+    assert code == 0 and "2 job(s)" in out and "job topology: every 1d" in out and "at server start (never ran; run_on_start)" in out
     assert "agent nas3" in out and not Path(db).exists()                                # nothing opened or created
     backend = open_backend("sqlite", db)
     try:

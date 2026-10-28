@@ -463,6 +463,11 @@ def build_parser() -> argparse.ArgumentParser:
     p = sub.add_parser("server", help="the coordinator: checks the agents' health and runs the scheduled "
                                       "[[server.jobs]] (scans, storage collects, store re-sums), records "
                                       "every run in the catalog; --serve also runs the web viewer")
+    p.add_argument("action", nargs="?", choices=("set-password",),
+                   help="set-password: ask (twice, no echo) for the password of the web viewer's \"run now\" "
+                        "and print the hash line for filecat.toml")
+    p.add_argument("--write", action="store_true",
+                   help="set-password: write control_password_hash into the [server] table of filecat.toml")
     _storage(p)
     p.add_argument("--serve", nargs="?", const="", default=None, metavar="HOST:PORT",
                    help="also run the web viewer in this process (default 127.0.0.1:8765, or [server] serve); "

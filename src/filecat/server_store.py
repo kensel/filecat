@@ -7,6 +7,7 @@ Two stores of whole documents, in every backend (`Backend.put_server_doc`, `serv
     server_jobs   one document per run, key "<started_at>#<job>"
     server_state  key "lease": {holder, host, pid, started_at, renewed_at, expires_at}
                   key "agents": {agents: [...], updated_at}
+                  key "first_seen": {jobs: {name: when the server first saw the job}}
 
 The module-level functions take a backend and are what `filecat serve` reads with; `ServerStore`
 runs them on one thread that owns the connection (a SQLite connection may not change threads).
@@ -23,6 +24,7 @@ JOBS = "server_jobs"
 STATE = "server_state"
 LEASE_KEY = "lease"
 AGENTS_KEY = "agents"
+FIRST_SEEN_KEY = "first_seen"
 FINAL = ("ok", "errors", "failed", "cancelled", "skipped", "lost")
 
 
@@ -54,6 +56,18 @@ def read_lease(backend: Any, now: datetime | None = None) -> dict[str, Any] | No
 
 def read_agents(backend: Any) -> dict[str, Any] | None:
     return _state(backend, AGENTS_KEY)
+
+
+def read_first_seen(backend: Any) -> dict[str, datetime]:
+    """When the server first saw each job (the anchor of a job that never ran, so a restart does
+    not keep pushing its first run away)."""
+    doc = _state(backend, FIRST_SEEN_KEY) or {}
+    out = {}
+    for name, text in (doc.get("jobs") or {}).items():
+        when = parse_iso(text)
+        if when is not None:
+            out[name] = when
+    return out
 
 
 def recent_runs(backend: Any, limit: int = 50, job: str | None = None,
@@ -210,6 +224,16 @@ class ServerStore:
                     n += 1
             return n
         return self.handle.call(fn)
+
+    # --- job first-seen times ---
+    def first_seen(self) -> dict[str, datetime]:
+        return self.handle.call(read_first_seen)
+
+    def save_first_seen(self, seen: dict[str, datetime]) -> None:
+        now = iso(self.clock())
+        doc = {"key": FIRST_SEEN_KEY, "host": "server", "scanned_at": now,
+               "jobs": {name: iso(when) for name, when in sorted(seen.items())}}
+        self.handle.call(lambda b: b.put_server_doc(STATE, doc))
 
     # --- agent states ---
     def save_agents(self, agents: list[dict[str, Any]]) -> None:
