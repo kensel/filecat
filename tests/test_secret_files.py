@@ -9,6 +9,7 @@ from __future__ import annotations
 import base64
 import json
 import os
+import re
 import uuid
 from pathlib import Path
 
@@ -245,7 +246,7 @@ def test_redact_credentials_leaves_other_lines_alone():
 def test_the_collector_over_a_redacted_target_file_has_no_credentials(fixture_dir):
     committed = open(os.path.join(NAS3, "files", "usr", "syno", "etc", "iscsi_target.conf"), "rb").read()
     for key in (b"username", b"password", b"mutual_username", b"mutual_password"):
-        assert b"\n" + key + b"=" + REDACTED + b"\n" in committed
+        assert re.search(rb"(^|\n)" + key + b"=" + re.escape(REDACTED) + rb"\r?\n", committed)
     root = fixture_dir / "served"
     root.mkdir()
     with FakeAgent(root) as agent:
