@@ -193,5 +193,13 @@ mod tests {
         assert_eq!(allowlist_sha256(), PINNED, "the allowlist changed: bump ALLOWLIST_VERSION and update PINNED");
     }
 
+    /// `./build.sh hashes` runs this and prints the values `src/filecat/data/agent_expected.json`
+    /// must hold; a Python test fails when the file and the Rust build disagree.
+    #[test]
+    fn print_expected_hashes() {
+        println!("EXPECTED allowlist_sha256 {}", allowlist_sha256());
+        println!("EXPECTED deny_sha256 {}", crate::scope::deny_sha256());
+    }
+
     const PINNED: &str = "1421d08a57af05c07b6c34f7f18a81b002895370132c6d87773a66010875fa31";
 }

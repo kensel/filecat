@@ -111,7 +111,7 @@ server keeps store detection, manifest verification, probing and Ollama.
 - `filecat-agent` (note 02, draft sources in
   [research/rust-agent](research/rust-agent/)): NDJSON-over-TLS daemon,
   self-generated certificate with fingerprint pinning, bearer token;
-  static musl builds for x86_64 and armv7, built in CI.
+  static musl builds for x86_64, armv7 and aarch64 (build.sh), built in CI.
 - Python side: `[[agents]]` in `filecat.toml`, `AgentClient`,
   `RemoteFileProxy` (bounded `read_range` for ZIP directories, disk images
   and PE headers), POSIX-to-UNC path mapping so records and treemap pins
@@ -147,8 +147,11 @@ server keeps store detection, manifest verification, probing and Ollama.
     agent, is built (`agent/`, static musl x86_64, all protocol 1 commands but `wmi`, the
     allowlist as a compiled table; cargo tests plus the Python agent tests run against the
     binary, [agent/README.md](../agent/README.md); deployment: [agent-deploy.md](agent-deploy.md)).
+  - [x] The armv7 (`armv7-unknown-linux-musleabihf`) and aarch64 (`aarch64-unknown-linux-musl`)
+    builds: `agent/build.sh armv7|aarch64|all`, fully static, cargo tests pass under qemu-user
+    ([agent/README.md](../agent/README.md)). Not yet run on a real ARM NAS.
   - [ ] The Windows agent (phase 2: `wmi`, cloud placeholders, `ProductType` roots, Windows
-    deny paths) and the armv7 build.
+    deny paths).
 - RPCs: list a directory (lstat, inode, `st_blocks`), measure (hash plus
   the 8 KiB head), read a range, sum a subtree. The agent records
   allocated size and deduplicates hardlinks by inode.

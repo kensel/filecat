@@ -23,6 +23,21 @@ file "$HOME/.cache/filecat-agent-target/x86_64-unknown-linux-musl/release/fileca
 `build.sh` sets `CC_x86_64_unknown_linux_musl=gcc` (the `ring` crate compiles a little C; the host
 `gcc` is enough, `musl-gcc` is not needed). Use `./build.sh test` for the unit tests.
 
+### Which binary for which NAS
+
+Run `uname -m` on the NAS (SSH) and build the matching target:
+
+| `uname -m` | typical Synology | build |
+|---|---|---|
+| `x86_64` | Plus / XS series (Intel, AMD) | `./build.sh` |
+| `armv7l` | older value / J series (Marvell, Alpine 32-bit) | `./build.sh armv7` |
+| `aarch64` | newer ARM models (Realtek RTD1296/1619, Alpine v2) | `./build.sh aarch64` |
+
+`./build.sh all` builds all three and prints path, size and sha256 for each; copy the file whose
+name you need to the NAS (every build is called `filecat-agent`; keep them apart by directory).
+The ARM toolchain (`gcc-arm-linux-gnueabihf`, `gcc-aarch64-linux-gnu`) is described in
+[agent/README.md](../agent/README.md). All three are fully static.
+
 ## 2. Copy it to the NAS
 
 Put it outside every shared folder (a file under `/volume1/<share>` would show up in the very

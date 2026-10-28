@@ -42,6 +42,35 @@ Output goes to `$CARGO_TARGET_DIR` (default `~/.cache/filecat-agent-target`); a 
 Windows-mounted checkout is slow otherwise. Cargo does not build on Windows hosts with Application
 Control; use WSL.
 
+### Targets
+
+| `uname -m` on the NAS | `build.sh` | Rust target | notes |
+|---|---|---|---|
+| `x86_64` | `./build.sh` or `./build.sh x86_64` | `x86_64-unknown-linux-musl` | static-pie, about 2.2 MB |
+| `armv7l` | `./build.sh armv7` | `armv7-unknown-linux-musleabihf` | 32-bit hard-float ARM, EABI5, about 1.6 MB |
+| `aarch64` | `./build.sh aarch64` | `aarch64-unknown-linux-musl` | 64-bit ARM, about 1.8 MB |
+
+`./build.sh all` builds the three and prints each artefact's path, size, sha256 and `file` line.
+The binaries are fully static (no interpreter, no shared library), which matters on the old DSM
+ARM kernels and libc.
+
+Toolchain for the ARM targets (Debian/Ubuntu, root): `apt-get install gcc-arm-linux-gnueabihf
+gcc-aarch64-linux-gnu qemu-user-static`, `rustup target add armv7-unknown-linux-musleabihf
+aarch64-unknown-linux-musl`. Why the GNU cross gcc: `ring` compiles a little C (it only needs
+`<string.h>`/`<stdint.h>`-level headers, so the glibc cross headers are fine) and gcc is also the
+link driver; rustc's self-contained musl `crt1.o` and `libc.a` make the result static and
+musl-linked. This was the smallest set-up that worked first time; `rust-lld` alone would still need
+a C compiler for `ring`, so it saves nothing. `build.sh` exports `CC_<target>`,
+`CARGO_TARGET_<TARGET>_LINKER` and `CARGO_TARGET_<TARGET>_RUNNER` (qemu) itself.
+
+Output stays in `$CARGO_TARGET_DIR`, outside the repository (`/agent/target/` and `/agent/dist/`
+are also ignored, in case of a plain `cargo build`). `./build.sh test armv7` (or `aarch64`, `all`)
+runs the 53 unit tests under qemu-user; they are slow there (the 64 MiB hash vector takes minutes).
+qemu-user is not a real DSM kernel: run `./filecat-agent --print-fingerprint` on the NAS once.
+
+`./build.sh hashes` prints the Rust `allowlist_sha256` and `deny_sha256`, which
+`src/filecat/data/agent_expected.json` must hold ([docs/agent-server.md](../docs/agent-server.md)).
+
 ### Unit tests
 
 `cargo test` covers the matcher against `tests/data/rollup_match_vectors.json` (match, policy id,
@@ -80,5 +109,4 @@ fake, as always.
 ## Deciding things for the next phase
 
 Phase 2 (Windows) needs: `wmi`, cloud-placeholder attributes, `ProductType` roots, Windows deny
-paths: see `src/windows_phase2.rs`. The armv7 build is `cargo build --target
-armv7-unknown-linux-musleabihf` (untried).
+paths: see `src/windows_phase2.rs`. The armv7 and aarch64 builds are done (see Targets).
