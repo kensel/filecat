@@ -217,10 +217,11 @@ musl targets, a `file` check that each is statically linked, and the three binar
 unit tests under qemu-user, 3-4 minutes each, only on pushes to main and manual runs); and
 `agent-conformance` (the Python agent tests against the real x86_64 binary built with
 `test-root`; `tests/_real_agent.py` starts it directly on Linux, so the symlink tests that skip on
-Windows run). The conformance job is `continue-on-error` until its first GitHub runs: in a root
-WSL checkout six of those tests fail on Linux with the fake agent or the real one (UNC spelling of
-an `x3_cat` sibling, the SMB fallback tests, the two `rollups redacted release` terminal tests,
-and one nanosecond-versus-100ns mtime comparison of a local walk against the agent). `cargo fmt
+Windows run). The conformance job gates the build: the six Linux-only failures its first run found (UNC
+spelling of an `x3_cat` sibling, the SMB fallback tests patching `os.stat` for every path, the two
+`rollups redacted release` tests with a POSIX path, and local-versus-agent mtimes at nanosecond
+versus 100 ns) were fixed in the code or the tests, and the job passes as a normal user against the
+real binary. `cargo fmt
 --check` is not in CI: the sources are not rustfmt-formatted yet.
 
 ## Notes for DSM

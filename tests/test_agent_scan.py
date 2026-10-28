@@ -321,8 +321,11 @@ def test_unreachable_agent_fails_the_root_with_a_message(tree, agent, capsys):
 def test_agent_fallback_reads_over_smb(tree, agent, monkeypatch, capsys):
     cfg = unreachable_config(agent)
     smb = []
+    real_stat = os.stat
 
     def fake_stat(path, *a, **k):
+        if path != UNC:                 # os is the global module: pathlib, tmp dirs and keys use it too
+            return real_stat(path, *a, **k)
         smb.append(path)
         raise OSError("smb says no")
 
@@ -335,7 +338,14 @@ def test_agent_fallback_reads_over_smb(tree, agent, monkeypatch, capsys):
 
 
 def test_no_agent_never_contacts_the_agent(tree, agent, monkeypatch):
-    monkeypatch.setattr(walker_mod.os, "stat", lambda *a, **k: (_ for _ in ()).throw(OSError("smb says no")))
+    real_stat = os.stat
+
+    def fake_stat(path, *a, **k):
+        if path != UNC:
+            return real_stat(path, *a, **k)
+        raise OSError("smb says no")
+
+    monkeypatch.setattr(walker_mod.os, "stat", fake_stat)
     monkeypatch.setattr(preflight_mod, "_open", lambda path: (_ for _ in ()).throw(OSError("smb says no")))
     _, docs, code = scan_into(UNC, options(agent, no_agent=True))
     assert code == 1 and agent.connections == 0

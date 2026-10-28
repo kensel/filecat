@@ -197,9 +197,6 @@ jobs:
     # The Python agent tests against the real agent (tests/_real_agent.py starts the binary directly on Linux)
     name: agent conformance (Python tests against the real agent)
     runs-on: ubuntu-latest
-    # The first runs on GitHub decide whether this can gate: in a root WSL checkout a few of these
-    # fail for reasons still to be looked at (docs/agent-deploy.md, "Conformance in CI").
-    continue-on-error: true
     steps:
       - uses: actions/checkout@v5
       - uses: dtolnay/rust-toolchain@master

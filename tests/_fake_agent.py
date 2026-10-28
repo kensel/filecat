@@ -298,7 +298,8 @@ class FakeAgent:
         self._running: dict[str, threading.Event] = {}
         self._sums = 0
         self._stop = False
-        threading.Thread(target=self._accept, daemon=True).start()
+        self._acceptor = threading.Thread(target=self._accept, daemon=True)
+        self._acceptor.start()
 
     def __enter__(self) -> "FakeAgent":
         return self
@@ -308,10 +309,18 @@ class FakeAgent:
 
     def stop(self) -> None:
         self._stop = True
+        # Linux: close() does not wake a thread blocked in accept(), and the socket keeps listening
+        # until that thread leaves it; shutdown() wakes it, then the port really refuses connections.
+        try:
+            self._listener.shutdown(socket.SHUT_RDWR)
+        except OSError:
+            pass
         try:
             self._listener.close()
         except OSError:
             pass
+        if threading.current_thread() is not self._acceptor:
+            self._acceptor.join(2)
         self.drop_connections()
 
     def drop_connections(self) -> None:
