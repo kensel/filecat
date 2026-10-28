@@ -633,20 +633,28 @@ class MssqlBackend(Backend):
         if takeover:
             cond += " OR JSON_VALUE(document, '$.expires_at') < ?"
             args.append(now)
-        cur = self.conn.cursor()
-        try:
-            cur.execute(f"UPDATE {store} SET host=?, scanned_at=?, document=? WHERE doc_key=? AND ({cond})",
-                        (doc["host"], doc.get("scanned_at"), text, doc["key"], *args))
-            won = cur.rowcount == 1
-            if not won:
-                cur.execute(f"INSERT INTO {store} (doc_key, host, scanned_at, document) VALUES (?, ?, ?, ?)",
-                            (doc["key"], doc["host"], doc.get("scanned_at"), text))
-                won = True
-            self.conn.commit()
-            return won
-        except pyodbc.IntegrityError:               # the row exists and is held by someone else
-            self.conn.rollback()
-            return False
+        for attempt in range(8):
+            cur = self.conn.cursor()
+            try:
+                cur.execute(f"UPDATE {store} SET host=?, scanned_at=?, document=? WHERE doc_key=? AND ({cond})",
+                            (doc["host"], doc.get("scanned_at"), text, doc["key"], *args))
+                won = cur.rowcount == 1
+                if not won:
+                    cur.execute(f"INSERT INTO {store} (doc_key, host, scanned_at, document) VALUES (?, ?, ?, ?)",
+                                (doc["key"], doc["host"], doc.get("scanned_at"), text))
+                    won = True
+                self.conn.commit()
+                return won
+            except pyodbc.IntegrityError:               # the row exists and is held by someone else
+                self.conn.rollback()
+                return False
+            except pyodbc.Error as exc:
+                self.conn.rollback()
+                # 40001 / 1205: chosen as the deadlock victim; the retry reads what the winner committed
+                if not (exc.args and (exc.args[0] == "40001" or "(1205)" in str(exc))):
+                    raise
+                time.sleep(0.01 * (attempt + 1))
+        return False                # still deadlocked: not won; the caller tries again on its next beat
 
     def _topology_remove(self, store: str, key: str) -> None:
         assert store in self.DOC_STORES

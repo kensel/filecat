@@ -544,15 +544,22 @@ class PostgresBackend(Backend):
         if takeover:
             cond += f" OR {store}.document->>'expires_at' < %s"
             args.append(now)
-        with self.conn.cursor() as cur:
-            cur.execute(
-                f"INSERT INTO {store} (doc_key, host, scanned_at, document) VALUES (%s, %s, %s, %s::jsonb) "
-                "ON CONFLICT (doc_key) DO UPDATE SET host=excluded.host, scanned_at=excluded.scanned_at, "
-                f"document=excluded.document WHERE {cond}",
-                (doc["key"], doc["host"], doc.get("scanned_at"), json.dumps(doc, ensure_ascii=False), *args))
-            won = cur.rowcount == 1
-        self.conn.commit()
-        return won
+        import psycopg.errors
+        for attempt in range(8):
+            try:
+                with self.conn.cursor() as cur:
+                    cur.execute(
+                        f"INSERT INTO {store} (doc_key, host, scanned_at, document) VALUES (%s, %s, %s, %s::jsonb) "
+                        "ON CONFLICT (doc_key) DO UPDATE SET host=excluded.host, scanned_at=excluded.scanned_at, "
+                        f"document=excluded.document WHERE {cond}",
+                        (doc["key"], doc["host"], doc.get("scanned_at"), json.dumps(doc, ensure_ascii=False), *args))
+                    won = cur.rowcount == 1
+                self.conn.commit()
+                return won
+            except (psycopg.errors.DeadlockDetected, psycopg.errors.SerializationFailure):    # 40P01, 40001
+                self.conn.rollback()
+                time.sleep(0.01 * (attempt + 1))
+        return False                # still deadlocked: not won; the caller tries again on its next beat
 
     def _topology_remove(self, store: str, key: str) -> None:
         assert store in self.DOC_STORES

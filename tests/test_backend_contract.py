@@ -733,7 +733,7 @@ def test_storage_topology_contract(backend, backend_name):
         assert [r["scanned_at"] for r in rows] == ["2026-10-21T09:00:00Z", "2026-10-22T09:00:00Z"]
         assert rows[0]["structure_hash"] == "again"         # one row per (host, scanned_at)
         assert backend.topology_history("nobody-" + h) == []
-        assert list(backend.list(root=ROOT)) == [] and list(backend.list_dropped()) == []
+        assert list(backend.list(root=ROOT)) == [] and list(backend.list_dropped(ROOT)) == []
         backend.delete_topology(h)
         backend.delete_topology(h)                          # absent: no error
         assert backend.get_topology(h) is None and len(backend.topology_history(h)) == 2
