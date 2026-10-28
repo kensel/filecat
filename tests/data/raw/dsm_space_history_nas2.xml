@@ -1,19 +1,16 @@
 <?xml version="1.0" encoding="UTF-8"?>
-<!-- NAS2 (DSM 7.1.1, ext4 volumes, disks named sdX), assembled from values the owner reported: the /dev/vg2 pool
-     and the cache space are given only by the attributes that were reported (no uuid for the vg2 pool, its md4
-     array or the cache array, no partition_start, no cache slot), the /dev/vg1 pool is as printed. -->
 <spaces>
-        <space path="/dev/vg2" reference="@storage_pool" device_type="1" drive_type="0">
+        <space path="/dev/vg2" reference="@storage_pool" uuid="huHxtY-VmQz-82vy-kU99-VSGp-oewd-C9xQZD" device_type="1" drive_type="0" container_type="2" limited_raidgroup_num="24" space_id="reuse_2" >
                 <device>
-                        <lvm path="/dev/vg2" status="normal" total_size="3978825826304">
+                        <lvm path="/dev/vg2" uuid="huHxtY-VmQz-82vy-kU99-VSGp-oewd-C9xQZD" designed_pv_counts="1" status="normal" total_size="3978825826304" free_size="599785472" pe_size="4194304" expansible="0" max_size="3885575168">
                                 <raids>
-                                        <raid path="/dev/md4" level="raid5">
+                                        <raid path="/dev/md4" uuid="abda987d:a3c012a2:ed5d4913:e144c2ad" level="raid5" version="1.2" layout="2">
                                                 <disks>
-                                                        <disk status="normal" dev_path="/dev/sde5" physical_location="0-5" model="WD2001FFSX-68JNUN0" serial="YE-FHH4Y7H2LMAQ" partition_size="3885577280" slot="0">
+                                                        <disk status="normal" dev_path="/dev/sde5" physical_location="0-5" model="WD2001FFSX-68JNUN0" serial="YE-FHH4Y7H2LMAQ" partition_version="9" partition_start="21257952" partition_size="3885577280" slot="0">
                                                         </disk>
-                                                        <disk status="normal" dev_path="/dev/sdf5" physical_location="0-6" model="WD2003FZEX-00SRLA0" serial="MI-QXV9U6U52AX4" partition_size="3885577280" slot="1">
+                                                        <disk status="normal" dev_path="/dev/sdf5" physical_location="0-6" model="WD2003FZEX-00SRLA0" serial="MI-QXV9U6U52AX4" partition_version="9" partition_start="21257952" partition_size="3885577280" slot="1">
                                                         </disk>
-                                                        <disk status="normal" dev_path="/dev/sdg5" physical_location="0-7" model="WD2003FZEX-00SRLA0" serial="CP-ZYF7M7U8XJN5" partition_size="3885577280" slot="2">
+                                                        <disk status="normal" dev_path="/dev/sdg5" physical_location="0-7" model="WD2003FZEX-00SRLA0" serial="CP-ZYF7M7U8XJN5" partition_version="9" partition_start="21257952" partition_size="3885577280" slot="2">
                                                         </disk>
                                                 </disks>
                                         </raid>
@@ -25,15 +22,17 @@
                                 <volume path="/volume2" dev_path="/dev/vg2/volume_2" uuid="4xqM3H-Iqi3-OCtC-avvO-17wo-3j39-bO6lm0" type="ext4">
                                 </volume>
                         </volumes>
+                        <iscsitrgs>
+                        </iscsitrgs>
                 </reference>
         </space>
-        <space path="/dev/shared_cache_vg1" reference="@shared_cache" uuid="SlUKWj-ggVe-r5hh-sAZ0-ffoV-xTsj-kNuG31" drive_type="1">
+        <space path="/dev/shared_cache_vg1" reference="@shared_cache" uuid="SlUKWj-ggVe-r5hh-sAZ0-ffoV-xTsj-kNuG31" device_type="2" drive_type="1" container_type="2" limited_raidgroup_num="24" space_id="shared_cache_1" >
                 <device>
-                        <lvm path="/dev/shared_cache_vg1" uuid="SlUKWj-ggVe-r5hh-sAZ0-ffoV-xTsj-kNuG31" status="normal" total_size="1000198897664" free_size="355941220352">
+                        <lvm path="/dev/shared_cache_vg1" uuid="SlUKWj-ggVe-r5hh-sAZ0-ffoV-xTsj-kNuG31" designed_pv_counts="1" status="normal" total_size="1000198897664" free_size="355941220352" pe_size="4194304" expansible="0" max_size="976757952">
                                 <raids>
-                                        <raid path="/dev/md3" level="raid1">
+                                        <raid path="/dev/md3" uuid="3eb6bf5f:4a1559a6:388071a9:c414a241" level="raid1" version="1.2" layout="0">
                                                 <disks>
-                                                        <disk status="normal" dev_path="/dev/sdh1" physical_location="0-8" model="SSD PLUS 1000GB" serial="17924K212370">
+                                                        <disk status="normal" dev_path="/dev/sdh1" physical_location="0-8" model="SSD PLUS 1000GB" serial="17924K212370" partition_version="0" partition_start="2048" partition_size="1953518017" slot="0">
                                                         </disk>
                                                 </disks>
                                         </raid>
