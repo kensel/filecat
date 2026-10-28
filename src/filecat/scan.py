@@ -250,11 +250,14 @@ def scan_roots(roots: list[str], backend: Backend, options: ScanOptions,
     A root matching options.aliases is read from its path as given and
     recorded under the aliased root (see aliases.py). A root a configured
     filecat-agent covers is read through that agent (fsource.pick)."""
-    paths = roots
-    roots = [aliases.recorded_root(p, options.aliases) for p in paths]
     if options.agent and not any(a.name == options.agent for a in options.agents):
         print(f"filecat: --agent {options.agent}: no such [[agents]] in filecat.toml", file=sys.stderr)
         return 2
+    paths = fsource.route_to_agent(options, roots, backend,
+                                   [aliases.recorded_root(p, options.aliases) for p in roots])
+    if paths is None:       # --agent NAME: a root it does not read is an error, never a local scan
+        return 2
+    roots = [aliases.recorded_root(p, options.aliases) for p in paths]
     agent_sources: dict[str, fsource.AgentSource] = {}      # one per agent, shared by its roots
     plans: list[tuple[fsource.AgentSource, str] | None] = []
     for path, root in zip(paths, roots):

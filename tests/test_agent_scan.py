@@ -430,3 +430,50 @@ def test_smb_scan_takes_the_spelling_of_the_agent_scanned_root(tree, agent, caps
     scan.scan_roots([local], backend, options(aliases={local: other}), resume_path=_resume_path())
     assert backend.roots() == [UNC]
     assert "recorded as " + UNC in capsys.readouterr().err
+
+
+# --- --agent NAME: bare share names, and no silent local scan -----------------
+def _shares_options(fake, **kwargs) -> ScanOptions:
+    cfg = config_for(fake, shares={"/volume1/Backup": UNC})
+    return ScanOptions(identify="never", agents=[cfg], agent="nas-main", **kwargs)
+
+
+def test_agent_bare_share_name_maps_to_the_share(tree, agent, capsys):
+    backend, docs, code = scan_into("backup", _shares_options(agent), recorded=UNC)
+    assert code == 0 and len(docs) > 8
+    assert backend.roots() == [UNC]                     # the share's own case, not the typed one
+    assert f"backup -> {UNC} (agent nas-main)" in capsys.readouterr().err
+
+
+def test_agent_unknown_bare_name_is_an_error_with_a_suggestion(tree, agent, capsys):
+    backend = MemoryBackend()
+    code = scan.scan_roots(["Backups"], backend, _shares_options(agent))
+    assert code == 2 and backend.roots() == []
+    assert (f"filecat: Backups: not on agent nas-main (alias \\\\nas-main); "
+            f"did you mean {UNC}?") in capsys.readouterr().err
+    scan.scan_roots(["Other"], backend, _shares_options(agent))
+    assert "did you mean \\\\nas-main\\Other?" in capsys.readouterr().err
+
+
+def test_agent_local_path_is_an_error_not_a_local_scan(tree, agent, capsys):
+    backend = MemoryBackend()
+    code = scan.scan_roots([str(tree)], backend, _shares_options(agent))
+    assert code == 2 and backend.roots() == []
+    assert "not on agent nas-main" in capsys.readouterr().err
+    # one uncovered root stops the whole scan before anything is read
+    assert scan.scan_roots([UNC, str(tree)], backend, _shares_options(agent)) == 2
+    assert backend.roots() == []
+
+
+def test_agent_unc_on_the_alias_still_works(tree, agent):
+    backend, docs, code = scan_into(UNC, _shares_options(agent))
+    assert code == 0 and len(docs) > 8
+
+
+def test_bare_name_without_agent_still_scans_locally(tree, fixture_dir, monkeypatch):
+    (fixture_dir / "plain").mkdir()
+    (fixture_dir / "plain" / "a.txt").write_text("x")
+    monkeypatch.chdir(fixture_dir)
+    backend = MemoryBackend()
+    assert scan.scan_roots(["plain"], backend, ScanOptions(identify="never")) == 0
+    assert backend.roots() == ["plain"]

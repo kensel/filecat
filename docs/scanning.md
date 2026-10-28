@@ -214,7 +214,12 @@ not available in v0.2.0):
 A UNC root that a configured `[[agents]]` entry covers (its `alias` server,
 or a `[agents.shares]` root; `agent_for` picks the longest match) is read
 through that agent instead of over SMB. `--no-agent` reads every root over
-SMB; `--agent NAME` uses that agent for the roots it covers; an agent that
+SMB; `--agent NAME` uses that agent for the roots it covers. Under `--agent`
+a root the agent does not cover is an error (exit code 2, nothing is scanned,
+never a silent local scan), with the closest known share as a hint; a bare
+share name (`Backup`, matched case-insensitively against the agent's stored
+topology and `[agents.shares]`) is mapped to its UNC root, announced as
+`Backup -> \\nas3\Backup (agent nas3)`. An agent that
 cannot be reached fails its root like an unreachable share (a `stat` error on
 the root record, exit code 1) unless `--agent-fallback` is given, which reads
 that root over SMB instead. The preflight lists the root through the agent, and

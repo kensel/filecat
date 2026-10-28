@@ -52,6 +52,7 @@ import io
 import logging
 import os
 import re
+import sys
 import threading
 import uuid
 from typing import TYPE_CHECKING, Any, Callable
@@ -444,3 +445,54 @@ def pick(options: "ScanOptions", root: str, path: str) -> tuple["AgentConfig", s
         if found is not None:
             return found, candidate
     return None
+
+
+def _agent_shares(agent: "AgentConfig", backend: Any) -> dict[str, str]:
+    """Lower-cased share name -> UNC root for what is known of `agent`'s
+    shares: its stored topology snapshot, with the configured [agents.shares]
+    on top (as the share map is built)."""
+    from . import topology
+    derived: dict[str, str] = {}
+    try:
+        doc = backend.get_topology(agent.alias.strip("\\/"))
+        if doc:
+            derived = topology.share_entries(topology.parse(doc["topology"]), agent.alias)
+    except (NotImplementedError, topology.TopologyError, KeyError):
+        pass
+    merged = topology.merge_share_maps(derived, agent.shares)
+    return {unc.rstrip("\\").rsplit("\\", 1)[-1].lower(): unc for unc in merged.values()}
+
+
+def route_to_agent(options: "ScanOptions", paths: list[str], backend: Any,
+                   recorded: list[str]) -> list[str] | None:
+    """Under --agent NAME every root must be one that agent reads. A bare
+    share name (`Backup`, no separator or drive) that is one of the agent's
+    known shares is mapped to its UNC root; any other root the agent does not
+    cover is reported and the result is None (the caller exits 2), rather
+    than being scanned locally. `recorded` is `paths` as recorded (aliases).
+    Without --agent, or with --no-agent, the paths are returned as they are."""
+    if not options.agent or options.no_agent:
+        return paths
+    import difflib
+    agent = next(a for a in options.agents if a.name == options.agent)
+    shares: dict[str, str] | None = None
+    out: list[str] = []
+    failed = False
+    for path, root in zip(paths, recorded):
+        if pick(options, root, path) is not None:
+            out.append(path)
+            continue
+        if shares is None:
+            shares = _agent_shares(agent, backend)
+        name = path.strip("\\/").replace("/", "\\").rsplit("\\", 1)[-1]
+        if path and not any(c in path for c in "\\/:") and path.lower() in shares:
+            unc = shares[path.lower()]
+            print(f"{path} -> {unc} (agent {agent.name})", file=sys.stderr)
+            out.append(unc)
+            continue
+        close = difflib.get_close_matches(name.lower(), list(shares), n=1, cutoff=0.6)
+        guess = shares[close[0]] if close else f"{agent.alias}\\{name or '<share>'}"
+        print(f"filecat: {path}: not on agent {agent.name} (alias {agent.alias}); "
+              f"did you mean {guess}?", file=sys.stderr)
+        failed = True
+    return None if failed else out
