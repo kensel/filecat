@@ -252,7 +252,7 @@ server keeps store detection, manifest verification, probing and Ollama.
     environment or `.env`, plus a hardcoded deny list; agent-protocol.md), and a Windows
     agent with WMI for a Windows file server (the classes are in agent-allowlist.md
     section 13, the collector plan in storage-topology.md section 3b; not written).
-  - [x] DSM facts settled on nas3 and NAS2: shares in `/etc/samba/smb.conf`; iSCSI files in
+  - [x] DSM facts settled on nas3 and NAS2: shares in `/etc/samba/smb.share.conf` (loaded by DSM's Samba without an `include`); iSCSI files in
     `/usr/syno/etc` (LUNs placed by `rootpath`; targets and mappings with iqn, enabled and the
     LUN number, credentials never read out); no `lsblk` or `findmnt`; smartmontools 6.5
     (`smartctl_version`, text form); disks `sataN` or `sdX`; DSM's own
