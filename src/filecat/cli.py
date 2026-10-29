@@ -11,6 +11,7 @@ from .backends import BACKENDS
 COMMANDS = {
     "scan": "filecat.scan",
     "summary": "filecat.summary",
+    "summaries": "filecat.summaries",
     "show": "filecat.show",
     "programs": "filecat.programs",
     "signatures": "filecat.signatures",
@@ -23,12 +24,16 @@ COMMANDS = {
     "mongo-rebuild": "filecat.mongo_rebuild",
     "config": "filecat.config",
     "serve": "filecat.serve",
+    "server": "filecat.server",
     "roots": "filecat.roots_cmd",
     "dropped": "filecat.dropped_cmd",
     "backups": "filecat.backups_cmd",
     "databases": "filecat.databases_cmd",
     "dupes": "filecat.dupes_cmd",
     "scan-everything": "filecat.everything",
+    "agents": "filecat.agents_cmd",
+    "rollups": "filecat.rollups_cmd",
+    "storage": "filecat.storage_cmd",
 }
 
 
@@ -74,6 +79,21 @@ def _measure(p: argparse.ArgumentParser) -> None:
     p.add_argument("--ollama-max-files", dest="ollama_max_files", type=int, default=200)
 
 
+def _verify_level(text: str) -> int:
+    """--verify-backups=N: 0 and 1 exist; 2 and 3 are refused with what to use instead."""
+    try:
+        level = int(text)
+    except ValueError:
+        raise argparse.ArgumentTypeError(f"{text!r} is not a level (0 or 1)") from None
+    if level in (2, 3):
+        raise argparse.ArgumentTypeError(
+            f"level {level} is not available in v0.2.0 (it needs a per-file check of the store); "
+            "use --measure-backups to scan a store per file, or --verify-backups=1 for the totals")
+    if level not in (0, 1):
+        raise argparse.ArgumentTypeError(f"{level} is not a verify level (0 or 1)")
+    return level
+
+
 def _scan_options(p: argparse.ArgumentParser) -> None:
     """Everything `scan` takes besides its roots (scan and scan-everything)."""
     _storage(p)
@@ -84,13 +104,15 @@ def _scan_options(p: argparse.ArgumentParser) -> None:
                    help="read and hash the data files of recognised backup stores (ABB pools, "
                         "Windows Backup zips, system-image VHDs, duplicity volumes); by default "
                         "they are recorded from the directory listing only")
-    p.add_argument("--verify-backups", dest="verify_backups", action="store_true",
-                   help="read the data of recognised backup stores and check it against the "
-                        "store's own checksums (Hyper Backup: Guard's CRC32 of every file; "
-                        "Google Workspace: the size and MD5 of every fragment and Drive "
-                        "version its metadata names; Veeam: each backup file's metadata "
-                        "CRC32C); "
-                        "by default only presence and size are checked, from the listing")
+    p.add_argument("--verify-backups", dest="verify_backups", nargs="?", const=1, default=None,
+                   type=_verify_level, metavar="N",
+                   help="how far a backup store is checked against its own manifest: 0 nothing "
+                        "(the default; probe.backup.checked is \"none\"), 1 (also a bare "
+                        "--verify-backups) the rolled-up data's total bytes and file count "
+                        "(checked is \"totals\"). 2 (every file the manifest names exists with its "
+                        "size) and 3 (their hashes) are not in v0.2.0; --measure-backups gives "
+                        "per-file rows for a store. Veeam's and Google Workspace's own metadata "
+                        "checks run from level 1")
     p.add_argument("--measure-databases", dest="measure_databases", action="store_true",
                    help="read and hash the data files of recognised database folders (PostgreSQL, "
                         "MySQL/MariaDB, MongoDB, SQL Server) when they are quiet: unmodified for 90 "
@@ -108,6 +130,32 @@ def _scan_options(p: argparse.ArgumentParser) -> None:
     p.add_argument("--exclude", action="append", metavar="PATH",
                    help="folder or file not to scan, e.g. C:\\code\\filecat, or a whole root "
                         "(repeatable; matched as read or as recorded under an alias)")
+    g = p.add_mutually_exclusive_group()
+    g.add_argument("--agent", metavar="NAME",
+                   help="read the roots that [[agents]] NAME covers through that agent, even when "
+                        "another agent covers them more closely (by default a root is read through "
+                        "the agent whose alias or shares match it)")
+    g.add_argument("--no-agent", dest="no_agent", action="store_true",
+                   help="read every root over SMB, even when an agent covers it")
+    p.add_argument("--agent-fallback", dest="agent_fallback", action="store_true",
+                   help="a root whose agent cannot be reached is read over SMB instead of failing")
+    p.add_argument("--rollup", action="append", metavar="TYPE=MODE",
+                   help="override one [rollups] mode for this scan: backup, database, cache, synology, "
+                        "windows or redacted = automatic, manual or disabled (repeatable; redacted "
+                        "cannot be disabled), e.g. --rollup cache=automatic")
+    p.add_argument("--rollup-workers", dest="rollup_workers", type=int, metavar="N",
+                   help="threads that sum rolled-up folders on an SMB or local scan (default 4)")
+    p.add_argument("--new-redaction-key", dest="new_redaction_key", action="store_true",
+                   help="scan although redact.key is missing for the sticky redactions of a root: write a "
+                        "new key and leave the old entries to be matched by inode only")
+
+
+def _tls_flags(p: argparse.ArgumentParser) -> None:
+    p.add_argument("--tls", dest="tls_mode", choices=("self-signed", "acme", "off"),
+                   help="serve the viewer over HTTPS: a generated self-signed certificate, one from ACME "
+                        "(DNS-01, [server.tls.acme]), or off; overrides [server.tls] (docs/agent-server.md \"TLS\")")
+    p.add_argument("--tls-cert", dest="tls_cert", metavar="FILE", help="PEM certificate (chain) to serve; needs --tls-key")
+    p.add_argument("--tls-key", dest="tls_key", metavar="FILE", help="PEM private key for --tls-cert")
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -140,6 +188,20 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--disagree", action="store_true", help="list files whose glob and magic types disagree")
     p.add_argument("--rebuild", action="store_true", help="recompute stored agg_* tables (only --root's when given)")
     p.add_argument("--top", type=int, default=50, help="rows per table (0 = all)")
+
+    p = sub.add_parser("summaries", help="the stored summary of each root that the web viewer's Roots, Summary "
+                                          "and Graph pages show: refresh the ones whose root changed, or show "
+                                          "how current they are")
+    p.add_argument("action", nargs="?", choices=("refresh", "status"), default="refresh",
+                   help="refresh (default): read each root's records once and store its aggregates and treemap "
+                        "at depth 2; status: what is stored, when it was built and when the root last changed")
+    _storage(p)
+    p.add_argument("--root", action="append", help="only these roots (repeatable); they are refreshed "
+                                                    "whatever their state, unless --stale")
+    p.add_argument("--all", action="store_true", help="refresh every root, current or not")
+    p.add_argument("--stale", action="store_true", help="only roots changed since their summary was built "
+                                                         "or without one (the default without --root)")
+    p.add_argument("--json", action="store_true", help="status: one JSON object per root")
 
     p = sub.add_parser("show", help="print one record")
     p.add_argument("rel_path", metavar="REL_PATH")
@@ -241,8 +303,29 @@ def build_parser() -> argparse.ArgumentParser:
                    help="show sizes, compression and what would be rebuilt; change nothing")
     p.add_argument("--force", action="store_true", help="rebuild even while a scan is running")
 
-    p = sub.add_parser("roots", help="root index: last scan, scan in progress, newest file, last error")
+    p = sub.add_parser("roots", help="root index: last scan, scan in progress, newest file, last error; "
+                                     "case-check / case-merge for one share recorded as two roots; "
+                                     "remove for a root that should not be there")
+    p.add_argument("action", nargs="?", choices=("list", "case-check", "case-merge", "remove"), default="list",
+                   help="list (default); case-check: find roots that differ only in the case of "
+                        "server\\share and verify a sample of files; case-merge [OLD NEW]: move OLD "
+                        "into NEW (NEW's spelling is kept; with no names, every pair whose NAS "
+                        "spelling is known); remove ROOT: forget a root that has no records (a typo, "
+                        "a folder that did not exist), its index entry, summary, treemaps and resume "
+                        "state; refused while a scan runs or records remain unless --force")
+    p.add_argument("names", nargs="*", metavar="OLD NEW",
+                   help="case-merge: the roots to merge; remove: the root (exactly as `roots` lists it)")
     _storage(p)
+    p.add_argument("--sample", type=int, default=500, metavar="N",
+                   help="case-check / case-merge: files compared to confirm one share, 200..1000 "
+                        "(default 500)")
+    p.add_argument("--force", action="store_true",
+                   help="case-merge: merge although verification fails, a scan is running, or NEW "
+                        "is not the NAS's spelling; remove: delete the root's records too "
+                        "(asks first unless --yes)")
+    p.add_argument("--yes", action="store_true", help="remove --force: do not ask (required without a terminal)")
+    p.add_argument("--dry-run", dest="dry_run", action="store_true",
+                   help="case-merge: verify and report, move nothing")
     p.add_argument("--root", action="append", help="only these roots (repeatable)")
     p.add_argument("--json", action="store_true", help="one JSON object per root")
 
@@ -299,16 +382,148 @@ def build_parser() -> argparse.ArgumentParser:
                    help="as scan --alias: ROOT's records are read through PATH")
     p.add_argument("--json", action="store_true", help="one JSON cluster per line")
 
+    p = sub.add_parser("agents", help="filecat-agent hosts from filecat.toml: list them, or check "
+                                      "each one's certificate fingerprint, token and protocol")
+    asub = p.add_subparsers(dest="action", required=True)
+    a = asub.add_parser("list", help="the configured [[agents]], tokens masked")
+    a.add_argument("--json", action="store_true", help="one JSON object per agent")
+    a = asub.add_parser("test", help="connect to each agent: TLS, fingerprint, hello, token; "
+                                     "exit 1 if any fails")
+    a.add_argument("names", nargs="*", metavar="NAME", help="agents to test (default: all)")
+    a.add_argument("--timeout", type=float, default=5.0, help="seconds per connection and request")
+    a.add_argument("--json", action="store_true", help="one JSON object per agent")
+    a = asub.add_parser("status", help="hello and capabilities of each agent: version, certificate pin, "
+                                       "allowed roots, run ids, and whether its allowlist and deny list "
+                                       "are the ones this filecat expects")
+    a.add_argument("names", nargs="*", metavar="NAME", help="agents to check (default: all)")
+    a.add_argument("--timeout", type=float, default=5.0, help="seconds per connection and request")
+    a.add_argument("--json", action="store_true", help="one JSON object per agent")
+    a.add_argument("--strict", action="store_true",
+                   help="exit 1 on an allowlist/deny list mismatch or any warning too")
+    a = asub.add_parser("enroll", help="make a token and print the agent's .env lines and the [[agents]] "
+                                       "stanza; fetch the certificate fingerprint once (trust on first use)")
+    a.add_argument("name", metavar="NAME")
+    a.add_argument("--host", required=True, metavar="HOST[:PORT]", help="the agent's address (default port 9876)")
+    a.add_argument("--alias", dest="agent_alias", metavar="\\\\SERVER", help="the server name SMB scans record the shares under")
+    a.add_argument("--write", action="store_true",
+                   help="append the stanza to filecat.toml (refuses when NAME exists); the token is never written")
+    a.add_argument("--token", metavar="HEX|-",
+                   help="reuse this token (64 hex digits) instead of making one; it is not printed back. "
+                        "A command-line value stays in shell history and `ps`: `-` reads it from stdin")
+    a.add_argument("--cert-sha256", dest="cert_sha256", metavar="HEX",
+                   help="use this fingerprint instead of connecting to fetch it")
+    a.add_argument("--no-connect", dest="no_connect", action="store_true", help="do not connect to the agent")
+    a.add_argument("--timeout", type=float, default=5.0, help="seconds to connect")
+    a = asub.add_parser("fingerprint", help="print the certificate fingerprint the agent at HOST[:PORT] presents")
+    a.add_argument("target", metavar="HOST[:PORT]")
+    a.add_argument("--timeout", type=float, default=5.0, help="seconds to connect")
+
+    p = sub.add_parser("rollups", help="rollup groups: the rules and modes in force, what the catalog "
+                                       "holds, what a scan would suggest, and the sticky redactions")
+    rsub = p.add_subparsers(dest="action", required=True)
+    r = rsub.add_parser("rules", help="the built-in rules with each type's mode, and the user's rules "
+                                      "(counts, never patterns)")
+    r.add_argument("--json", action="store_true", help="one JSON object")
+    r = rsub.add_parser("list", help="the rollup records in the catalog: counts by tag and parent folder")
+    _storage(r)
+    r.add_argument("--root", action="append", help="only these roots (repeatable)")
+    r.add_argument("--json", action="store_true", help="one JSON object per root")
+    r = rsub.add_parser("suggest", help="folders a built-in rule of a type that is not automatic would "
+                                        "match, found by the last complete scan of each root")
+    _storage(r)
+    r.add_argument("--root", action="append", help="only these roots (repeatable)")
+    r.add_argument("--json", action="store_true", help="one JSON object per root")
+    r = rsub.add_parser("migrate", help="turn the rows an existing catalog holds for what rollups now "
+                                        "replace (stores' bulk folders, what the rules match) into rollups, "
+                                        "without a rescan; safe to stop and run again")
+    _storage(r)
+    r.add_argument("--tags", nargs="+", metavar="TAG", help="only these tags, e.g. [BACKUP] [REDACTED]")
+    r.add_argument("--root", action="append", help="only these roots (repeatable)")
+    r.add_argument("--dry-run", dest="dry_run", action="store_true",
+                   help="report, per target, the rows and bytes and the rollup it would write; change nothing")
+    r.add_argument("--batch", type=int, default=1000, metavar="N", help="rows per page and per delete (max 1000)")
+    r.add_argument("--checkpoint", metavar="FILE", help="where to report where a run stopped "
+                                                          "(default beside the catalog)")
+    r.add_argument("--progress-interval", dest="progress_interval", type=float, default=5.0, metavar="SECONDS")
+    r.add_argument("--rollup", action="append", metavar="TYPE=MODE",
+                   help="override one [rollups] mode for this run, e.g. --rollup backup=automatic")
+    r.add_argument("--new-redaction-key", dest="new_redaction_key", action="store_true",
+                   help="proceed although redact.key is missing for existing sticky redactions")
+    red = rsub.add_parser("redacted", help="sticky redactions: list them, or release one in two steps")
+    dsub = red.add_subparsers(dest="redacted_action", required=True)
+    r = dsub.add_parser("list", help="ids, status, folder they sit in and counts; never names or hashes")
+    _storage(r)
+    r.add_argument("--root", action="append", help="only these roots (repeatable)")
+    r.add_argument("--json", action="store_true", help="one JSON object per entry")
+    r = dsub.add_parser("release", help="step one: mark a redacted folder pending (still redacted)")
+    r.add_argument("path", metavar="PATH", help="the folder, as a UNC, local or agent path")
+    _storage(r)
+    r = dsub.add_parser("approve", help="step two, a separate command: forget a pending redaction, so "
+                                        "the next scan lists the folder unless a marker or rule matches")
+    r.add_argument("ref", metavar="PATH_OR_ID")
+    r.add_argument("--yes", action="store_true", help="do not ask (required without a terminal)")
+    _storage(r)
+
+    p = sub.add_parser("storage", help="the storage topology of the hosts: collect it through the agents, "
+                                       "show what is stored, check the links between hosts")
+    ssub = p.add_subparsers(dest="action", required=True)
+    s = ssub.add_parser("collect", help="read each [[agents]] host's raw storage sources, build the "
+                                        "topology in Python and store it in the catalog (a history row "
+                                        "when the structure changed); exit 1 if an agent fails")
+    s.add_argument("--agent", metavar="NAME", help="only this [[agents]] host")
+    s.add_argument("--platform", choices=("synology", "linux"),
+                   help="collector to use (default: detected from the host)")
+    s.add_argument("--measure-shares", dest="measure_shares", action="store_true",
+                   help="also sum each share with the agent for its used bytes (minutes on a big share)")
+    s.add_argument("--dry-run", dest="dry_run", action="store_true", help="collect and validate, store nothing")
+    s.add_argument("--json", action="store_true", help="one JSON object per agent")
+    _storage(s)
+    s = ssub.add_parser("show", help="the stored snapshots and the hosts written by hand; with a host, "
+                                     "its hierarchy from the disks up to the shares and LUNs")
+    s.add_argument("host", nargs="?", metavar="HOST")
+    s.add_argument("--json", action="store_true", help="JSON instead of text")
+    _storage(s)
+    s = ssub.add_parser("links", help="the [[storage.hosts]] and [[storage.links]], resolved over the stored "
+                                      "snapshots (or --snapshot files); exit 1 if a link is unresolved "
+                                      "or in conflict")
+    s.add_argument("--snapshot", action="append", metavar="FILE",
+                   help="a saved topology (or a reply holding one); repeat for each host; used instead "
+                        "of the stored snapshots")
+    s.add_argument("--json", action="store_true", help="one JSON object")
+    _storage(s)
+
+    p = sub.add_parser("server", help="the coordinator: checks the agents' health and runs the scheduled "
+                                      "[[server.jobs]] (scans, storage collects, store re-sums, summaries), records "
+                                      "every run in the catalog; --serve also runs the web viewer")
+    p.add_argument("action", nargs="?", choices=("set-password",),
+                   help="set-password: ask (twice, no echo) for the password of the web viewer's \"run now\" "
+                        "and print the hash line for filecat.toml")
+    p.add_argument("--write", action="store_true",
+                   help="set-password: write control_password_hash into the [server] table of filecat.toml")
+    _storage(p)
+    p.add_argument("--serve", nargs="?", const="", default=None, metavar="HOST:PORT",
+                   help="also run the web viewer in this process (default 127.0.0.1:8765, or [server] serve); "
+                        "it gets live /api/agents and /api/jobs")
+    _tls_flags(p)
+    p.add_argument("--once", action="store_true",
+                   help="run every job that is due now once, then exit (for Task Scheduler or cron)")
+    p.add_argument("--job", action="append", metavar="NAME",
+                   help="with --once: run this job whatever its schedule says (repeatable)")
+    p.add_argument("--dry-run", dest="dry_run", action="store_true",
+                   help="print the plan (agents, jobs, next due times) and exit; touches nothing")
+
     p = sub.add_parser("serve", help="web viewer: browse the summary and drill into the records")
     _storage(p)
     p.add_argument("--host", default="127.0.0.1", help="address to bind (default 127.0.0.1; no auth)")
     p.add_argument("--port", type=int, default=8765, help="port (default 8765, 0 = any free port)")
+    _tls_flags(p)
     p.add_argument("--open", action="store_true", help="open the page in the default browser")
     p.add_argument("--quiet", action="store_true", help="do not log each request")
     p.add_argument("--no-save", dest="no_save", action="store_true",
                    help="never write: do not save computed summaries to the catalog")
     p.add_argument("--graph-max-age", dest="graph_max_age", type=float, default=120, metavar="MINUTES",
-                   help="reuse a saved Graph treemap until it is this old (default 120)")
+                   help="reuse a saved Graph treemap of a folder or another depth until it is this old "
+                        "(default 120); a root's summary at depth 2 is rebuilt when the root changes, not by age")
 
     p = sub.add_parser("config", help="write, show and test filecat.toml (backends, DSNs, Ollama)")
     csub = p.add_subparsers(dest="action", required=True)
@@ -342,7 +557,18 @@ def main(argv: list[str] | None = None) -> int:
             stream.reconfigure(encoding="utf-8", errors="replace")
         except (AttributeError, ValueError):
             pass
-    args = build_parser().parse_args(argv)
+    # a bare --verify-backups means level 1; argparse would take the next word (a ROOT) as its level
+    argv = ["--verify-backups=1" if a == "--verify-backups" else a
+            for a in (sys.argv[1:] if argv is None else argv)]
+    parser = build_parser()
+    args, extra = parser.parse_known_args(argv)
+    # `roots case-merge --backend sqlite OLD NEW`: before Python 3.14 argparse binds the optional
+    # `names` positional to nothing when options come between it and the action word, and leaves
+    # OLD NEW over; hand those words back to it, for that one command
+    if extra and args.command == "roots" and not any(w.startswith("-") for w in extra):
+        args.names = list(getattr(args, "names", None) or []) + extra
+    elif extra:
+        parser.error("unrecognized arguments: " + " ".join(extra))
     if args.command != "config":
         from . import config
         try:
@@ -352,6 +578,9 @@ def main(argv: list[str] | None = None) -> int:
             return 2
     if getattr(args, "ollama", False) and not getattr(args, "model", None):
         print("filecat: --model is required with --ollama", file=sys.stderr)
+        return 2
+    if "rollup" in (getattr(args, "ollama_kinds", None) or []):
+        print("filecat: --ollama-kinds: a rollup is not a file; there is nothing to summarise", file=sys.stderr)
         return 2
     module = importlib.import_module(COMMANDS[args.command])
     try:

@@ -94,6 +94,40 @@ CREATE TABLE IF NOT EXISTS dropped (
 CREATE INDEX IF NOT EXISTS idx_dropped_at ON dropped(dropped_at);
 CREATE INDEX IF NOT EXISTS idx_dropped_root ON dropped(root_id, rel_path);
 
+CREATE TABLE IF NOT EXISTS redactions (
+    id TEXT PRIMARY KEY,
+    root_id TEXT NOT NULL,
+    path_hash TEXT NOT NULL,
+    document TEXT NOT NULL,
+    UNIQUE (root_id, path_hash)
+);
+
+CREATE TABLE IF NOT EXISTS storage_topology (
+    doc_key TEXT PRIMARY KEY,
+    host TEXT NOT NULL,
+    scanned_at TEXT,
+    document TEXT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS storage_topology_history (
+    doc_key TEXT PRIMARY KEY,
+    host TEXT NOT NULL,
+    scanned_at TEXT,
+    document TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_storage_history_host ON storage_topology_history(host, scanned_at);
+CREATE TABLE IF NOT EXISTS server_jobs (
+    doc_key TEXT PRIMARY KEY,
+    host TEXT NOT NULL,
+    scanned_at TEXT,
+    document TEXT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS server_state (
+    doc_key TEXT PRIMARY KEY,
+    host TEXT NOT NULL,
+    scanned_at TEXT,
+    document TEXT NOT NULL
+);
+
 CREATE TABLE IF NOT EXISTS agg_suffix (
     root_id TEXT NOT NULL, root TEXT NOT NULL,
     suffix TEXT, description TEXT, files INTEGER, bytes INTEGER, percent REAL,
@@ -186,6 +220,9 @@ class SqliteBackend(Backend):
         self.conn = sqlite3.connect(path, timeout=30.0)
         self.conn.execute("PRAGMA journal_mode=WAL")
         self.conn.execute("PRAGMA synchronous=NORMAL")
+        # a deleted record's text is overwritten, not left in a free page: a purged
+        # [REDACTED] name must not survive in the file (docs/rollups.md section 3.5)
+        self.conn.execute("PRAGMA secure_delete=ON")
         self.conn.create_function("dirkey", 2, _dirkey_sql, deterministic=True)
         self.conn.executescript(_SCHEMA)
         self.conn.execute(
@@ -285,6 +322,16 @@ class SqliteBackend(Backend):
             [*params, q["limit"], q["offset"]]).fetchall()
         return {"total": total, "bytes": nbytes, "rows": [json.loads(r[0]) for r in rows]}
 
+    def search_names(self, q: dict[str, Any]) -> dict[str, Any]:
+        from ..browse import SQLITE, sql_order, sql_where
+        self._flush_buffer()
+        rid = root_id(q["root"]) if q.get("root") is not None else None
+        where, params = sql_where(q, SQLITE, rid)
+        rows = self.conn.execute(
+            f"SELECT document FROM files{where} ORDER BY {sql_order(q)} LIMIT ? OFFSET ?",
+            [*params, q["limit"] + 1, q["offset"]]).fetchall()
+        return {"rows": [json.loads(r[0]) for r in rows[:q["limit"]]], "more": len(rows) > q["limit"]}
+
     def subtree(self, root: str, parent: str) -> list[dict[str, Any]]:
         from ..browse import SQLITE, sql_subtree
         self._flush_buffer()
@@ -312,6 +359,20 @@ class SqliteBackend(Backend):
         )
         self.conn.commit()
         self.delete_members(root, rel_path)
+
+    def delete_many(self, root: str, rel_paths: Iterable[str]) -> int:
+        """One transaction for the whole batch."""
+        self._flush_buffer()
+        rid, n = root_id(root), 0
+        cur = self.conn.cursor()
+        for part in chunks(list(rel_paths)):
+            marks = ", ".join("?" * len(part))
+            cur.execute(f"DELETE FROM files WHERE root_id=? AND rel_path IN ({marks})", (rid, *part))
+            n += cur.rowcount
+            cur.execute(f"DELETE FROM members WHERE root_id=? AND archive_rel_path IN ({marks})",
+                        (rid, *part))
+        self.conn.commit()
+        return n
 
     # --- archive members -------------------------------------------
     def put_members(self, root: str, rel_path: str, members: list) -> None:
@@ -404,6 +465,14 @@ class SqliteBackend(Backend):
             }
         return roots_out
 
+    def stored_totals(self, root: str | None = None) -> dict[str, Any]:
+        self._flush_buffer()
+        where = " WHERE root = ?" if root is not None else ""
+        params = (root,) if root is not None else ()
+        return {rname: {"total_files": f, "total_bytes": b, "unreadable": u, "depth": d, "built_at": at}
+                for rname, f, b, u, d, at in self.conn.execute(
+                    f"SELECT root, total_files, total_bytes, unreadable, depth, built_at FROM agg_meta{where}", params)}
+
     def _clear_aggregates(self, cur: sqlite3.Cursor, root: str | None) -> None:
         where = " WHERE root_id = ?" if root is not None else ""
         params = (root_id(root),) if root is not None else ()
@@ -440,20 +509,21 @@ class SqliteBackend(Backend):
 
         readable = "NOT (size IS NULL AND json_extract(document, '$.errors') IS NOT NULL)"
         if root is not None:
-            roots = cur.execute("SELECT DISTINCT root_id, root FROM files WHERE root_id=? AND kind != 'dir'",
+            roots = cur.execute("SELECT DISTINCT root_id, root FROM files WHERE root_id=? AND kind NOT IN ('dir', 'rollup')",
                                 (root_id(root),)).fetchall()
         else:
-            roots = cur.execute("SELECT DISTINCT root_id, root FROM files WHERE kind != 'dir'").fetchall()
+            roots = cur.execute("SELECT DISTINCT root_id, root FROM files "
+                                "WHERE kind NOT IN ('dir', 'rollup')").fetchall()
 
         for rid, rname in roots:
             total_bytes = cur.execute(
-                "SELECT COALESCE(SUM(size), 0) FROM files WHERE root_id=? AND kind != 'dir'", (rid,)
+                "SELECT COALESCE(SUM(size), 0) FROM files WHERE root_id=? AND kind NOT IN ('dir', 'rollup')", (rid,)
             ).fetchone()[0]
             total_files = cur.execute(
-                "SELECT COUNT(*) FROM files WHERE root_id=? AND kind != 'dir'", (rid,)
+                "SELECT COUNT(*) FROM files WHERE root_id=? AND kind NOT IN ('dir', 'rollup')", (rid,)
             ).fetchone()[0]
             unreadable = cur.execute(
-                "SELECT COUNT(*) FROM files WHERE root_id=? AND kind != 'dir' "
+                "SELECT COUNT(*) FROM files WHERE root_id=? AND kind NOT IN ('dir', 'rollup') "
                 "AND size IS NULL AND json_extract(document, '$.errors') IS NOT NULL", (rid,)
             ).fetchone()[0]
 
@@ -465,7 +535,7 @@ class SqliteBackend(Backend):
                        COUNT(*), COALESCE(SUM(size), 0),
                        CASE WHEN ? > 0 THEN COALESCE(SUM(size), 0) * 100.0 / ? ELSE 0.0 END
                 FROM files
-                WHERE root_id = ? AND kind != 'dir' AND {readable}
+                WHERE root_id = ? AND kind NOT IN ('dir', 'rollup') AND {readable}
                 GROUP BY CASE WHEN suffix IS NULL OR suffix='' THEN '(none)' ELSE suffix END
             """, (rid, rname, total_bytes, total_bytes, rid))
 
@@ -476,7 +546,7 @@ class SqliteBackend(Backend):
                        COUNT(*), COALESCE(SUM(size), 0),
                        CASE WHEN ? > 0 THEN COALESCE(SUM(size), 0) * 100.0 / ? ELSE 0.0 END
                 FROM files
-                WHERE root_id = ? AND kind != 'dir' AND {readable}
+                WHERE root_id = ? AND kind NOT IN ('dir', 'rollup') AND {readable}
                 GROUP BY COALESCE(NULLIF(mime, ''), kind, 'unknown')
             """, (rid, rname, total_bytes, total_bytes, rid))
 
@@ -487,7 +557,7 @@ class SqliteBackend(Backend):
                        COUNT(*), COALESCE(SUM(size), 0),
                        CASE WHEN ? > 0 THEN COALESCE(SUM(size), 0) * 100.0 / ? ELSE 0.0 END
                 FROM files
-                WHERE root_id = ? AND kind != 'dir' AND {readable}
+                WHERE root_id = ? AND kind NOT IN ('dir', 'rollup') AND {readable}
                 GROUP BY dirkey(rel_path, {int(depth)})
             """, (rid, rname, total_bytes, total_bytes, rid))
 
@@ -516,6 +586,10 @@ class SqliteBackend(Backend):
     def get_root_info(self, root: str) -> Document | None:
         row = self.conn.execute("SELECT document FROM roots WHERE root_id=?", (root_id(root),)).fetchone()
         return json.loads(row[0]) if row else None
+
+    def delete_root_info(self, root: str) -> None:
+        self.conn.execute("DELETE FROM roots WHERE root_id=?", (root_id(root),))
+        self.conn.commit()
 
     # --- stored treemaps ---------------------------------------------
     def put_treemap(self, meta: Document, data: Document | None = None) -> None:
@@ -588,6 +662,69 @@ class SqliteBackend(Backend):
         n = self.conn.execute("DELETE FROM dropped WHERE dropped_at < ?", (before,)).rowcount
         self.conn.commit()
         return n
+
+    def purge_dropped_paths(self, root: str, rel_paths: Iterable[str]) -> int:
+        rid, paths = root_id(root), list(rel_paths)
+        gone = [i for i, rel in self.conn.execute(
+            "SELECT id, rel_path FROM dropped WHERE root_id=?", (rid,))
+            if any(rel == p or rel.startswith(p + "/") for p in paths)]
+        for part in chunks(gone):
+            self.conn.execute(f"DELETE FROM dropped WHERE id IN ({', '.join('?' * len(part))})", part)
+        self.conn.commit()
+        return len(gone)
+
+    # --- sticky redactions ---------------------------------------------
+    def _redaction_rows(self, root: str | None = None) -> list[Document]:
+        return [json.loads(d) for (d,) in self.conn.execute("SELECT document FROM redactions")]
+
+    def _redaction_put(self, entry: Document) -> None:
+        self.conn.execute(
+            "INSERT INTO redactions(id, root_id, path_hash, document) VALUES (?, ?, ?, ?) "
+            "ON CONFLICT(id) DO UPDATE SET root_id=excluded.root_id, path_hash=excluded.path_hash, "
+            "document=excluded.document",
+            (entry["id"], entry["root_id"], entry["path_hash"], json.dumps(entry, ensure_ascii=False)))
+        self.conn.commit()
+
+    def _redaction_remove(self, entry: Document) -> None:
+        self.conn.execute("DELETE FROM redactions WHERE id=?", (entry["id"],))
+        self.conn.commit()
+
+    # --- storage topology ------------------------------------------------
+    def _topology_rows(self, store: str) -> list[Document]:
+        assert store in self.DOC_STORES
+        return [json.loads(d) for (d,) in self.conn.execute(f"SELECT document FROM {store}")]
+
+    def _topology_put(self, store: str, doc: Document) -> None:
+        assert store in self.DOC_STORES
+        self.conn.execute(
+            f"INSERT INTO {store}(doc_key, host, scanned_at, document) VALUES (?, ?, ?, ?) "
+            "ON CONFLICT(doc_key) DO UPDATE SET host=excluded.host, scanned_at=excluded.scanned_at, "
+            "document=excluded.document",
+            (doc["key"], doc["host"], doc.get("scanned_at"), json.dumps(doc, ensure_ascii=False)))
+        self.conn.commit()
+
+    def _topology_claim(self, store: str, doc: Document, holder: str, now: str, takeover: bool) -> bool:
+        """One upsert whose DO UPDATE only fires for our own or (takeover) an expired row; SQLite
+        serialises writers, so of two racing servers exactly one changes a row."""
+        assert store in self.DOC_STORES
+        cond = f"json_extract({store}.document, '$.holder') = ?"
+        args: list[Any] = [holder]
+        if takeover:
+            cond += f" OR json_extract({store}.document, '$.expires_at') < ?"
+            args.append(now)
+        cur = self.conn.execute(
+            f"INSERT INTO {store}(doc_key, host, scanned_at, document) VALUES (?, ?, ?, ?) "
+            "ON CONFLICT(doc_key) DO UPDATE SET host=excluded.host, scanned_at=excluded.scanned_at, "
+            f"document=excluded.document WHERE {cond}",
+            (doc["key"], doc["host"], doc.get("scanned_at"), json.dumps(doc, ensure_ascii=False), *args))
+        won = cur.rowcount == 1
+        self.conn.commit()
+        return won
+
+    def _topology_remove(self, store: str, key: str) -> None:
+        assert store in self.DOC_STORES
+        self.conn.execute(f"DELETE FROM {store} WHERE doc_key=?", (key,))
+        self.conn.commit()
 
     # --- installed programs -------------------------------------------
     def put_program(self, record: Document) -> None:
@@ -711,6 +848,14 @@ class SqliteBackend(Backend):
         return n
 
     # --- lifecycle -------------------------------------------------
+    def scrub(self) -> None:
+        """After a purge: rebuild the file, so that no free page, index key or
+        write-ahead frame still holds a purged name."""
+        self._flush_buffer()
+        self.conn.commit()
+        self.conn.execute("VACUUM")
+        self.conn.execute("PRAGMA wal_checkpoint(TRUNCATE)").fetchall()
+
     def flush(self) -> None:
         self._flush_buffer()
 

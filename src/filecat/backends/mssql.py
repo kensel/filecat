@@ -123,6 +123,47 @@ _TABLES = {
             PRIMARY KEY (root_id, archive_hash, idx)
         )
     """,
+    "redactions": """
+        CREATE TABLE redactions (
+            id VARCHAR(16) PRIMARY KEY,
+            root_id VARCHAR(32) NOT NULL,
+            path_hash CHAR(32) NOT NULL,
+            document NVARCHAR(MAX) NOT NULL,
+            UNIQUE (root_id, path_hash)
+        )
+    """,
+    "storage_topology": """
+        CREATE TABLE storage_topology (
+            doc_key NVARCHAR(400) PRIMARY KEY,
+            host NVARCHAR(400) NOT NULL,
+            scanned_at VARCHAR(40),
+            document NVARCHAR(MAX) NOT NULL
+        )
+    """,
+    "server_jobs": """
+        CREATE TABLE server_jobs (
+            doc_key NVARCHAR(400) PRIMARY KEY,
+            host NVARCHAR(400) NOT NULL,
+            scanned_at VARCHAR(40),
+            document NVARCHAR(MAX) NOT NULL
+        )
+    """,
+    "server_state": """
+        CREATE TABLE server_state (
+            doc_key NVARCHAR(400) PRIMARY KEY,
+            host NVARCHAR(400) NOT NULL,
+            scanned_at VARCHAR(40),
+            document NVARCHAR(MAX) NOT NULL
+        )
+    """,
+    "storage_topology_history": """
+        CREATE TABLE storage_topology_history (
+            doc_key NVARCHAR(400) PRIMARY KEY,
+            host NVARCHAR(400) NOT NULL,
+            scanned_at VARCHAR(40),
+            document NVARCHAR(MAX) NOT NULL
+        )
+    """,
     "samples": """
         CREATE TABLE samples (
             sample_id VARCHAR(64) PRIMARY KEY,
@@ -333,6 +374,17 @@ class MssqlBackend(Backend):
         rows = [json.loads(r[0]) for r in cur.fetchall()]
         return {"total": int(total), "bytes": int(nbytes), "rows": rows}
 
+    def search_names(self, q: dict[str, Any]) -> dict[str, Any]:
+        from ..browse import MSSQL, sql_order, sql_where
+        self.flush()
+        rid = root_id(q["root"]) if q.get("root") is not None else None
+        where, params = sql_where(q, MSSQL, rid)
+        cur = self.conn.cursor()
+        cur.execute(f"SELECT document FROM files{where} ORDER BY {sql_order(q, MSSQL)} "
+                    "OFFSET ? ROWS FETCH NEXT ? ROWS ONLY", [*params, q["offset"], q["limit"] + 1])
+        rows = [json.loads(r[0]) for r in cur.fetchall()]
+        return {"rows": rows[:q["limit"]], "more": len(rows) > q["limit"]}
+
     def subtree(self, root: str, parent: str) -> list[dict[str, Any]]:
         from ..browse import MSSQL, sql_subtree
         self.flush()
@@ -363,6 +415,18 @@ class MssqlBackend(Backend):
                     (root_id(root), _rel_hash(rel_path)))
         self.conn.commit()
         self.delete_members(root, rel_path)
+
+    def delete_many(self, root: str, rel_paths: Iterable[str]) -> int:
+        self.flush()
+        rid, n = root_id(root), 0
+        cur = self.conn.cursor()
+        for part in chunks([_rel_hash(p) for p in rel_paths]):
+            marks = ",".join("?" * len(part))
+            cur.execute(f"DELETE FROM files WHERE root_id=? AND rel_hash IN ({marks})", (rid, *part))
+            n += cur.rowcount
+            cur.execute(f"DELETE FROM members WHERE root_id=? AND archive_hash IN ({marks})", (rid, *part))
+        self.conn.commit()
+        return n
 
     # --- archive members -------------------------------------------
     def put_members(self, root: str, rel_path: str, members: list) -> None:
@@ -462,6 +526,16 @@ class MssqlBackend(Backend):
             }
         return roots_out
 
+    def stored_totals(self, root: str | None = None) -> dict[str, Any]:
+        self.flush()
+        where = " WHERE root = ?" if root is not None else ""
+        params = (root,) if root is not None else ()
+        cur = self.conn.cursor()
+        cur.execute("SELECT root, total_files, total_bytes, unreadable, depth, built_at "
+                    f"FROM agg_meta{where}", params)
+        return {rname: {"total_files": int(f), "total_bytes": int(b), "unreadable": int(u), "depth": d,
+                        "built_at": at} for rname, f, b, u, d, at in cur.fetchall()}
+
     def replace_aggregates(self, entries: dict[str, Any], depth: int, built_at: str,
                            root: str | None) -> None:
         where = " WHERE root_id = ?" if root is not None else ""
@@ -518,6 +592,97 @@ class MssqlBackend(Backend):
         self.conn.commit()
         return n
 
+    def purge_dropped_paths(self, root: str, rel_paths: Iterable[str]) -> int:
+        rid, paths = root_id(root), list(rel_paths)
+        cur = self.conn.cursor()
+        cur.execute("SELECT id, rel_path FROM dropped WHERE root_id=?", (rid,))
+        gone = [i for i, rel in cur.fetchall() if any(rel == p or rel.startswith(p + "/") for p in paths)]
+        for part in chunks(gone):
+            cur.execute(f"DELETE FROM dropped WHERE id IN ({','.join('?' * len(part))})", part)
+        self.conn.commit()
+        return len(gone)
+
+    # --- sticky redactions ---------------------------------------------
+    def _redaction_rows(self, root: str | None = None) -> list[Document]:
+        cur = self.conn.cursor()
+        cur.execute("SELECT document FROM redactions")
+        return [json.loads(d) for (d,) in cur.fetchall()]
+
+    def _redaction_put(self, entry: Document) -> None:
+        doc = json.dumps(entry, ensure_ascii=False)
+        cur = self.conn.cursor()
+        cur.execute(
+            "MERGE redactions AS target USING (SELECT ? AS id) AS src ON target.id = src.id "
+            "WHEN MATCHED THEN UPDATE SET root_id=?, path_hash=?, document=? "
+            "WHEN NOT MATCHED THEN INSERT (id, root_id, path_hash, document) VALUES (?, ?, ?, ?);",
+            (entry["id"], entry["root_id"], entry["path_hash"], doc,
+             entry["id"], entry["root_id"], entry["path_hash"], doc))
+        self.conn.commit()
+
+    def _redaction_remove(self, entry: Document) -> None:
+        cur = self.conn.cursor()
+        cur.execute("DELETE FROM redactions WHERE id=?", (entry["id"],))
+        self.conn.commit()
+
+    # --- storage topology ------------------------------------------------
+    def _topology_rows(self, store: str) -> list[Document]:
+        assert store in self.DOC_STORES
+        cur = self.conn.cursor()
+        cur.execute(f"SELECT document FROM {store}")
+        return [json.loads(d) for (d,) in cur.fetchall()]
+
+    def _topology_put(self, store: str, doc: Document) -> None:
+        assert store in self.DOC_STORES
+        text = json.dumps(doc, ensure_ascii=False)
+        cur = self.conn.cursor()
+        cur.execute(
+            f"MERGE {store} AS target USING (SELECT ? AS doc_key) AS src ON target.doc_key = src.doc_key "
+            "WHEN MATCHED THEN UPDATE SET host=?, scanned_at=?, document=? "
+            "WHEN NOT MATCHED THEN INSERT (doc_key, host, scanned_at, document) VALUES (?, ?, ?, ?);",
+            (doc["key"], doc["host"], doc.get("scanned_at"), text,
+             doc["key"], doc["host"], doc.get("scanned_at"), text))
+        self.conn.commit()
+
+    def _topology_claim(self, store: str, doc: Document, holder: str, now: str, takeover: bool) -> bool:
+        """A conditional UPDATE (row lock), then INSERT when nothing matched: the primary key makes
+        a racing second insert fail with an integrity error, which means "lost"."""
+        import pyodbc
+        assert store in self.DOC_STORES
+        text = json.dumps(doc, ensure_ascii=False)
+        cond = "JSON_VALUE(document, '$.holder') = ?"
+        args: list[Any] = [holder]
+        if takeover:
+            cond += " OR JSON_VALUE(document, '$.expires_at') < ?"
+            args.append(now)
+        for attempt in range(8):
+            cur = self.conn.cursor()
+            try:
+                cur.execute(f"UPDATE {store} SET host=?, scanned_at=?, document=? WHERE doc_key=? AND ({cond})",
+                            (doc["host"], doc.get("scanned_at"), text, doc["key"], *args))
+                won = cur.rowcount == 1
+                if not won:
+                    cur.execute(f"INSERT INTO {store} (doc_key, host, scanned_at, document) VALUES (?, ?, ?, ?)",
+                                (doc["key"], doc["host"], doc.get("scanned_at"), text))
+                    won = True
+                self.conn.commit()
+                return won
+            except pyodbc.IntegrityError:               # the row exists and is held by someone else
+                self.conn.rollback()
+                return False
+            except pyodbc.Error as exc:
+                self.conn.rollback()
+                # 40001 / 1205: chosen as the deadlock victim; the retry reads what the winner committed
+                if not (exc.args and (exc.args[0] == "40001" or "(1205)" in str(exc))):
+                    raise
+                time.sleep(0.01 * (attempt + 1))
+        return False                # still deadlocked: not won; the caller tries again on its next beat
+
+    def _topology_remove(self, store: str, key: str) -> None:
+        assert store in self.DOC_STORES
+        cur = self.conn.cursor()
+        cur.execute(f"DELETE FROM {store} WHERE doc_key=?", (key,))
+        self.conn.commit()
+
     # --- root index ----------------------------------------------------
     def put_root_info(self, info: Document) -> None:
         doc = json.dumps(info, ensure_ascii=False)
@@ -544,6 +709,11 @@ class MssqlBackend(Backend):
         cur.execute("SELECT document FROM roots WHERE root_id=?", (root_id(root),))
         row = cur.fetchone()
         return json.loads(row[0]) if row else None
+
+    def delete_root_info(self, root: str) -> None:
+        cur = self.conn.cursor()
+        cur.execute("DELETE FROM roots WHERE root_id=?", (root_id(root),))
+        self.conn.commit()
 
     # --- stored treemaps ---------------------------------------------
     def put_treemap(self, meta: Document, data: Document | None = None) -> None:

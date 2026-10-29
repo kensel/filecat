@@ -9,7 +9,7 @@ All Rust source files are stored in the rust-agent subfolder inside this researc
 - **rust-agent/Cargo.toml**: Crate manifest and static musl cross-compilation targets.
 - **rust-agent/main.rs**: NDJSON-over-TLS RPC server, lstat directory walker, rollup group aggregator, byte-exact sha256 / sha256_partial hashing engine, and random-access read_range handler.
 - **rust-agent/tls.rs**: Pure-Rust TLS certificate generator (rcgen + rustls) and SHA-256 fingerprint calculator.
-- **rust-agent/synology_storage.rs**: Synology volume, SAN Manager (BLUN / BLUN_THICK), and Virtual Machine Manager (VDISK_BLUN / @Repository) topology parser.
+- ~~rust-agent/synology_storage.rs~~ (deleted): the Synology topology parser moved to Python (`filecat.topology_collect`); the agent reads raw files and runs allowlisted commands only, see [agent-protocol.md](../agent-protocol.md) and [agent-allowlist.md](../agent-allowlist.md).
 
 ## 2. Why a Static Rust Agent Beats SMB Scanning
 

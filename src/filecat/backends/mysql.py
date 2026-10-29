@@ -136,6 +136,48 @@ _SCHEMA = [
     ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
     """,
     """
+    CREATE TABLE IF NOT EXISTS redactions (
+        id VARCHAR(16) PRIMARY KEY,
+        root_id VARCHAR(32) NOT NULL,
+        path_hash CHAR(32) NOT NULL,
+        document JSON NOT NULL,
+        UNIQUE KEY uq_redactions (root_id, path_hash)
+    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
+    """,
+    """
+    CREATE TABLE IF NOT EXISTS storage_topology (
+        doc_key VARCHAR(191) PRIMARY KEY,
+        host VARCHAR(191) NOT NULL,
+        scanned_at VARCHAR(40),
+        document JSON NOT NULL
+    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
+    """,
+    """
+    CREATE TABLE IF NOT EXISTS storage_topology_history (
+        doc_key VARCHAR(191) PRIMARY KEY,
+        host VARCHAR(191) NOT NULL,
+        scanned_at VARCHAR(40),
+        document JSON NOT NULL,
+        KEY idx_storage_history_host (host, scanned_at)
+    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
+    """,
+    """
+    CREATE TABLE IF NOT EXISTS server_jobs (
+        doc_key VARCHAR(191) PRIMARY KEY,
+        host VARCHAR(191) NOT NULL,
+        scanned_at VARCHAR(40),
+        document JSON NOT NULL
+    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
+    """,
+    """
+    CREATE TABLE IF NOT EXISTS server_state (
+        doc_key VARCHAR(191) PRIMARY KEY,
+        host VARCHAR(191) NOT NULL,
+        scanned_at VARCHAR(40),
+        document JSON NOT NULL
+    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
+    """,
+    """
     CREATE TABLE IF NOT EXISTS samples (
         sample_id VARCHAR(64) PRIMARY KEY,
         document JSON NOT NULL
@@ -346,6 +388,17 @@ class MysqlBackend(Backend):
             rows = [json.loads(r[0]) for r in cur.fetchall()]
         return {"total": int(total), "bytes": int(nbytes), "rows": rows}
 
+    def search_names(self, q: dict[str, Any]) -> dict[str, Any]:
+        from ..browse import MYSQL, sql_order, sql_where
+        self.flush()
+        rid = root_id(q["root"]) if q.get("root") is not None else None
+        where, params = sql_where(q, MYSQL, rid)
+        with self.conn.cursor() as cur:
+            cur.execute(f"SELECT document FROM files{where} ORDER BY {sql_order(q, MYSQL)} "
+                        "LIMIT %s OFFSET %s", [*params, q["limit"] + 1, q["offset"]])
+            rows = [json.loads(r[0]) for r in cur.fetchall()]
+        return {"rows": rows[:q["limit"]], "more": len(rows) > q["limit"]}
+
     def subtree(self, root: str, parent: str) -> list[dict[str, Any]]:
         from ..browse import MYSQL, sql_subtree
         self.flush()
@@ -375,6 +428,19 @@ class MysqlBackend(Backend):
                         (root_id(root), _rel_hash(rel_path)))
         self.conn.commit()
         self.delete_members(root, rel_path)
+
+    def delete_many(self, root: str, rel_paths: Iterable[str]) -> int:
+        self.flush()
+        rid, n = root_id(root), 0
+        with self.conn.cursor() as cur:
+            for part in chunks([_rel_hash(p) for p in rel_paths]):
+                marks = ",".join(["%s"] * len(part))
+                cur.execute(f"DELETE FROM files WHERE root_id=%s AND rel_hash IN ({marks})", (rid, *part))
+                n += cur.rowcount
+                cur.execute(f"DELETE FROM members WHERE root_id=%s AND archive_hash IN ({marks})",
+                            (rid, *part))
+        self.conn.commit()
+        return n
 
     # --- archive members -------------------------------------------
     def put_members(self, root: str, rel_path: str, members: list) -> None:
@@ -468,6 +534,16 @@ class MysqlBackend(Backend):
                 }
         return roots_out
 
+    def stored_totals(self, root: str | None = None) -> dict[str, Any]:
+        self.flush()
+        where = " WHERE root = %s" if root is not None else ""
+        params = (root,) if root is not None else ()
+        with self.conn.cursor() as cur:
+            cur.execute("SELECT root, total_files, total_bytes, unreadable, depth, built_at "
+                        f"FROM agg_meta{where}", params)
+            return {rname: {"total_files": int(f), "total_bytes": int(b), "unreadable": int(u), "depth": d,
+                            "built_at": at} for rname, f, b, u, d, at in cur.fetchall()}
+
     def replace_aggregates(self, entries: dict[str, Any], depth: int, built_at: str,
                            root: str | None) -> None:
         where = " WHERE root_id = %s" if root is not None else ""
@@ -525,6 +601,101 @@ class MysqlBackend(Backend):
         self.conn.commit()
         return n
 
+    def purge_dropped_paths(self, root: str, rel_paths: Iterable[str]) -> int:
+        rid, paths = root_id(root), list(rel_paths)
+        with self.conn.cursor() as cur:
+            cur.execute("SELECT id, rel_path FROM dropped WHERE root_id=%s", (rid,))
+            gone = [i for i, rel in cur.fetchall()
+                    if any(rel == p or rel.startswith(p + "/") for p in paths)]
+            for part in chunks(gone):
+                cur.execute(f"DELETE FROM dropped WHERE id IN ({','.join(['%s'] * len(part))})", part)
+        self.conn.commit()
+        return len(gone)
+
+    # --- sticky redactions ---------------------------------------------
+    def _redaction_rows(self, root: str | None = None) -> list[Document]:
+        with self.conn.cursor() as cur:
+            cur.execute("SELECT document FROM redactions")
+            rows = cur.fetchall()
+        self.conn.commit()
+        return [json.loads(d) if isinstance(d, (str, bytes)) else d for (d,) in rows]
+
+    def _redaction_put(self, entry: Document) -> None:
+        with self.conn.cursor() as cur:
+            cur.execute(
+                "INSERT INTO redactions (id, root_id, path_hash, document) VALUES (%s, %s, %s, %s) "
+                "ON DUPLICATE KEY UPDATE root_id=VALUES(root_id), path_hash=VALUES(path_hash), "
+                "document=VALUES(document)",
+                (entry["id"], entry["root_id"], entry["path_hash"],
+                 json.dumps(entry, ensure_ascii=False)))
+        self.conn.commit()
+
+    def _redaction_remove(self, entry: Document) -> None:
+        with self.conn.cursor() as cur:
+            cur.execute("DELETE FROM redactions WHERE id=%s", (entry["id"],))
+        self.conn.commit()
+
+    # --- storage topology ------------------------------------------------
+    def _topology_rows(self, store: str) -> list[Document]:
+        assert store in self.DOC_STORES
+        self.conn.commit()          # end any open transaction: REPEATABLE READ would show an old snapshot
+        with self.conn.cursor() as cur:
+            cur.execute(f"SELECT document FROM {store}")
+            rows = cur.fetchall()
+        self.conn.commit()
+        return [json.loads(d) if isinstance(d, (str, bytes)) else d for (d,) in rows]
+
+    def _topology_put(self, store: str, doc: Document) -> None:
+        assert store in self.DOC_STORES
+        with self.conn.cursor() as cur:
+            cur.execute(
+                f"INSERT INTO {store} (doc_key, host, scanned_at, document) VALUES (%s, %s, %s, %s) "
+                "ON DUPLICATE KEY UPDATE host=VALUES(host), scanned_at=VALUES(scanned_at), "
+                "document=VALUES(document)",
+                (doc["key"], doc["host"], doc.get("scanned_at"), json.dumps(doc, ensure_ascii=False)))
+        self.conn.commit()
+
+    def _topology_claim(self, store: str, doc: Document, holder: str, now: str, takeover: bool) -> bool:
+        """One INSERT ... ON DUPLICATE KEY UPDATE whose assignments keep the stored values unless the
+        lease is ours or expired, then a read of who holds the key: the holder is us exactly when the
+        claim won. A deadlock (1213) or lock wait timeout (1205) between racing claims rolls the
+        statement back and is retried: the retry reads what the winner committed."""
+        import pymysql
+        assert store in self.DOC_STORES
+        text = json.dumps(doc, ensure_ascii=False)
+        cond = "JSON_UNQUOTE(JSON_EXTRACT(document, '$.holder')) = %s"
+        cargs: list[Any] = [holder]
+        if takeover:
+            cond += " OR JSON_UNQUOTE(JSON_EXTRACT(document, '$.expires_at')) < %s"
+            cargs.append(now)
+        sql = (f"INSERT INTO {store} (doc_key, host, scanned_at, document) VALUES (%s, %s, %s, %s) "
+               f"ON DUPLICATE KEY UPDATE host=IF({cond}, VALUES(host), host), "
+               f"scanned_at=IF({cond}, VALUES(scanned_at), scanned_at), "
+               f"document=IF({cond}, VALUES(document), document)")      # document last: the others read it
+        args = [doc["key"], doc["host"], doc.get("scanned_at"), text, *cargs, *cargs, *cargs]
+        for attempt in range(8):
+            try:
+                with self.conn.cursor() as cur:
+                    self.conn.commit()          # a fresh transaction: the read below must not be an old snapshot
+                    cur.execute(sql, args)
+                    cur.execute(f"SELECT JSON_UNQUOTE(JSON_EXTRACT(document, '$.holder')) FROM {store} "
+                                "WHERE doc_key=%s", (doc["key"],))
+                    row = cur.fetchone()
+                self.conn.commit()
+                return bool(row and row[0] == holder)
+            except pymysql.err.OperationalError as exc:
+                self.conn.rollback()
+                if not exc.args or exc.args[0] not in (1213, 1205):
+                    raise
+                time.sleep(0.01 * (attempt + 1) * (1 + (hash((holder, attempt)) % 5)))
+        return False                    # still deadlocked: not won; the caller tries again on its next beat
+
+    def _topology_remove(self, store: str, key: str) -> None:
+        assert store in self.DOC_STORES
+        with self.conn.cursor() as cur:
+            cur.execute(f"DELETE FROM {store} WHERE doc_key=%s", (key,))
+        self.conn.commit()
+
     # --- root index ----------------------------------------------------
     def put_root_info(self, info: Document) -> None:
         with self.conn.cursor() as cur:
@@ -552,6 +723,11 @@ class MysqlBackend(Backend):
             return None
         doc = row[0]
         return json.loads(doc) if isinstance(doc, (str, bytes)) else doc
+
+    def delete_root_info(self, root: str) -> None:
+        with self.conn.cursor() as cur:
+            cur.execute("DELETE FROM roots WHERE root_id=%s", (root_id(root),))
+        self.conn.commit()
 
     # --- stored treemaps ---------------------------------------------
     def put_treemap(self, meta: Document, data: Document | None = None) -> None:

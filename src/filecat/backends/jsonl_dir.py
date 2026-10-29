@@ -10,7 +10,9 @@ the single-file layout of jsonl.py. Inside DIR:
     <slug>.<root_id>.roots.json      its root-index entry (scan history)
     <slug>.<root_id>.dropped.jsonl   its dropped records (files that vanished)
     <slug>.<root_id>.treemaps.json   its Graph view snapshots (filecat serve)
+    <slug>.<root_id>.redactions.json its sticky redactions (no names)
     programs.jsonl                   installed-programs records
+    storage.json                     storage topology snapshots and their history
 
 Each root's three files are exactly a single-file jsonl catalog holding
 one root, managed by a JsonlBackend, so the format (one document per line,
@@ -35,7 +37,7 @@ from typing import Any, Iterable, Iterator
 
 from ..record import root_id
 from .base import Backend, Document
-from .jsonl import JsonlBackend, put_program, read_programs
+from .jsonl import JsonlBackend, put_program, read_programs, read_topology, write_topology
 
 # <slug>.<16 hex root_id>.jsonl -- the members file (".members.jsonl"),
 # summaries (".json") and temp files ("...jsonl.tmpNNN") do not match.
@@ -63,6 +65,7 @@ class JsonlDirBackend(Backend):
         self.path = Path(path)
         self.path.mkdir(parents=True, exist_ok=True)
         self.programs_path = self.path / "programs.jsonl"
+        self.storage_path = self.path / "storage.json"
         self._parts: dict[str, JsonlBackend] = {}  # root_id -> that root's catalog
 
     # --- per-root files ------------------------------------------------
@@ -111,6 +114,10 @@ class JsonlDirBackend(Backend):
         part = self._part(root, create=False)
         if part:
             part.delete(root, rel_path)
+
+    def delete_many(self, root: str, rel_paths: Iterable[str]) -> int:
+        part = self._part(root, create=False)
+        return part.delete_many(root, rel_paths) if part else 0
 
     def roots(self) -> list[str]:
         roots = set()
@@ -179,6 +186,10 @@ class JsonlDirBackend(Backend):
     def purge_dropped(self, before: str) -> int:
         return sum(p.purge_dropped(before) for p in self._all_parts())
 
+    def purge_dropped_paths(self, root: str, rel_paths: Iterable[str]) -> int:
+        part = self._part(root, create=False)
+        return part.purge_dropped_paths(root, rel_paths) if part else 0
+
     # --- root index ------------------------------------------------
     def put_root_info(self, info: Document) -> None:
         self._part(info["root"], create=True).put_root_info(info)
@@ -189,6 +200,11 @@ class JsonlDirBackend(Backend):
     def get_root_info(self, root: str) -> Document | None:
         part = self._part(root, create=False)
         return next(iter(part.list_root_info()), None) if part else None
+
+    def delete_root_info(self, root: str) -> None:
+        part = self._part(root, create=False)
+        if part:
+            part.delete_root_info(root)
 
     # --- stored treemaps ---------------------------------------------
     def put_treemap(self, meta: Document, data: Document | None = None) -> None:
@@ -208,6 +224,35 @@ class JsonlDirBackend(Backend):
     def delete_treemap(self, treemap_id: str) -> None:
         for part in self._all_parts():
             part.delete_treemap(treemap_id)
+
+    # --- sticky redactions ---------------------------------------------
+    def _redaction_rows(self, root: str | None = None) -> list[Document]:
+        if root is not None:
+            part = self._part(root, create=False)
+            return part._redaction_rows() if part else []
+        return [r for p in self._all_parts() for r in p._redaction_rows()]
+
+    def _redaction_put(self, entry: Document) -> None:
+        self._part(entry["root"], create=True)._redaction_put(entry)
+
+    def _redaction_remove(self, entry: Document) -> None:
+        part = self._part(entry["root"], create=False)
+        if part:
+            part._redaction_remove(entry)
+
+    # --- storage topology: not per root, one file in the directory -----------
+    def _topology_rows(self, store: str) -> list[Document]:
+        return list(read_topology(self.storage_path).get(store, {}).values())
+
+    def _topology_put(self, store: str, doc: Document) -> None:
+        data = read_topology(self.storage_path)
+        data.setdefault(store, {})[doc["key"]] = doc
+        write_topology(self.storage_path, data)
+
+    def _topology_remove(self, store: str, key: str) -> None:
+        data = read_topology(self.storage_path)
+        if data.get(store, {}).pop(key, None) is not None:
+            write_topology(self.storage_path, data)
 
     # --- installed programs -------------------------------------------
     def put_program(self, record: Document) -> None:

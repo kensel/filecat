@@ -1,0 +1,3 @@
+tests/data/** -text
+agent/** text eol=lf
+tests/data/rollup_match_vectors.json text eol=lf

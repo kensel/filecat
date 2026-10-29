@@ -59,7 +59,8 @@ from collections import defaultdict
 from concurrent.futures import ThreadPoolExecutor
 from typing import Any, Callable, Iterable
 
-from .util import iso, sqlite_rows
+from .storefs import LOCAL, StoreFS, long_path
+from .util import iso
 
 DATABASES = "@ActiveBackupGSuite-Databases"
 FOREVER = 4294967295            # end_time of a version still current in Google
@@ -79,13 +80,7 @@ def _b64(text: str) -> str:
     return base64.b64encode(text.encode("utf-8")).decode("ascii")
 
 
-def _long(path: str) -> str:
-    """The \\\\?\\ form of a Windows path, which opens past MAX_PATH (260
-    characters): event folders cut into 64-character names often are longer."""
-    if os.name != "nt" or path.startswith("\\\\?\\"):
-        return path
-    path = os.path.abspath(path)
-    return "\\\\?\\UNC\\" + path[2:] if path.startswith("\\\\") else "\\\\?\\" + path
+_long = long_path
 
 
 def _relist(path: str, sub: str = "") -> dict[str, int]:
@@ -103,14 +98,14 @@ def _relist(path: str, sub: str = "") -> dict[str, int]:
     return out
 
 
-def _os_listing(path: str) -> dict[str, int]:
+def _os_listing(path: str, fs: StoreFS = LOCAL) -> dict[str, int]:
     """The listing when the walker did not pass its own."""
-    return _relist(path)
+    return _relist(path) if fs.local else fs.sizes(path)
 
 
-def _md5(path: str) -> str:
+def _md5(path: str, fs: StoreFS = LOCAL) -> str:
     h = hashlib.md5()
-    with open(_long(path), "rb") as f:
+    with fs.open(fs.lpath(path), "rb") as f:
         while chunk := f.read(_READ):
             h.update(chunk)
     return h.hexdigest()
@@ -200,13 +195,13 @@ class _GoogleWorkspace:
 
     def summarize(self, path: str, names: set[str],
                   listing: Callable[[], dict[str, int]] | None = None,
-                  verify: bool = False) -> dict[str, Any]:
-        db = os.path.join(path, DATABASES)
+                  verify: bool = False, fs: StoreFS = LOCAL) -> dict[str, Any]:
+        db = fs.join(path, DATABASES)
         problems: list[str] = []
 
         def rows(rel: str, sql: str) -> list[dict[str, Any]] | None:
             try:
-                return sqlite_rows(os.path.join(db, rel), sql)
+                return fs.sqlite_rows(fs.join(db, rel), sql)
             except Exception as e:
                 problems.append(f"{rel} unreadable: {type(e).__name__}: {e}")
                 return None
@@ -247,14 +242,14 @@ class _GoogleWorkspace:
             svc = SERVICES.get(r["service_type"], str(r["service_type"]))
             last_run[r["user_id"]][svc] = r
 
-        on_disk = listing() if listing else _os_listing(path)
+        on_disk = listing() if listing else _os_listing(path, fs)
         repos = _index(on_disk)
         users, totals = [], defaultdict(int)
         known_repos = set()
         for a in sorted(accounts, key=lambda a: a["email"].lower()):
             known_repos.add(a["user_repo_name"])
             u, up = self._user(db, a, repos.get(a["user_repo_name"]), last_run.get(a["user_id"], {}), path,
-                               verify)
+                               verify, fs)
             users.append(u)
             problems += [f"{a['email']}: {p}" for p in up]
             for k, v in u["files"].items():
@@ -285,7 +280,7 @@ class _GoogleWorkspace:
         return out
 
     def _user(self, db: str, a: dict[str, Any], repo: _Repo | None, runs: dict[str, dict[str, Any]],
-              path: str, verify: bool) -> tuple[dict[str, Any], list[str]]:
+              path: str, verify: bool, fs: StoreFS = LOCAL) -> tuple[dict[str, Any], list[str]]:
         problems: list[str] = []
         u: dict[str, Any] = {
             "email": a["email"], "name": a["name"], "folder": a["user_repo_name"], "status": a["account_status"],
@@ -300,16 +295,16 @@ class _GoogleWorkspace:
             if a["local_used_storage"]:
                 problems.append(f"folder {a['user_repo_name']} is missing")
 
-        udb = os.path.join(db, a["user_id"])
+        udb = fs.join(db, a["user_id"])
         for svc, (rel, sql) in _ITEM_DB.items():
             try:
-                rows = sqlite_rows(os.path.join(udb, rel), sql) if os.path.isfile(os.path.join(udb, rel)) else []
+                rows = fs.sqlite_rows(fs.join(udb, rel), sql) if fs.isfile(fs.join(udb, rel)) else []
             except Exception as e:
                 problems.append(f"{rel} unreadable: {type(e).__name__}: {e}")
                 continue
             folder = a["user_repo_name"]
             missing, incomplete, unlisted, later = self._compare(svc, rows, repo.items[svc])
-            if os.name == "nt" and any(self._too_long(path, folder, svc, _key(svc, r)) for r in missing):
+            if fs.local and os.name == "nt" and any(self._too_long(path, folder, svc, _key(svc, r)) for r in missing):
                 # a walk without long paths cannot open folders past 260
                 # characters: list this service again before calling them missing
                 again = _index(_relist(path, f"{folder}/{svc}")).get(folder)
@@ -366,13 +361,13 @@ class _GoogleWorkspace:
         if a["account_status"] == 1:
             for svc, r in sorted(runs.items()):
                 if r["execution_status"] != 1 and svc in u["enabled"]:
-                    text = self._log_text(db, r)
+                    text = self._log_text(db, r, fs)
                     problems.append(f"{svc}: last run {iso(r['end_run_time'])} "
                                     f"{STATUS.get(r['execution_status'], 'status ' + str(r['execution_status']))}"
                                     + (f": {text}" if text else f" (error {r['error_code']})")
                                     + (f"; last success {iso(r['last_ok'])}" if r["last_ok"] else "; never succeeded"))
         if verify:
-            u["verified"] = self._verify(path, a["user_repo_name"], repo, problems)
+            u["verified"] = self._verify(path, a["user_repo_name"], repo, problems, fs)
         return u, problems
 
     @staticmethod
@@ -406,12 +401,12 @@ class _GoogleWorkspace:
         return len(path) + len(folder) + len(svc) + len(key) + len(key) // 64 + 22 >= 260
 
     @staticmethod
-    def _log_text(db: str, run: dict[str, Any]) -> str | None:
+    def _log_text(db: str, run: dict[str, Any], fs: StoreFS = LOCAL) -> str | None:
         rel, table = _LOGS.get(run["service_type"], (None, None))
         if not rel:
             return None
         try:
-            got = sqlite_rows(os.path.join(db, rel),
+            got = fs.sqlite_rows(fs.join(db, rel),
                               f"SELECT descript_string FROM {table} WHERE task_execution_id = ? AND user_id = ?"
                               " ORDER BY row_id DESC LIMIT 1", (run["task_execution_id"], run["user_id"]))
         except Exception:
@@ -419,7 +414,8 @@ class _GoogleWorkspace:
         return got[0]["descript_string"] if got else None
 
     @staticmethod
-    def _verify(path: str, folder: str, repo: _Repo, problems: list[str]) -> dict[str, int]:
+    def _verify(path: str, folder: str, repo: _Repo, problems: list[str],
+                fs: StoreFS = LOCAL) -> dict[str, int]:
         """Read every META and .metadata the listing holds and check the
         fragments and versions they name: present, of that size, same MD5."""
         jobs: list[tuple[str, str, int]] = []      # (kind, inner path of the sidecar, version)
@@ -439,9 +435,9 @@ class _GoogleWorkspace:
 
         def check(job: tuple[str, str, int]) -> list[str]:
             kind, inner, ver = job
-            full = _long(os.path.join(path, *inner.split("/")))
+            full = fs.lpath(fs.join(path, *inner.split("/")))
             try:
-                with open(full, "r", encoding="utf-8") as f:
+                with fs.open(full, "r", encoding="utf-8") as f:
                     meta = json.load(f)
             except (OSError, ValueError) as e:
                 return [f"{inner[cut:]}: unreadable ({type(e).__name__})"]
@@ -462,7 +458,7 @@ class _GoogleWorkspace:
                     continue
                 if digest:
                     try:
-                        if _md5(os.path.join(path, *target.split("/"))) != digest.lower():
+                        if _md5(fs.join(path, *target.split("/")), fs) != digest.lower():
                             bad.append(f"{target[cut:]}: MD5 differs")
                     except OSError as e:
                         bad.append(f"{target[cut:]}: unreadable ({type(e).__name__})")

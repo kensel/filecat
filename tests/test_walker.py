@@ -371,10 +371,10 @@ def test_listing_read_ahead_failure_is_recorded_like_before(fixture_dir, monkeyp
     (fixture_dir / "locked").mkdir()
     real = walker_mod._list_dir
 
-    def list_dir(path):
+    def list_dir(path, markers=None):
         if path.endswith("locked"):
             raise PermissionError(f"access denied: {path}")
-        return real(path)
+        return real(path, markers)
 
     monkeypatch.setattr(walker_mod, "_list_dir", list_dir)
     backend = MemoryBackend()

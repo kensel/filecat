@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import copy
+import threading
 from typing import Any, Iterable, Iterator
 
 from ..record import root_id
@@ -24,6 +25,9 @@ class MemoryBackend(Backend):
         self.samples: dict[str, Document] = {}
         self.member_sets: dict[str, Document] = {}
         self.set_rows: dict[str, list[Document]] = {}
+        self._redactions: dict[str, Document] = {}
+        self._topology: dict[str, dict[str, Document]] = {s: {} for s in self.DOC_STORES}
+        self._claim_lock = threading.Lock()
 
     def put(self, document: Document) -> None:
         self.docs[(document["root_id"], document["rel_path"])] = copy.deepcopy(document)
@@ -80,6 +84,9 @@ class MemoryBackend(Backend):
     def list_root_info(self) -> Iterator[Document]:
         yield from (copy.deepcopy(i) for i in list(self.root_info.values()))
 
+    def delete_root_info(self, root: str) -> None:
+        self.root_info.pop(root_id(root), None)
+
     def put_treemap(self, meta: Document, data: Document | None = None) -> None:
         if data is None:
             if meta["id"] in self.treemaps:
@@ -109,6 +116,39 @@ class MemoryBackend(Backend):
         n = len(self.dropped)
         self.dropped = [d for d in self.dropped if d["dropped_at"] >= before]
         return n - len(self.dropped)
+
+    def purge_dropped_paths(self, root: str, rel_paths: Iterable[str]) -> int:
+        rid, paths = root_id(root), list(rel_paths)
+        keep = [d for d in self.dropped if d.get("root_id") != rid
+                or not any(d["rel_path"] == p or d["rel_path"].startswith(p + "/") for p in paths)]
+        n = len(self.dropped) - len(keep)
+        self.dropped = keep
+        return n
+
+    def _redaction_rows(self, root: str | None = None) -> list[Document]:
+        return [copy.deepcopy(r) for r in self._redactions.values()]
+
+    def _redaction_put(self, entry: Document) -> None:
+        self._redactions[entry["id"]] = copy.deepcopy(entry)
+
+    def _redaction_remove(self, entry: Document) -> None:
+        self._redactions.pop(entry["id"], None)
+
+    def _topology_rows(self, store: str) -> list[Document]:
+        return [copy.deepcopy(d) for d in self._topology[store].values()]
+
+    def _topology_put(self, store: str, doc: Document) -> None:
+        self._topology[store][doc["key"]] = copy.deepcopy(doc)
+
+    def _topology_remove(self, store: str, key: str) -> None:
+        self._topology[store].pop(key, None)
+
+    def _topology_claim(self, store: str, doc: Document, holder: str, now: str, takeover: bool) -> bool:
+        with self._claim_lock:
+            if not self.claimable(self._topology[store].get(doc["key"]), holder, now, takeover):
+                return False
+            self._topology[store][doc["key"]] = copy.deepcopy(doc)
+            return True
 
     def put_program(self, record: Document) -> None:
         self.programs[record["program_id"]] = copy.deepcopy(record)

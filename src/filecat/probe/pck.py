@@ -16,6 +16,7 @@ import struct
 from typing import Any
 
 from ..options import ScanOptions
+from ..fsource import fopen
 from . import members as members_mod
 from . import x3
 
@@ -54,7 +55,7 @@ def probe_godot(path: str, head: bytes, options: ScanOptions, result: Any) -> No
     result.container = "unknown"
     result.probe["pck_format"] = "godot"
     result.probe["format"] = "godot-pck"
-    with open(path, "rb") as f:
+    with fopen(path, "rb") as f:
         r = _Reader(f)
         r.take(4)
         pack_version = r.u32()

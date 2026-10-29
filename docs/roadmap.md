@@ -114,11 +114,73 @@ server keeps store detection, manifest verification, probing and Ollama.
 - `filecat-agent` (note 02, draft sources in
   [research/rust-agent](research/rust-agent/)): NDJSON-over-TLS daemon,
   self-generated certificate with fingerprint pinning, bearer token;
-  static musl builds for x86_64 and armv7, built in CI.
+  static musl builds for x86_64, armv7 and aarch64 (build.sh), built in CI.
 - Python side: `[[agents]]` in `filecat.toml`, `AgentClient`,
   `RemoteFileProxy` (bounded `read_range` for ZIP directories, disk images
   and PE headers), POSIX-to-UNC path mapping so records and treemap pins
   line up with SMB scans.
+  - [x] The wire protocol, version 1, written down as the contract the agent
+    is brought into line with: [agent-protocol.md](agent-protocol.md), with
+    `hello`, error codes, `measure` that reproduces `hashing.py` (including
+    the 100 ns mtime of an SMB scan) and `sum_subtree`.
+  - [x] `[[agents]]` in `filecat.toml` (token via `${NAME}`, share map,
+    exclude and rollup groups), shown by `filecat config show`, with the
+    agent that covers a UNC path found by longest match.
+  - [x] `AgentClient` (TLS with certificate pinning, thread-safe, reconnects
+    once), `RemoteFileProxy` / `open_remote` (works under `zipfile`) and
+    `ShareMap` (POSIX and UNC paths both ways), tested against a fake agent
+    in Python.
+  - [x] `filecat agents list` and `filecat agents test`.
+  - [x] `filecat agents enroll` (token, `.env` lines, `[[agents]]` stanza with `${FILECAT_<NAME>_TOKEN}`,
+    trust-on-first-use fingerprint, `--write`), `agents fingerprint` and `agents status [--strict]`
+    (capabilities, and the allowlist/deny hashes against `src/filecat/data/agent_expected.json`,
+    kept in step by a Python test and a cargo test); design in [agent-server.md](agent-server.md).
+  - [x] `filecat server`: the coordinator (agent health, `[[server.jobs]]` scans, storage collects and
+    store re-sums on a schedule, job history and a lease in the catalog, `--once`, `--serve` with
+    `/api/agents` and `/api/jobs`); [agent-server.md](agent-server.md).
+  - [x] Agent 0.2.1: connections carry a label, `activity` lists who is doing what (no paths), the agent
+    logs a status line per busy connection every 10 minutes; `filecat agents status` shows the other
+    sessions; `filecat server` defers a job while another client works on its agent (`max_jobs`) and
+    logs and stores each running job's progress every `progress_interval`
+    ([agent-protocol.md](agent-protocol.md#activity), [agent-server.md](agent-server.md)).
+  - [x] `filecat scan` and `scan-everything` read a UNC root through the
+    agent that covers it: listing, stat, measuring and probing from an
+    agent-backed source (`fsource.py`, [scanning.md](scanning.md#6-scanning-through-filecat-agent)),
+    records that line up with an SMB scan, rescans that skip unchanged
+    files, `--agent`, `--no-agent` and `--agent-fallback`. Allocated size,
+    inode, device and link count are recorded (optional fields); hard links
+    are totalled once per scan. Still to do: backup-store and database
+    manifests (and `sum_subtree` rollups) through the agent, rollup groups,
+    `enrich` through the agent, hard-link dedup in the stored aggregates.
+  - [x] One share, two spellings: roots that differ only in the case of
+    `server\share` (an SMB scan typed in lower case, the NAS's own spelling
+    from an agent) are found, checked on a 200 to 1000 file sample, and merged
+    under the NAS's spelling (`filecat roots case-check` / `case-merge`); new
+    scans record the NAS spelling through an agent and reuse the catalog's over
+    SMB ([scanning.md](scanning.md#one-share-two-spellings)).
+  - [x] `filecat-agent` itself changed to match the protocol page: phase 1, the Linux and DSM
+    agent, is built (`agent/`, static musl x86_64, all protocol 1 commands but `wmi`, the
+    allowlist as a compiled table; cargo tests plus the Python agent tests run against the
+    binary, [agent/README.md](../agent/README.md); deployment: [agent-deploy.md](agent-deploy.md)).
+  - [x] The armv7 (`armv7-unknown-linux-musleabihf`) and aarch64 (`aarch64-unknown-linux-musl`)
+    builds: `agent/build.sh armv7|aarch64|all`, fully static, cargo tests pass under qemu-user
+    ([agent/README.md](../agent/README.md)). Not yet run on a real ARM NAS.
+  - [x] `filecat server` follow-ups: jobs wait for their first slot (`run_on_start` opts out), an
+    atomic lease per backend, a **Run now** button behind a password login with rate limiting
+    ([agent-server.md](agent-server.md#run-now-and-the-login-it-needs)), `agents enroll --token`.
+  - [x] TLS for the web viewer, served by filecat itself (LAN only, nothing exposed): `[server.tls]`
+    and `--tls`/`--tls-cert`/`--tls-key` on `serve` and `server`; a configured certificate, a
+    generated self-signed one (fingerprint printed, regenerated before expiry or when the names
+    change), or ACME with DNS-01 only (Cloudflare or an `exec` hook), renewed daily and reloaded
+    into the live context ([agent-server.md](agent-server.md#tls)). Optional extra `tls`.
+  - [x] GitHub Actions for the agent: clippy, cargo tests (including the allowlist/deny hash check),
+    the three static musl builds with a static-link check, checksums and artifacts, the ARM tests
+    under qemu on pushes to main, and the Python agent tests against the real binary on Linux.
+    Still to do: `cargo fmt` (the sources are not rustfmt-formatted: about 180 hunks, reformat in
+    one commit and then add `cargo fmt --check`); make the conformance job gating once its first
+    GitHub runs show which of the Linux failures seen in a root WSL checkout are real.
+  - [ ] The Windows agent (phase 2: `wmi`, cloud placeholders, `ProductType` roots, Windows
+    deny paths).
 - RPCs: list a directory (lstat, inode, `st_blocks`), measure (hash plus
   the 8 KiB head), read a range, sum a subtree. The agent records
   allocated size and deduplicates hardlinks by inode.
@@ -128,14 +190,168 @@ server keeps store detection, manifest verification, probing and Ollama.
 - Rollup groups (note 01): `[REDACTED]`, `[CACHE]`, `[SYNOLOGY]`,
   `[BACKUP]` synthetic `kind: "rollup"` records that never carry the names
   beneath them; `enrich` never opens them.
+  - [x] Design: [rollups.md](rollups.md). Everything opt-in with a mode per
+    type (`automatic`, `manual`, `disabled`; default `manual`, `[REDACTED]`
+    always on), suggestions for built-in rules that are not automatic, record
+    model and readers, one ordered rule list (`[[rollups.rule]]`; agent,
+    share and local path forms converted with `ShareMap`; case-sensitive below
+    the share; `**`; first match; `keep`) that means the same through an agent
+    and over SMB, marker files (`.filecat-redacted`, ...) found when the
+    parent is listed, sticky `[REDACTED]` kept as keyed hashes and `(dev, ino)`
+    with a two-step release, `[REDACTED]` guarantees on every output channel
+    and the purge of already-cataloged names, store rollups (`[BACKUP]`,
+    `[DATABASE]`) with verify levels and a migration command, the old default
+    skips as `[WINDOWS]` only under `windows = "automatic"`, reporting,
+    re-sum and fingerprint change detection, progress/deadline/cancel for long
+    sums, the agent requirements (also in
+    [agent-protocol.md](agent-protocol.md)), the Python work plan.
+  - [x] Python stage A: `rollup.py` (matcher, path forms, `sum_tree`), modes
+    and config, markers, `redaction.py` and the `redactions` store, walker,
+    `fsource`/`agent_client`, the records and the readers that must skip
+    them, the privacy test, the extended fake agent, and
+    `filecat rollups rules|list|suggest|redacted list|release|approve`.
+  - [x] Python stage B: backup and database store rollups (local, SMB and
+    agent, with the manifest fingerprint and `store_resum`), verify levels 0
+    and 1 (`--verify-backups[=N]`, 2 and 3 refused), `filecat rollups
+    migrate`, the `summary`, `roots`, `show` and `dupes` reporting, the
+    treemap tiles and pins, and the web inspector card.
+  - [x] Manifests of backup and database stores read through the agent
+    (`StoreFS`, `backup/storefs.py`), replacing `probe.store_note` (kept only
+    for a SQLite manifest over `rollups.manifest_cap`).
+  - [ ] Rust agent: rules matcher with the shared vectors, markers, the
+    `redaction` HMAC and `folded`, rollups and `suggest` in `list_dir`,
+    `sum_subtree` options, progress/deadline/`cancel`.
 - Synology storage topology (note 03): `iscsi_lun.conf` and `@Repository`
   parsing, SAN LUNs, VMM disks and image-library templates, physical usage
   from `st_blocks` (never the 512 GiB `ROD` size).
+  - [x] Design: one generic hierarchy (disk, group, pool, volume, share, lun,
+    vdisk) with Synology first and Windows, Proxmox and TrueNAS as later
+    derivatives of the same layout, ids from platform-native keys, shares
+    that feed `ShareMap`: [storage-topology.md](storage-topology.md), the
+    `storage_topology` reply in [agent-protocol.md](agent-protocol.md), and
+    `filecat.topology` (dataclasses, validation, `share_entries`) with
+    fixtures in `tests/data`.
+  - [x] Links between hosts: disks carry `backing`/`match`, snapshots of
+    many hosts resolve into chains (TrueNAS pool -> Proxmox vdisk -> PVEC ->
+    Synology LUN; Virtual DSM -> VMM vdisk), `vm` nodes and Proxmox cluster
+    scope, a physical total that counts each backed disk once
+    (`resolve_links`, `physical_summary`, the `lab_*` fixtures).
+  - [x] Verified on nas3: a LUN's NAA id derives from `vpd_unit_serial`
+    (`topology.naa_from_unit_serial`), matched exactly; the LUN ACL is
+    `iscsi_lun_acl.conf` (`initiators: [{iqn, authority}]`, `default.acl` as the
+    default).
+  - [x] Storage written by hand: `[[storage.hosts]]` (hosts with no agent, e.g.
+    truenas2) and `[[storage.links]]` (`host/node-id` or `host/type:name`) in
+    filecat.toml, which win over automatic matches and report conflicts;
+    `filecat storage links [--snapshot FILE ...]` checks them. Shaped for a
+    later catalog store edited in the web viewer (config entries read-only).
+  - [ ] Still to verify: what the ACL `authority` values mean (0 and 3 seen),
+    and whether Virtual DSM sees its VMM vdisk uuid. Then Proxmox and TrueNAS
+    readers, so truenas2's hand-written entry can go.
+  - [x] Topology moves to Python: the agent keeps no parser. Protocol additions
+    `read_file`, `statfs`, `run` (hardcoded allowlist, validated argument kinds),
+    `capabilities`, `wmi` (Windows); `storage_topology` removed from the agent and
+    `synology_storage.rs` deleted ([agent-protocol.md](agent-protocol.md)). Python
+    collectors over a source fetcher (`topology_collect`: Synology DSM 7, generic
+    Linux; `RecordedSource` tests on `tests/data/raw/nas3`); the `storage_topology`
+    and `storage_topology_history` stores in every backend; `filecat storage
+    collect|show|links`.
+  - [ ] **Review [agent-allowlist.md](agent-allowlist.md) before the Rust agent is
+    built** (60 entries, 10 for v0.2.0; argument kinds, `midclt`, `pvesh`,
+    `allowlist_sha256`). Decided: the read scope (allowed roots from the agent host's
+    environment or `.env`, plus a hardcoded deny list; agent-protocol.md), and a Windows
+    agent with WMI for a Windows file server (the classes are in agent-allowlist.md
+    section 13, the collector plan in storage-topology.md section 3b; not written).
+  - [x] DSM facts settled on nas3 and NAS2: shares in `/etc/samba/smb.share.conf` (loaded by DSM's Samba without an `include`); iSCSI files in
+    `/usr/syno/etc` (LUNs placed by `rootpath`; targets and mappings with iqn, enabled and the
+    LUN number, credentials never read out); no `lsblk` or `findmnt`; smartmontools 6.5
+    (`smartctl_version`, text form); disks `sataN` or `sdX`; DSM's own
+    `/etc/space/space_history_*.xml` is the authority for pools, RAID levels, member disks and
+    SSD cache. Still open: `-d sat`, ext4 LUN backing directories, ACL `authority`.
+  - [ ] Then: the Rust agent with `read_file`, `statfs`, `run`, `capabilities`;
+    derived share entries merged into `ShareMap` (config wins); Proxmox and
+    TrueNAS collectors.
+  - [x] Fast Roots and Graph pages on a catalog of tens of millions of records: one stored summary per
+    root (aggregates and the depth-2 treemap from one pass over its records, `filecat summaries`), fresh
+    until the root changes (a change stamp in the root index, not an age), rebuilt in the background by
+    the viewer, at the end of a scan that changed something, and by the `summaries` server job; the
+    Roots page reads only the root index and the stored totals; Server-Timing, gzip and ETag
+    ([web viewer](../README.md#web-viewer), [agent-server.md](agent-server.md#stored-summaries-the-roots-summary-and-graph-pages)).
+    Not done: a SQL/pipeline version of the single pass for the server backends (it reads the
+    projected records once, in Python), and a per-folder stamp so a deeper view could be kept too.
+  - [x] The viewer drill-down: the **Topology** page (`GET /api/topology`):
+    per host a collapsible tree from the disks to shares, LUNs and VM disks
+    with capacity bars, shares joined to their catalog roots, links between
+    hosts with a jump to the guest server, roots "not in topology".
 - A `storage_pools` store and the storage hierarchy in the web viewer
-  (note 04): pool and volume capacity bars, SAN/VM tiles behind a toggle,
-  inspector cards for backup stores, block storage and rollups, and a jump
-  from a VM disk to its guest server's shares.
+  (note 04):
+  - [x] pool and volume capacity bars, a jump from a LUN or VM disk to its
+    guest server (the Topology page, over `storage_topology`; no separate
+    `storage_pools` store was needed)
+  - [x] inspector cards for rollups (backup stores' cards read the store
+    record)
+  - [ ] SAN/VM tiles behind a toggle in the Graph treemap
+  - [ ] inspector cards for block storage; a jump from a VM disk to its
+    guest server's *shares* (the page jumps to the host's section)
 - Embedded metadata: creator, title, subject, revision and application
   version from Office and OpenDocument files (the `metadata` parts listed
   in `compound_formats.toml`), EXIF/XMP from images, and tags from audio
   and video.
+
+## v0.2.x: rollup follow-ups
+
+After the v0.2.0 rollups (stages A and B of [rollups.md](rollups.md)):
+
+- [x] Web viewer: an **audit screen** with the counts of `filecat rollups list`
+  (by tag and parent folder, `[REDACTED]` as counts only): the **Rollups**
+  page, `GET /api/rollups`.
+- Web viewer: **suggestions**, the folders a built-in rule would match for a
+  type that is not automatic, with "add this rollup" writing the rule.
+- Web viewer: **redaction approval**, the screen behind
+  `filecat rollups redacted release|approve`, showing what becomes visible.
+- Backup verify **level 2** (every file the manifest names exists with its
+  size, through a new agent `check_files` command that returns counts and the
+  few failing manifest ids, no per-file rows) and **level 3** (hashes as the
+  backup application checks them, per-format recipes).
+- A per-store level: `[[rollups.backup_store]] path = '...' verify = 2`.
+- Optional rollup measures: size by extension, age buckets, largest matched
+  children (never for private rules).
+
+## v0.2.5: file-name search
+
+Use the catalog as a file-name search across every host, as voidtools
+Everything does for one PC (e.g. `eve*.exe` on all NAS shares at once).
+
+- Searches: prefix and wildcard (`eve*.exe`), substring (`*setup*`),
+  extension, size and date filters, root and host filters.
+- Not a MongoDB `$text` index. It matches whole words only, splits names at
+  dots and dashes, and cannot serve `eve*` or `*setup*`.
+- A lowercased name field (`name_lc`) with an ordinary index for
+  case-insensitive prefixes; with the `suffix` index it answers `eve*.exe`
+  without a collection scan. Same on the SQL backends.
+- Substring: a trigram index where the backend has one (PostgreSQL
+  `pg_trgm`), or an in-memory name table in `filecat server`, built from the
+  catalog and kept current from scan deltas (a few GB for ~22M names).
+- [x] A search page, initial version (`GET /api/search`, the viewer's Search
+  view; `Backend.search_names`). Everything-style query: `eve*.exe`, plain
+  substring, `ext:`, `size:`, `after:`/`before:`, `kind:`, `root:`, `host:`.
+  Name matching only (`LIKE`/`ILIKE` on the `name` column, escaped; a
+  case-insensitive anchored or unanchored regex in MongoDB; a scan in memory and
+  JSONL), a page plus a "more" flag instead of a total, the elapsed time shown,
+  behind the login when `login_required_for_view` is set. Tests run on memory,
+  SQLite and both JSONL backends, and on the server backends when their DSNs are
+  set. Not done yet:
+  - the `name_lc` column and index (and its migration) and the trigram index, so
+    that `eve*` and `*setup*` stop being a scan of every record: today a search
+    reads the whole catalog unless another filter narrows it;
+  - the in-memory name table of `filecat server` kept current from scan deltas;
+  - searching archive members, and ranking (results are
+    sorted by name, size, date, kind or path);
+  - regular expressions, `dm:`-style relative dates and `content:`;
+  - case folding beyond ASCII on SQLite (`LIKE`), and a test run of the SQL
+    Server, MySQL, PostgreSQL and MongoDB paths in CI (they are only exercised
+    with `FILECAT_TEST_*` DSNs).
+- `[REDACTED]` and rollup members never appear in results; a rolled-up folder
+  is found by its own name only.
+- Permissions: one password sees every host's names. Per-user filtering waits
+  for RBAC (multi-user setups).

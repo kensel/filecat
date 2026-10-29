@@ -1,0 +1,32 @@
+[package]
+name = "filecat-agent"
+version = "0.2.1"
+edition = "2021"
+rust-version = "1.75"
+description = "filecat-agent: read-only file system and storage agent for filecat (protocol 1, docs/agent-protocol.md)"
+publish = false
+
+[[bin]]
+name = "filecat-agent"
+path = "src/main.rs"
+
+[dependencies]
+serde_json = "1"
+sha2 = "0.10"
+hmac = "0.12"
+base64 = "0.22"
+libc = "0.2"
+rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12"] }
+rcgen = "0.13"
+
+[features]
+# Conformance builds only: every request path is taken below FILECAT_AGENT_TEST_ROOT, so the
+# Python agent tests (which serve a temp directory as "/") run against this binary. The release
+# binary is built without it and has no such code path.
+test-root = []
+
+[profile.release]
+opt-level = 3
+lto = true
+codegen-units = 1
+strip = true

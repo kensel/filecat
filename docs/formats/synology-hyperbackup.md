@@ -623,8 +623,9 @@ See hbkit's FORMAT.md for the details.
 
 | level | reads | finds | filecat |
 |---|---|---|---|
-| listing vs Guard | the directory listing only | missing files, wrong sizes | default (`scan`) |
-| Guard CRC32 | every data file once, sequentially | bit rot or truncation of any data file | `scan --verify-backups` |
+| listing vs Guard | the directory listing only | missing files, wrong sizes | default (`scan`, pool listed) |
+| pool totals vs Guard | the sum of a rolled-up `Pool/` (no listing of it) | missing bytes or files in the pool as a whole | `scan --rollup backup=automatic --verify-backups=1` |
+| Guard CRC32 | every data file once, sequentially | bit rot or truncation of any data file | verify level 2 (v0.2.x); not available in v0.2.0 |
 | bucket index CRC + chunk MD5 | every chunk, decompressed | a bad chunk, and which files use it | not implemented; it is what a restore does (6.4) |
 
 `--measure-backups` is different. It hashes the data files for the catalog

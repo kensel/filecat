@@ -1,0 +1,165 @@
+{
+ "ok": true,
+ "topology": {
+  "version": 1,
+  "platform": "proxmox",
+  "host": {
+   "name": "pve2",
+   "cluster": "pvec",
+   "os": "Proxmox VE 8.3"
+  },
+  "collected_at": "2026-10-22T09:02:00Z",
+  "nodes": [
+   {
+    "id": "disk:PVE2NVME0001",
+    "type": "disk",
+    "parent": null,
+    "name": "nvme0n1",
+    "health": "ok",
+    "size_bytes": 1000204886016,
+    "serial": "PVE2NVME0001",
+    "model": "Samsung 980 PRO 1TB",
+    "media": "nvme"
+   },
+   {
+    "id": "vol:3b9f6a02-c1d7-4e58-b240-8a7e5d913c60",
+    "type": "volume",
+    "parent": null,
+    "name": "local-btrfs",
+    "health": "ok",
+    "size_bytes": 998000000000,
+    "used_bytes": 142000000000,
+    "free_bytes": 856000000000,
+    "members": [
+     {
+      "disk": "disk:PVE2NVME0001",
+      "role": "data"
+     }
+    ],
+    "mount": "/mnt/pve/local-btrfs",
+    "fs_type": "btrfs",
+    "platform": {
+     "proxmox": {
+      "storage": "local-btrfs",
+      "type": "btrfs",
+      "shared": false
+     }
+    }
+   },
+   {
+    "id": "vm:155",
+    "type": "vm",
+    "parent": null,
+    "name": "truenas2",
+    "health": "ok",
+    "platform": {
+     "proxmox": {
+      "vmid": 155,
+      "node": "pve2",
+      "machine": "q35",
+      "bios": "ovmf",
+      "cores": 4,
+      "memory_mib": 16005,
+      "status": "running"
+     }
+    }
+   },
+   {
+    "id": "vdisk:155:scsi0",
+    "type": "vdisk",
+    "parent": "vol:3b9f6a02-c1d7-4e58-b240-8a7e5d913c60",
+    "name": "vm-155-disk-1",
+    "size_bytes": 34359738368,
+    "allocated_bytes": 9700000000,
+    "thin": true,
+    "kind": "raw",
+    "path": "/mnt/pve/local-btrfs/images/155/vm-155-disk-1.raw",
+    "vm": {
+     "id": "vm:155",
+     "name": "truenas2"
+    },
+    "attached": true,
+    "match": [
+     "vmserial:TRUENASDISK001"
+    ],
+    "platform": {
+     "proxmox": {
+      "slot": "scsi0",
+      "volid": "local-btrfs:155/vm-155-disk-1.raw",
+      "iothread": true,
+      "boot": true
+     }
+    }
+   },
+   {
+    "id": "vdisk:155:efidisk0",
+    "type": "vdisk",
+    "parent": "vol:3b9f6a02-c1d7-4e58-b240-8a7e5d913c60",
+    "name": "vm-155-disk-0",
+    "size_bytes": 540672,
+    "allocated_bytes": 540672,
+    "kind": "raw",
+    "path": "/mnt/pve/local-btrfs/images/155/vm-155-disk-0.raw",
+    "vm": {
+     "id": "vm:155",
+     "name": "truenas2"
+    },
+    "attached": true,
+    "platform": {
+     "proxmox": {
+      "slot": "efidisk0",
+      "volid": "local-btrfs:155/vm-155-disk-0.raw"
+     }
+    }
+   },
+   {
+    "id": "vdisk:155:tpmstate0",
+    "type": "vdisk",
+    "parent": "vol:3b9f6a02-c1d7-4e58-b240-8a7e5d913c60",
+    "name": "vm-155-disk-2",
+    "size_bytes": 4194304,
+    "allocated_bytes": 4194304,
+    "kind": "raw",
+    "path": "/mnt/pve/local-btrfs/images/155/vm-155-disk-2.raw",
+    "vm": {
+     "id": "vm:155",
+     "name": "truenas2"
+    },
+    "attached": true,
+    "platform": {
+     "proxmox": {
+      "slot": "tpmstate0",
+      "volid": "local-btrfs:155/vm-155-disk-2.raw"
+     }
+    }
+   },
+   {
+    "id": "vdisk:155:scsi1",
+    "type": "vdisk",
+    "parent": null,
+    "name": "PVEC:0.0.1",
+    "size_bytes": 11811160064000,
+    "kind": "iscsi",
+    "path": "PVEC:0.0.1.scsi-36001405f48f1514d6072d4193d989ed9",
+    "vm": {
+     "id": "vm:155",
+     "name": "truenas2"
+    },
+    "attached": true,
+    "match": [
+     "volid:PVEC:0.0.1.scsi-36001405f48f1514d6072d4193d989ed9",
+     "vmserial:TRUENASDISK002"
+    ],
+    "platform": {
+     "proxmox": {
+      "slot": "scsi1",
+      "volid": "PVEC:0.0.1.scsi-36001405f48f1514d6072d4193d989ed9",
+      "iothread": true,
+      "ssd": true,
+      "backup": false
+     }
+    }
+   }
+  ]
+ }
+}

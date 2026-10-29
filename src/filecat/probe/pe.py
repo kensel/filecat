@@ -12,7 +12,9 @@ from typing import Any
 
 import pefile
 
-from ..options import ScanOptions
+from .. import fsource
+from ..fsource import fopen
+from ..options import MiB, ScanOptions
 
 PACKER_SECTION_NAMES = {
     "upx0", "upx1", "upx2", ".upx0", ".upx1", ".upx2",
@@ -92,6 +94,9 @@ def lookup_comp_id(prod_id: int, build: int) -> tuple[str, str | None]:
     return "unmapped", None
 
 
+PE_REMOTE_CAP = 64 * MiB       # most of a PE read through an agent; headers and resources come first
+
+
 def probe_pe(path: str, options: ScanOptions, result: Any) -> None:
     result.kind = "exe"
     result.container = "pe"
@@ -102,7 +107,15 @@ def probe_pe(path: str, options: ScanOptions, result: Any) -> None:
     # minutes for a large installer on SMB). Then only the directories read
     # below: a game binary's exception and relocation tables run to hundreds
     # of thousands of entries (45 s and 1.3 GB for one 77 MB exe).
-    pe = pefile.PE(path, fast_load=True)
+    if isinstance(path, fsource.RemotePath):
+        # pefile maps a file on disk; from an agent, read it (to a cap)
+        with fopen(path) as f:
+            data = f.read(PE_REMOTE_CAP)
+        if path.size > PE_REMOTE_CAP:
+            probe["read_truncated"] = PE_REMOTE_CAP
+        pe = pefile.PE(data=data, fast_load=True)
+    else:
+        pe = pefile.PE(path, fast_load=True)
     try:
         pe.parse_data_directories(directories=_DIRECTORIES)
         _fill_header(pe, probe, result)

@@ -109,8 +109,34 @@ td.wide { min-width: 220px; }
 .tm .tip b { font-variant-numeric: tabular-nums; }
 .tm .tip .mono { overflow-wrap: anywhere; display: block; }
 .status { min-height: 20px; }
+td.actions { white-space: nowrap; }
+td.actions button + button { margin-left: 6px; }
+button.danger { color: var(--warn); }
+.search-form { display: flex; flex-direction: column; gap: 8px; }
+.search-form .q { display: flex; gap: 8px; }
+.search-form .q input { flex: 1; min-width: 0; font-size: 15px; padding: 7px 10px; }
+.search-form .adv { display: flex; flex-wrap: wrap; gap: 8px 14px; align-items: center; }
+.search-form .adv label { display: inline-flex; gap: 5px; align-items: center; color: var(--muted); font-size: 12.5px; }
+.search-help code { background: var(--hover); border-radius: 4px; padding: 1px 5px; cursor: pointer; }
+.search-help ul { margin: 6px 0 0; padding-left: 18px; line-height: 1.8; }
 .swatch { display: inline-block; width: 12px; height: 12px; border-radius: 3px; vertical-align: -1px; margin-right: 6px; }
 tr.hl td { background: var(--hover); }
+/* topology page */
+.topo details.host { background: var(--panel); border: 1px solid var(--line); border-radius: 8px; margin-bottom: 12px; }
+.topo details.host > summary { padding: 10px 14px; cursor: pointer; font-size: 14px; }
+.topo details.host.flash { outline: 2px solid var(--accent); }
+.topo .hostbody { border-top: 1px solid var(--line); padding: 8px 14px 12px; }
+.topo details.node { margin-left: 18px; }
+.topo details.node > summary, .topo .node.leaf { padding: 3px 0; }
+.topo details.node > summary { cursor: pointer; }
+.topo .node.leaf { margin-left: 18px; }
+.topo .nrow { display: inline-flex; flex-wrap: wrap; gap: 2px 10px; align-items: baseline; }
+.topo .children { border-left: 1px dotted var(--line); }
+.cap { display: inline-block; width: 140px; height: 8px; background: var(--code); border-radius: 4px; overflow: hidden; vertical-align: middle; }
+.cap i { display: block; height: 100%; background: var(--bar); }
+.cap.hot i { background: var(--warn); }
+.topo .sharebox { margin: 2px 0 4px 18px; padding: 4px 10px; border-left: 3px solid var(--accent-soft); }
+.topo h3 { font-size: 13px; margin: 10px 0 4px; color: var(--muted); }
 @media (max-width: 640px) {
   .grid { grid-template-columns: 1fr; }
   header { padding: 8px 16px; }
@@ -123,10 +149,14 @@ tr.hl td { background: var(--hover); }
   <h1>filecat</h1>
   <nav id="nav">
     <a data-view="roots" href="#roots">Roots</a>
+    <a data-view="server" href="#server">Server</a>
     <a data-view="summary" href="#summary">Summary</a>
     <a data-view="graph" href="#graph">Graph</a>
     <a data-view="browse" href="#browse">Browse</a>
     <a data-view="records" href="#records">Records</a>
+    <a data-view="rollups" href="#rollups">Rollups</a>
+    <a data-view="topology" href="#topology">Topology</a>
+    <a data-view="search" href="#search">Search</a>
   </nav>
   <label>Root <select id="root"></select></label>
   <span class="spacer"></span>
@@ -152,7 +182,7 @@ function h(tag, attrs, ...kids) {
     else if (k.startsWith("on")) el.addEventListener(k.slice(2), v);
     else el.setAttribute(k, v === true ? "" : v);
   }
-  for (const kid of kids.flat()) if (kid != null && kid !== false) el.append(kid instanceof Node ? kid : String(kid));
+  for (const kid of kids.flat(Infinity)) if (kid != null && kid !== false) el.append(kid instanceof Node ? kid : String(kid));
   return el;
 }
 function bytes(n) {
@@ -183,8 +213,34 @@ function parseHash() {
 async function api(path, params) {
   const res = await fetch(path + "?" + new URLSearchParams(params || {}));
   const data = await res.json().catch(() => ({error: res.statusText}));
-  if (!res.ok) throw new Error(data.error || res.statusText);
+  if (!res.ok) { const e = new Error(data.error || res.statusText); e.login = !!data.login; throw e; }
   return data;
+}
+// POST with the headers the server's CSRF check wants; the session is an HttpOnly cookie, so no
+// password or token is ever kept in the page's storage.
+async function post(path, body) {
+  const res = await fetch(path, {method: "POST", credentials: "same-origin",
+    headers: {"Content-Type": "application/json", "X-Filecat-Control": "run"}, body: JSON.stringify(body || {})});
+  const data = await res.json().catch(() => ({error: res.statusText}));
+  if (!res.ok) {
+    const e = new Error(data.error || res.statusText);
+    e.status = res.status; e.login = !!data.login; e.retry = data.retry_after;
+    throw e;
+  }
+  return data;
+}
+function loginForm(done) {
+  const pw = h("input", {type: "password", autocomplete: "current-password", placeholder: "password", required: true});
+  const msg = h("div", {class: "muted"});
+  return h("form", {class: "card", onsubmit: async ev => {
+      ev.preventDefault();
+      try { await post("/api/login", {password: pw.value}); pw.value = ""; done(); }
+      catch (e) {
+        pw.value = "";
+        msg.textContent = e.status === 429 ? `Too many failed logins: try again in ${duration(e.retry || 0)}.` : e.message;
+      }
+    }},
+    h("h2", {}, "Log in"), h("div", {}, pw, " ", h("button", {type: "submit"}, "Log in")), msg);
 }
 function pctCell(p) {
   return h("td", {class: "num pct"}, h("i", {style: `width:${Math.min(100, p || 0).toFixed(1)}%`}),
@@ -192,7 +248,10 @@ function pctCell(p) {
 }
 function fill(el, ...kids) { el.replaceChildren(...kids.flat().filter(k => k != null && k !== false)); return el; }
 function show(...nodes) { fill($main, ...nodes); window.scrollTo(0, 0); }
-function failed(err) { return h("div", {class: "error"}, "Error: " + err.message); }
+function failed(err) {
+  if (err.login) return loginForm(() => location.reload());      // [server] login_required_for_view
+  return h("div", {class: "error"}, "Error: " + err.message);
+}
 function curRoot(params) { return params.root || $root.value; }
 function dirOf(rel) { const i = rel.lastIndexOf("/"); return i < 0 ? "" : rel.slice(0, i); }
 
@@ -229,6 +288,26 @@ function duration(sec) {
   return h ? `${h}h ${m}m` : m ? `${m}m ${s}s` : `${s}s`;
 }
 let rootsTimer = null;
+let rootsNote = "";         // the answer to the last Scan / Remove, kept across the page's refreshes
+// Scan now / Remove / Refresh: the same login as "Run now". No session: the password form opens in the note,
+// then the action is repeated; the session is an HttpOnly cookie, nothing is kept in the page.
+const ROOT_PATHS = {scan: "/api/roots/scan", remove: "/api/roots/remove", refresh: "/api/summaries/refresh"};
+async function rootAction(kind, root, confirmed) {
+  const msg = document.getElementById("roots-msg");
+  if (kind === "remove" && !confirmed && !confirm(`Remove the root ${root} from the catalog?\n\n`
+      + "It has no records. Its scan history, summary and treemap snapshots are forgotten."
+      + " Scanning it again brings it back.")) return;
+  try {
+    const res = await post(ROOT_PATHS[kind], kind === "remove" ? {root, confirm: root} : {root});
+    rootsNote = kind === "remove" ? `${root} was removed.` : (res.message || `${kind} of ${root} queued`);
+    viewRoots();
+  } catch (e) {
+    if (e.status === 401 && e.login) {
+      msg.replaceChildren(loginForm(() => rootAction(kind, root, true)));
+      msg.querySelector("input").focus();
+    } else { rootsNote = e.message; msg.textContent = e.message; }
+  }
+}
 async function viewRoots() {
   clearTimeout(rootsTimer);
   const card = h("section", {class: "card"});
@@ -237,19 +316,25 @@ async function viewRoots() {
   try { data = await api("/api/roots"); } catch (e) { return show(failed(e)); }
   if (parseHash().view !== "roots") return;
   const now = data.now;
-  const live = data.roots.some(r => r.state === "in_progress");
-  fill(card, h("h2", {}, "Roots", h("small", {}, `${num(data.roots.length)} in this catalog` + (live ? " · refreshing every 30s while a scan runs" : ""))),
+  const live = data.roots.some(r => r.state === "in_progress" || r.busy);
+  const building = data.roots.some(r => r.refreshing);
+  const control = data.control || {available: false, reason: ""};
+  control.stores = data.stores;
+  fill(card, h("h2", {}, "Roots", h("small", {}, `${num(data.roots.length)} in this catalog`
+      + (building ? " · summaries are being rebuilt, refreshing every 8s" : live ? " · refreshing every 30s while a scan runs" : ""))),
     h("div", {class: "scroll"}, h("table", {},
       h("thead", {}, h("tr", {}, h("th", {}, "root"), h("th", {}, "scan"), h("th", {class: "num"}, "files"),
-        h("th", {class: "num"}, "size"), h("th", {}, "newest file"), h("th", {}, "last error"))),
-      h("tbody", {}, data.roots.map(r => rootRow(r, now))))));
+        h("th", {class: "num"}, "size"), h("th", {}, "newest file"), h("th", {}, "last error"), h("th", {}, ""))),
+      h("tbody", {}, data.roots.map(r => rootRow(r, now, control))))),
+    h("div", {id: "roots-msg", class: "muted"}, rootsNote || (control.available ? "" : control.reason)));
   card.id = "roots-card";
   const y = window.scrollY;
   fill($main, card);
   window.scrollTo(0, y);
-  if (live) rootsTimer = setTimeout(() => { if (parseHash().view === "roots") viewRoots(); }, 30000);
+  // not while the login form is open: a refresh would wipe what is being typed
+  if (live || building) rootsTimer = setTimeout(() => { if (parseHash().view === "roots" && !document.querySelector("#roots-msg input")) viewRoots(); }, building ? 8000 : 30000);
 }
-function rootRow(r, now) {
+function rootRow(r, now, control) {
   const root = r.root, info = r.info || {}, a = info.last_attempt || {}, last = info.last_scan;
   const [label, cls] = STATES[r.state] || [r.state, ""];
   const scan = [];
@@ -290,8 +375,106 @@ function rootRow(r, now) {
         h("a", {href: route("records", {root})}, "records"))),
     h("td", {class: "wide"}, scan),
     h("td", {class: "num"}, s ? num(s.total_files) : ""),
-    h("td", {class: "num", title: s ? num(s.total_bytes) + " bytes" : ""}, s ? bytes(s.total_bytes) : ""),
-    newest, errCell);
+    h("td", {class: "num", title: s ? num(s.total_bytes) + " bytes" : ""}, s ? bytes(s.total_bytes) : "", summaryNote(r, now)),
+    newest, errCell, rootButtons(r, control));
+}
+// How current the stored summary of a root is: built when, and a badge when the root changed after it.
+function summaryNote(r, now) {
+  const s = r.summary;
+  if (!s) return r.refreshing ? h("span", {class: "sub"}, h("span", {class: "badge live"}, "summarising…")) : null;
+  const badge = r.refreshing ? h("span", {class: "badge live"}, "stale, refreshing…")
+    : r.summary_state === "stale" ? h("span", {class: "badge warn"}, "stale")
+    : r.summary_state === "scanning" ? h("span", {class: "badge live"}, "scanning") : null;
+  return h("span", {class: "sub", title: "the totals come from the summary built " + stamp(s.built_at)},
+    s.built_at ? `built ${ago(s.built_at, now)}` : "", badge ? " " : null, badge);
+}
+function rootButtons(r, control) {
+  const ok = control && control.available;
+  const scanning = r.state === "in_progress" || !!r.busy;
+  return h("td", {class: "actions"},
+    h("button", {disabled: !ok || scanning,
+      title: !ok ? (control && control.reason) : r.busy ? r.busy : scanning ? "a scan is running" : "scan exactly this root now",
+      onclick: () => rootAction("scan", r.root)}, r.busy && r.busy.includes("queued") ? "Queued" : "Scan"),
+    control && control.stores ? h("button", {disabled: !ok || !!r.refreshing,
+      title: !ok ? (control && control.reason) : r.refreshing ? "being rebuilt" : "rebuild this root's summary and treemap now",
+      onclick: () => rootAction("refresh", r.root)}, r.refreshing ? "Refreshing" : "Refresh") : null,
+    r.removable ? h("button", {class: "danger", disabled: !ok, title: ok ? "forget this root: it has no records" : control && control.reason,
+      onclick: () => rootAction("remove", r.root)}, "Remove") : null);
+}
+
+// --- server (agents and job history; filecat server) ----------------------
+const AGENT_STATES = {up: ["up", "ok"], down: ["down", "warn"], unknown: ["not checked yet", ""]};
+const OUTCOMES = {ok: "ok", errors: "warn", failed: "warn", lost: "warn", cancelled: "warn", running: "live", skipped: ""};
+let serverTimer = null;
+async function runNow(name, loggedIn) {
+  const msg = document.getElementById("run-msg");
+  try {
+    const res = await post("/api/jobs/" + encodeURIComponent(name) + "/run");
+    msg.textContent = res.message || "started";
+    viewServer();
+  } catch (e) {
+    if (e.status === 401 && e.login) {       // no session yet: ask for the password, then run
+      msg.replaceChildren(loginForm(() => runNow(name)));
+      msg.querySelector("input").focus();
+    } else msg.textContent = e.message;
+  }
+}
+async function viewServer() {
+  clearTimeout(serverTimer);
+  if (!document.getElementById("server-card")) show(h("div", {class: "loading"}, "Loading server state…"));
+  let agents, jobs;
+  try { [agents, jobs] = await Promise.all([api("/api/agents"), api("/api/jobs", {limit: 50})]); } catch (e) { return show(failed(e)); }
+  if (parseHash().view !== "server") return;
+  const now = agents.updated_at;
+  const lease = agents.server;
+  const who = lease ? `server on ${lease.host || "?"} (pid ${lease.pid}) ${lease.alive ? "holds the catalog" : "lease expired " + ago(lease.expires_at, now)}`
+    : "no filecat server has run against this catalog";
+  const agentCard = h("section", {class: "card", id: "server-card"},
+    h("h2", {}, "Agents", h("small", {}, `${agents.source === "live" ? "live" : "last saved " + ago(agents.updated_at, now)} · ${who}`)),
+    h("div", {class: "scroll"}, h("table", {},
+      h("thead", {}, h("tr", {}, ["agent", "state", "version", "checks", "running", "last error"].map(t => h("th", {}, t)))),
+      h("tbody", {}, agents.agents.length ? agents.agents.map(a => {
+        const [label, cls] = AGENT_STATES[a.state] || [a.state, ""];
+        const warn = (a.warnings || []).length || a.allowlist_match === false || a.deny_match === false;
+        return h("tr", {},
+          h("td", {}, a.name, h("span", {class: "sub mono"}, a.endpoint)),
+          h("td", {}, h("span", {class: "badge " + cls}, label), h("span", {class: "sub"}, a.since ? "since " + stamp(a.since) : "")),
+          h("td", {}, a.version ? `filecat-agent ${a.version}` : "", h("span", {class: "sub"}, a.platform || ""),
+            warn ? h("span", {class: "badge warn"}, "allowlist/deny list differs from this filecat") : null),
+          h("td", {}, a.last_check ? ago(a.last_check, now) : "", a.failures ? h("span", {class: "sub"}, `${a.failures} failed in a row`) : null),
+          h("td", {}, a.running || ""),
+          h("td", {class: "wide"}, a.last_error || ""));
+      }) : h("tr", {}, h("td", {colspan: 6, class: "muted"}, "no agents known (no server has saved any state, or no [[agents]])"))))));
+  const configured = jobs.jobs.length ? h("section", {class: "card"},
+    h("h2", {}, "Jobs", h("small", {}, `${jobs.jobs.length} configured`)),
+    h("div", {class: "scroll"}, h("table", {},
+      h("thead", {}, h("tr", {}, ["job", "kind", "agent", "schedule", "next due", "last", ""].map(t => h("th", {}, t)))),
+      h("tbody", {}, jobs.jobs.map(j => h("tr", {},
+        h("td", {}, j.name), h("td", {}, j.kind), h("td", {}, j.agent), h("td", {}, j.schedule),
+        h("td", {}, j.running ? "running" : j.queued ? "queued" : stamp(j.next_due),
+          j.running && j.progress ? h("span", {class: "sub"}, `${num(j.progress.files)} files · ${bytes(j.progress.bytes)} · ${j.progress.rate}/s · ${ago(j.progress.at, now)}`) : null,
+          j.deferred ? h("span", {class: "sub"}, "waiting: " + j.deferred) : null),
+        h("td", {}, j.last_outcome ? h("span", {class: "badge " + (OUTCOMES[j.last_outcome] || "")}, j.last_outcome) : ""),
+        h("td", {}, j.adhoc ? h("span", {class: "muted"}, "from Roots") : h("button", {disabled: !jobs.control.available || j.running || j.queued,
+          title: jobs.control.available ? "start this job now" : jobs.control.reason,
+          onclick: () => runNow(j.name)}, "Run now"))))))),
+    h("div", {id: "run-msg", class: "muted"}, jobs.control.available ? "" : jobs.control.reason)) : null;
+  const recent = h("section", {class: "card"},
+    h("h2", {}, "Recent runs", h("small", {}, `${jobs.recent.length} shown`)),
+    h("div", {class: "scroll"}, h("table", {},
+      h("thead", {}, h("tr", {}, ["job", "started", "took", "outcome", "counts", "note"].map(t => h("th", {}, t)))),
+      h("tbody", {}, jobs.recent.length ? jobs.recent.map(r => h("tr", {},
+        h("td", {}, r.job, h("span", {class: "sub"}, `${r.kind} · ${r.agent || ""}`)),
+        h("td", {}, stamp(r.started_at), h("span", {class: "sub"}, ago(r.started_at, now))),
+        h("td", {}, r.ended_at && r.outcome !== "skipped" ? duration((new Date(r.ended_at) - new Date(r.started_at)) / 1000) : ""),
+        h("td", {}, h("span", {class: "badge " + (OUTCOMES[r.outcome] || "")}, r.outcome)),
+        h("td", {class: "wide"}, Object.entries(r.counts || {}).map(([k, v]) => `${k} ${typeof v === "number" ? num(v) : v}`).join(" · ")),
+        h("td", {class: "wide"}, r.error || ""))) : h("tr", {}, h("td", {colspan: 6, class: "muted"}, "no runs recorded"))))));
+  const y = window.scrollY;
+  fill($main, agentCard, configured, recent);
+  window.scrollTo(0, y);
+  // not while the login form is open: a refresh would wipe what is being typed
+  serverTimer = setTimeout(() => { if (parseHash().view === "server" && !document.querySelector("#run-msg input")) viewServer(); }, 15000);
 }
 
 // --- summary ---------------------------------------------------------
@@ -300,13 +483,16 @@ const TABLES = [
   {key: "mime", title: "Types", label: "type"},
   {key: "dir", title: "Directories", label: "directory"},
 ];
-async function viewSummary(params, rebuild) {
+async function viewSummary(params, rebuild, quiet) {
   const root = curRoot(params), depth = params.depth || "2";
-  show(h("div", {class: "loading"}, rebuild ? "Rebuilding the summary…"
-    : "Loading summary… (a root with no saved summary is computed from its records and saved, which can take a while)"));
+  if (!quiet) show(h("div", {class: "loading"}, rebuild ? "Rebuilding the summary…"
+    : "Loading summary… (a depth other than 2 is computed from the records, which can take a while)"));
   let s;
   try { s = await api("/api/summary", {root, depth, rebuild: rebuild ? 1 : ""}); }
   catch (e) { return show(failed(e)); }
+  // the stored summary is built in the background: nothing stored yet, or one being rebuilt, asks again
+  const again = () => setTimeout(() => { const at = parseHash(); if (at.view === "summary" && curRoot(at.params) === root) viewSummary(params, false, true); }, 3000);
+  if (s.building) { show(h("div", {class: "loading"}, "This root has no summary yet; the server is building it from the records (one pass, which can take minutes on a big root)…")); return again(); }
   const depthSel = h("select", {onchange: e => go("summary", {root, depth: e.target.value})},
     [1, 2, 3, 4, 5, 6].map(d => h("option", {value: d, selected: String(d) === String(depth)}, d)));
   const kpis = h("div", {class: "kpis"},
@@ -317,21 +503,27 @@ async function viewSummary(params, rebuild) {
   );
   const builtAt = s.built_at ? new Date(s.built_at).toLocaleString() : "";
   const note = h("span", {class: "note"}, {
-    stored: `Saved summary from ${builtAt}.`,
+    stored: `Saved summary from ${builtAt} (${ago(s.built_at)}).`,
     saved: `Computed from the records and saved just now (${builtAt}).`,
     computed: s.stored_depth != null
       ? `Computed from the records; the saved summary is at depth ${s.stored_depth}.`
       : "Computed from the records (not saved: --no-save).",
   }[s.source] || "");
   const button = s.can_save
-    ? h("button", {title: "recompute from the records and save it in the catalog", onclick: () => viewSummary(params, true)},
-        s.source === "computed" ? `Save at depth ${depth}` : "Rebuild & save")
+    ? h("button", {title: "recompute from the records and save it in the catalog", disabled: !!s.refreshing,
+        onclick: () => viewSummary(params, true)}, s.refreshing ? "Rebuilding…" : s.source === "computed" ? `Save at depth ${depth}` : "Rebuild & save")
     : h("button", {onclick: () => viewSummary(params, true)}, "Recompute");
   const tools = h("div", {class: "toolbar"}, h("label", {}, "Directory depth ", depthSel), button, note);
   const cards = TABLES.map(t => summaryCard(t, s[t.key] || [], root, depth));
   show(h("div", {}, tools, kpis, h("div", {class: "grid"}, cards)));
-  if (s.source === "stored") {
-    // A saved summary goes stale as scans add or change records: compare with the records now.
+  if (s.state) {      // the server judges a depth-2 summary by the root's change stamp, so there is nothing to compare
+    if (s.stale) note.append(" ", h("span", {class: "badge " + (s.refreshing ? "live" : "warn")}, s.refreshing ? "stale, refreshing…" : "stale"),
+      s.state === "scanning" ? " A scan is running; the summary is rebuilt when it ends."
+        : " The root changed after this was built." + (s.refresh_error ? ` The last rebuild failed: ${s.refresh_error}.` : ""));
+    else note.append(" Current: the root has not changed since.");
+    if (s.refreshing || s.state === "scanning") again();
+  } else if (s.source === "stored") {
+    // A saved summary at another depth: compare with the records now.
     api("/api/records", {root, files_only: 1, limit: 1}).then(now => {
       const files = s.total_files - s.unreadable;
       if (now.total === files && now.bytes === s.total_bytes) return note.append(" Up to date with the records.");
@@ -436,11 +628,17 @@ function ageText(seconds) {
   return seconds >= 5400 ? `${+(seconds / 3600).toFixed(1)} h` : `${Math.round(seconds / 60)} min`;
 }
 
-async function getTreemap(root, prefix, depth, refresh) {
+async function getTreemap(root, prefix, depth, refresh, alive) {
   const key = `${root}|${prefix}|${depth}`;
   const hit = TREEMAPS.get(key);
-  if (!refresh && hit && Date.now() - hit.at < CLIENT_CACHE_MS) return hit.data;
-  const t = await api("/api/treemap", {root, prefix, depth, refresh: refresh ? 1 : ""});
+  if (!refresh && hit && Date.now() - hit.at < CLIENT_CACHE_MS && !hit.data.stale) return hit.data;
+  let t = await api("/api/treemap", {root, prefix, depth, refresh: refresh ? 1 : ""});
+  // a root with no stored summary is being summarised on the server: ask again until it is there
+  for (let tries = 0; t.building && tries < 900 && (!alive || alive()); tries++) {
+    await new Promise(r => setTimeout(r, 2000));
+    t = await api("/api/treemap", {root, prefix, depth});
+  }
+  if (t.building) throw new Error("still being summarised on the server; try again in a while");
   TREEMAPS.set(key, {at: Date.now(), data: t});
   return t;
 }
@@ -490,6 +688,7 @@ function folderTree(tm, root, name, kind) {
       node.segs = segs(node.own);
       if (node.own.merged) { node.name = `${num(node.own.merged)} smaller folders`; node.merged = node.own.merged; }
     }
+    if (node.own && node.own.rollup && !node.kids.length) { node.kind = "rollup"; node.rollup = node.own.rollup; }
     node.colorKey = colorKey;
     node.bytes = node.kids.length ? node.kids.reduce((a, k) => a + k.bytes, 0) : (node.own ? node.own.bytes : 0);
     node.files = node.kids.length ? node.kids.reduce((a, k) => a + k.files, 0) : (node.own ? node.own.files : 0);
@@ -659,7 +858,7 @@ async function viewGraph(params, force) {
   const depthSel = h("select", {onchange: e => go("graph", {...p, depth: e.target.value, at: null, vs: null,
                                                             color: mode === "change" ? "suffix" : mode})},
     [1, 2, 3, 4].map(d => h("option", {value: d, selected: String(d) === String(depth)}, d)));
-  const refresh = h("button", {title: "summarise again from the records now, instead of the saved snapshot"}, "Refresh");
+  const refresh = h("button", {title: "summarise again from the records now, instead of the saved snapshot; the old one is shown until the new one is ready"}, "Refresh");
   const snapSel = h("select", {disabled: true, onchange: e => go("graph", {...p, at: e.target.value || null})},
     h("option", {value: ""}, "Latest"));
   const vsSel = h("select", {disabled: true, onchange: e => go("graph", {...p, vs: e.target.value || null,
@@ -749,7 +948,9 @@ async function viewGraph(params, force) {
     if (n.kind === "more") return {root: n.root, prefix: n.path.split("/").slice(0, -1).join("/")};
     return {root: n.root, prefix: n.path};
   }
-  const goTo = n => go("graph", graphTarget(p, nodeTarget(n)));
+  // a rollup has nothing beneath it to zoom into: its tile opens its record (the inspector card)
+  const goTo = n => n.kind === "rollup" ? go("record", {root: n.root, rel_path: n.path, vs: p.vs || null})
+    : go("graph", graphTarget(p, nodeTarget(n)));
   function hitAt(e) {
     const r = canvas.getBoundingClientRect(), x = e.clientX - r.left, y = e.clientY - r.top;
     for (let i = hits.length - 1; i >= 0; i--) {
@@ -766,6 +967,8 @@ async function viewGraph(params, force) {
       : `${n.root}\\${n.path.replaceAll("/", "\\")}`;
     const lines = [h("span", {class: "mono"}, where + (n.kind === "files" ? "  (files directly here)" : ""))];
     if (n.merged) lines.push(h("div", {}, `${num(n.merged)} smaller folders, merged`));
+    if (n.rollup) lines.push(h("div", {class: "muted"}, `${n.rollup.tag} rollup: ${num(n.rollup.total_dirs)} folders, ${num(n.rollup.matched)} folded in`
+      + (n.rollup.newest_mtime_ns && n.rollup.tag !== "[REDACTED]" ? `, newest ${when(n.rollup.newest_mtime_ns)}` : "") + (n.rollup.partial ? " - a lower bound" : "")));
     lines.push(h("div", {}, h("b", {}, bytes(n.bytes)), ` in ${num(n.files)} files`));
     if (n.kind === "pending") lines.push(h("div", {class: "muted"}, n.error ? "Error: " + n.error : "size from the root index; summarising…"));
     if (t.seg && (mode === "suffix" || mode === "mime")) lines.push(h("div", {}, h("span", {class: "swatch", style: `background:${t.seg[2]}`}),
@@ -777,7 +980,8 @@ async function viewGraph(params, force) {
         : [`At the pin ${bytes(c.then)}, now ${bytes(n.bytes)}: `, h("b", {}, signed(c.delta)),
            c.ratio != null ? ` (${c.ratio > 0 ? "+" : ""}${(c.ratio * 100).toFixed(1)}%)` : ""]));
     }
-    lines.push(h("div", {class: "muted"}, n.kind === "group" ? "click: just this server/drive" : "click: zoom in (asks the server)"));
+    lines.push(h("div", {class: "muted"}, n.kind === "group" ? "click: just this server/drive"
+      : n.kind === "rollup" ? "click: open the rollup's record" : "click: zoom in (asks the server)"));
     fill(tip, lines);
     tip.hidden = false;
     const bw = box.clientWidth, tw = tip.offsetWidth, th = tip.offsetHeight;
@@ -791,6 +995,15 @@ async function viewGraph(params, force) {
   ro.observe(box);
   const stopWatch = () => { if (gen !== graphGen) { ro.disconnect(); return true; } return false; };
 
+  // A stored summary of a root that changed since: say so, and look again while the server rebuilds it.
+  function staleNote(tms) {
+    const stale = tms.filter(t => t.stale);
+    if (!stale.length || viewPin) return;
+    const busy = stale.some(t => t.refreshing || t.state === "scanning");
+    status.append(" ", h("span", {class: "badge " + (busy ? "live" : "warn")},
+      stale.length > 1 ? `${num(stale.length)} stale, refreshing…` : busy ? "stale, refreshing…" : "stale"));
+    if (busy) setTimeout(() => { if (gen === graphGen) viewGraph(params); }, tms.length > 1 ? 10000 : 6000);
+  }
   function kpi(value, label, title) { return h("div", {class: "kpi", title: title || ""}, h("b", {}, value), h("span", {}, label)); }
   function waiting(text) {
     const t0 = Date.now();
@@ -872,6 +1085,7 @@ async function viewGraph(params, force) {
     return {grew, shrank, net: grew + shrank, count: rows.length};
   }
   const describe = t => t.source === "pinned" || viewPin ? `pinned snapshot built ${stamp(t.built_at)}`
+    : t.source === "stored" && t.state ? `saved summary built ${stamp(t.built_at)} (${ago(t.built_at)}), current until the root changes`
     : t.source === "stored" ? `saved snapshot built ${stamp(t.built_at)} (${ago(t.built_at)}), reused until ${ageText(t.max_age)} old`
     : t.source === "saved" ? "summarised just now and saved"
     : t.source === "memory" ? `summarised ${ago(t.built_at)}, kept in memory (not saved)` : "summarised just now (not saved)";
@@ -884,7 +1098,7 @@ async function viewGraph(params, force) {
       if (viewPin) tm = await getSnapshot(viewPin.snapshots.find(s => s.root === root).id);
       else {
         waiting(`Summarising ${prefix ? root + "\\" + prefix.replaceAll("/", "\\") : root} on the server, unless a saved snapshot is recent enough: it reads every file record beneath it, so a big share takes a while…`);
-        tm = await getTreemap(root, prefix, depth, force);
+        tm = await getTreemap(root, prefix, depth, force, () => gen === graphGen);
       }
       await loadBaseline(root);
     } catch (e) { if (gen === graphGen) fill(status, failed(e)); return; }
@@ -894,6 +1108,7 @@ async function viewGraph(params, force) {
     enablePin();
     status.textContent = (viewPin ? `Viewing ${pinName(viewPin)}: ` : "Latest: ") + describe(tm) + "."
       + (vsPin ? ` Compared with ${pinName(vsPin)}.` : "") + (viewPin ? "" : " Refresh re-reads the records now.");
+    staleNote([tm]);
     tree = folderTree(tm, root, prefix ? prefix.split("/").pop() : root, "folder");
     const sub = tree.kids.filter(k => k.kind !== "files");
     const cards = [kpi(num(tm.files), "files"), kpi(bytes(tm.bytes), num(tm.bytes) + " bytes"), kpi(num(sub.length), "folders directly here")];
@@ -983,7 +1198,7 @@ async function viewGraph(params, force) {
     if (!viewPin) waiting(`Loading ${node.root} (${done + 1} of ${order.length}): a saved snapshot if it is recent enough, or the server reads its records…`);
     try {
       const tm = viewPin ? await getSnapshot(viewPin.snapshots.find(s => s.root === node.root).id)
-                         : await getTreemap(node.root, "", depth, force);
+                         : await getTreemap(node.root, "", depth, force, () => gen === graphGen);
       await loadBaseline(node.root);
       if (stopWatch()) return;
       shown.push(tm);
@@ -1018,6 +1233,7 @@ async function viewGraph(params, force) {
   if (vsPin) text += ` Compared with ${pinName(vsPin)}` + (baselineRoots.size < loaded.length ? ` (${num(loaded.length - baselineRoots.size)} roots not in it).` : ".");
   if (failedRoots.length) text += ` ${failedRoots.length} failed: ${failedRoots.map(n => n.root).join(", ")}.`;
   status.textContent = text;
+  staleNote(loaded);
 }
 
 // --- records ---------------------------------------------------------
@@ -1038,9 +1254,10 @@ async function viewRecords(params) {
       h("button", {title: "remove filter", onclick: () => go("records", rest)}, "×"));
   });
   const search = h("input", {type: "search", placeholder: "Path contains…", value: p.q || "", size: 28});
+  const rollupOnly = p.kind === "rollup" ? null : h("button", {title: "only the rollup records (counted, not listed)", onclick: () => go("records", {...p, kind: "rollup", offset: ""})}, "Rollups only");
   const form = h("form", {onsubmit: e => { e.preventDefault(); go("records", {...p, q: search.value, offset: ""}); }}, search);
   const holder = h("section", {class: "card"}, h("div", {class: "loading"}, "Querying…"));
-  show(h("div", {}, h("div", {class: "toolbar"}, form, chips), holder));
+  show(h("div", {}, h("div", {class: "toolbar"}, form, rollupOnly, chips), holder));
   let r;
   try { r = await api("/api/records", p); } catch (e) { return fill(holder, failed(e)); }
   const q = r.query;
@@ -1053,10 +1270,13 @@ async function viewRecords(params) {
   }));
   const rows = r.rows.map(d => h("tr", {class: "click", onclick: () => go("record", {root, rel_path: d.rel_path})},
     h("td", {class: "path"}, d.rel_path || "(root)", d.unreadable ? h("span", {class: "badge warn"}, "unreadable")
-      : d.errors ? h("span", {class: "badge warn"}, `${d.errors} error${d.errors > 1 ? "s" : ""}`) : null),
+      : d.errors ? h("span", {class: "badge warn"}, `${d.errors} error${d.errors > 1 ? "s" : ""}`) : null,
+      d.kind === "rollup" && d.rollup ? [h("span", {class: "badge", title: "a rollup: counted, not listed"}, d.rollup.tag),
+        d.rollup.partial ? h("span", {class: "badge warn", title: "lower bound: some entries could not be read"}, "partial") : null,
+        h("span", {class: "sub"}, `${num(d.rollup.total_files)} files, ${num(d.rollup.total_dirs)} folders, ${num(d.rollup.matched)} folded in`)] : null),
     h("td", {}, d.kind || ""), h("td", {class: "muted hide-sm"}, d.mime || ""),
     h("td", {class: "num", title: d.size == null ? "" : num(d.size) + " bytes"}, d.kind === "dir" ? "" : bytes(d.size)),
-    h("td", {class: "num muted"}, when(d.mtime_ns))));
+    h("td", {class: "num muted"}, d.kind === "rollup" && d.rollup && d.rollup.tag === "[REDACTED]" ? "" : when(d.mtime_ns))));
   const end = Math.min(q.offset + q.limit, r.total);
   const pager = h("div", {class: "pager"},
     h("button", {disabled: q.offset <= 0, onclick: () => go("records", {...p, offset: Math.max(0, q.offset - q.limit)})}, "‹ Prev"),
@@ -1073,9 +1293,10 @@ async function viewBrowse(params) {
   const filesCard = h("section", {class: "card"}, h("h2", {}, "Files"), h("div", {class: "loading"}, "Loading…"));
   show(h("div", {}, crumbs(root, parent, false), h("div", {class: "stack"}, foldersCard, filesCard)));
 
-  const [sub, dirs] = await Promise.all([
+  const [sub, dirs, rolls] = await Promise.all([
     api("/api/subtree", {root, parent}).catch(e => e),
     api("/api/records", {root, parent, kind: "dir", sort: "name", desc: "0", limit: 1000}).catch(e => e),
+    api("/api/records", {root, parent, kind: "rollup", sort: "name", desc: "0", limit: 200}).catch(e => e),
   ]);
   if (sub instanceof Error) fill(foldersCard, h("h2", {}, "Folders"), failed(sub));
   else {
@@ -1084,18 +1305,25 @@ async function viewBrowse(params) {
       if (!byName.has(d.name)) byName.set(d.name, {name: d.name, files: 0, bytes: 0, record: d});
       else byName.get(d.name).record = d;
     }
-    const folders = [...byName.values()].sort((a, b) => b.bytes - a.bytes || a.name.localeCompare(b.name));
-    const total = folders.reduce((a, f) => a + f.bytes, 0);
+    for (const f of byName.values()) { f.total = f.bytes + (f.rollup_bytes || 0); f.allFiles = f.files + (f.rollup_files || 0); }
+    const folders = [...byName.values()].sort((a, b) => b.total - a.total || a.name.localeCompare(b.name));
+    const rollRows = rolls instanceof Error ? [] : rolls.rows;
+    const total = folders.reduce((a, f) => a + f.total, 0) + rollRows.reduce((a, r) => a + (r.size || 0), 0);
     const rows = folders.map(f => {
       const path = parent ? parent + "/" + f.name : f.name;
       return h("tr", {class: "click", onclick: () => go("browse", {root, parent: path})},
-        h("td", {class: "path"}, "📁 ", f.name, f.record ? null : h("span", {class: "badge", title: "no dir record yet (scan in progress, or imported without dirs)"}, "no record")),
-        h("td", {class: "num"}, num(f.files)), h("td", {class: "num", title: num(f.bytes) + " bytes"}, bytes(f.bytes)),
-        pctCell(total ? f.bytes / total * 100 : 0),
+        h("td", {class: "path"}, "📁 ", f.name, f.record ? null : h("span", {class: "badge", title: "no dir record yet (scan in progress, or imported without dirs)"}, "no record"),
+          f.rollup_bytes ? h("span", {class: "badge", title: `${bytes(f.rollup_bytes)} of this is in rollups (counted, not listed)`}, "rollups") : null),
+        h("td", {class: "num"}, num(f.allFiles)), h("td", {class: "num", title: num(f.total) + " bytes"}, bytes(f.total)),
+        pctCell(total ? f.total / total * 100 : 0),
         h("td", {class: "num"}, f.record ? h("a", {href: route("record", {root, rel_path: path}), onclick: e => e.stopPropagation()}, "record") : ""));
     });
-    fill(foldersCard, h("h2", {}, "Folders", h("small", {}, `${num(folders.length)} · ${bytes(total)} beneath`)),
-      folders.length ? h("div", {class: "scroll"}, h("table", {},
+    for (const r of rollRows) rows.push(h("tr", {class: "click", onclick: () => go("record", {root, rel_path: r.rel_path})},
+      h("td", {class: "path"}, "🗜 ", r.name, h("span", {class: "badge", title: "counted, not listed"}, "rollup"), r.rollup && r.rollup.partial ? h("span", {class: "badge warn"}, "lower bound") : null),
+      h("td", {class: "num"}, num(r.rollup && r.rollup.total_files)), h("td", {class: "num", title: num(r.size) + " bytes"}, bytes(r.size)),
+      pctCell(total ? (r.size || 0) / total * 100 : 0), h("td", {class: "num"}, "")));
+    fill(foldersCard, h("h2", {}, "Folders", h("small", {}, `${num(folders.length)}${rollRows.length ? " + " + num(rollRows.length) + " rollups" : ""} · ${bytes(total)} beneath`)),
+      rows.length ? h("div", {class: "scroll"}, h("table", {},
         h("thead", {}, h("tr", {}, h("th", {}, "name"), h("th", {class: "num"}, "files beneath"), h("th", {class: "num"}, "size"), h("th", {class: "num"}, "% here"), h("th", {}))),
         h("tbody", {}, rows))) : h("div", {class: "empty"}, "No subfolders"));
   }
@@ -1137,6 +1365,57 @@ function jsonTree(v, key, depth) {
   const cls = typeof v === "string" ? "s" : typeof v === "number" ? "n" : "b";
   return h("div", {class: "row"}, k, h("span", {class: cls}, JSON.stringify(v)));
 }
+// A rollup stands for files the catalog counts but does not list (docs/rollups.md): its card says what
+// is known, per tag.
+async function rollupCard(d, params, root) {
+  const info = (d.probe || {}).rollup || {}, tag = info.tag || d.name;
+  const parent = dirOf(d.rel_path || "");
+  const fact = (label, value) => value == null || value === "" ? [] : [h("dt", {}, label), h("dd", {}, value)];
+  const day = 86400e3, newest = info.newest_mtime_ns ? Number(BigInt(info.newest_mtime_ns) / 1000000n) : null;
+  const store = d.store_record, sprobe = store ? (store.probe.backup || store.probe.database || {}) : {};
+  const rows = [
+    fact("folder", h("a", {href: route("browse", {root, parent})}, parent || "(root)")),
+    fact("logical size", `${bytes(d.size)} (${num(d.size)} bytes)`),
+    fact("allocated", d.allocated_size != null ? bytes(d.allocated_size) : null),
+    fact("files", num(info.total_files)), fact("folders", num(info.total_dirs)), fact("folded in", num(info.matched)),
+    tag === "[REDACTED]" ? [] : [fact("newest", when(info.newest_mtime_ns)), fact("oldest", when(info.oldest_mtime_ns))],
+    fact("made by", info.rule ? `${info.rule}${info.via ? ", summed by " + info.via : ""}${info.summed_at ? " " + ago(info.summed_at) : ""}` : null)];
+  const out = [h("h2", {}, h("span", {class: "badge"}, tag), " ", d.rel_path, h("small", {}, "rollup")),
+    info.partial ? h("div", {class: "errors"}, `A lower bound: ${num(info.errors)} entries could not be read`
+      + (info.error_codes && Object.keys(info.error_codes).length ? " (" + Object.entries(info.error_codes).map(([c, n]) => `${c} ${n}`).join(", ") + ")" : "") + ".") : null];
+  if (tag === "[REDACTED]") out.push(h("p", {class: "muted"}, "Contents are hidden by a rule. Names are not recorded."));
+  out.push(h("dl", {class: "facts"}, rows));
+  if (tag !== "[REDACTED]" && newest != null && tag !== "[BACKUP]" && tag !== "[DATABASE]")
+    out.push(h("p", {class: "muted"}, `Last changed ${Math.max(0, Math.round((Date.now() - newest) / day))} days ago.`,
+      " ", h("a", {href: route("records", {root, kind: "rollup", q: tag})}, `every ${tag} rollup`)));
+  if (store) {
+    const checked = (store.probe.backup || {}).checked;
+    out.push(h("h3", {}, "The store"),
+      h("dl", {class: "facts"},
+        fact("store", h("a", {href: route("record", {root, rel_path: store.rel_path})}, store.rel_path)),
+        fact("format", sprobe.format || sprobe.engine), fact("machines", (sprobe.machines || []).join(", ")),
+        fact("task", sprobe.task), fact("versions", sprobe.versions), fact("latest", sprobe.latest ? stamp(sprobe.latest) : null),
+        fact("protected", sprobe.storage && sprobe.storage.source_bytes ? bytes(sprobe.storage.source_bytes) : null),
+        fact("pool / protected", sprobe.storage && sprobe.storage.source_bytes && d.size
+          ? `${bytes(d.size)} for ${bytes(sprobe.storage.source_bytes)} protected (${(sprobe.storage.source_bytes / d.size).toFixed(2)}x)` : null),
+        fact("databases", (sprobe.databases || []).length ? (sprobe.databases || []).map(x => x.name || x.oid).join(", ") : null),
+        fact("checked", checked ? h("span", {class: "badge " + (checked === "none" ? "" : "ok")}, checked === "totals" ? "totals" : "none") : null),
+        fact("problems", (sprobe.problems || []).length ? (sprobe.problems || []).join("; ") : null),
+        fact("note", store.probe.store_note)),
+      tag === "[BACKUP]" && checked !== "totals" ? h("p", {class: "muted"}, "To compare the pool with the manifest, scan with ",
+        h("span", {class: "mono"}, "--verify-backups=1"), ".") : null);
+  }
+  if (params.vs) {
+    try {
+      const snap = await api("/api/treemap", {id: params.vs});
+      const join = q => snap.prefix && q ? snap.prefix + "/" + q : snap.prefix || q;
+      const then = (snap.folders || []).find(f => join(f.path) === d.rel_path);
+      const delta = d.size - (then ? then.bytes : 0);
+      out.push(h("p", {}, "Since the pin: ", h("b", {}, signed(delta)), then ? ` (${bytes(then.bytes)} then, ${bytes(d.size)} now)` : " (new since the pin)"));
+    } catch (e) { /* the pin is gone: no comparison */ }
+  }
+  return h("section", {class: "card"}, out);
+}
 async function viewRecord(params) {
   const root = curRoot(params), rel = params.rel_path || "";
   show(h("div", {class: "loading"}, "Loading record…"));
@@ -1151,18 +1430,20 @@ async function viewRecord(params) {
     fact("type", d.mime ? h("a", {href: route("records", {root, mime: d.mime, files_only: 1})}, d.mime) : null),
     fact("description", probe.mime_glob_desc),
     fact("extension", d.kind !== "dir" ? h("a", {href: route("records", {root, suffix: d.suffix || "(none)", files_only: 1})}, d.suffix || "(none)") : null),
-    fact("modified", when(d.mtime_ns)), fact("created", when(d.ctime_ns)),
+    fact("modified", d.kind === "rollup" && (probe.rollup || {}).tag === "[REDACTED]" ? null : when(d.mtime_ns)), fact("created", when(d.ctime_ns)),
     fact("sha256", d.sha256 ? h("span", {class: "mono"}, d.sha256) : null),
     fact("folder", d.rel_path ? h("a", {href: route("browse", {root, parent: d.kind === "dir" ? d.rel_path : dirOf(d.rel_path)})},
       d.kind === "dir" ? "browse this folder" : (dirOf(d.rel_path) || "(root)")) : null));
   const errs = (d.errors || []).length ? h("div", {class: "errors"},
     d.errors.map(e => h("div", {}, h("b", {}, e.stage + ": "), e.message))) : null;
   const membersCard = h("section", {class: "card", hidden: true});
+  const rollCard = d.kind === "rollup" ? await rollupCard(d, params, root) : null;
   show(h("div", {}, crumbs(root, d.rel_path, d.kind === "dir"), h("div", {class: "stack"},
+    rollCard,
     h("section", {class: "card"}, h("h2", {}, d.name || d.rel_path || root, h("small", {}, d.kind || "")), errs, facts),
     membersCard,
     h("section", {class: "card"}, h("h2", {}, "Stored document"), h("div", {class: "json"}, jsonTree(d, null, 0))))));
-  if (d.kind !== "dir") loadMembers(membersCard, root, d.rel_path, 0, null);
+  if (d.kind !== "dir" && d.kind !== "rollup") loadMembers(membersCard, root, d.rel_path, 0, null);
 }
 async function loadMembers(card, root, rel, offset, tbody) {
   let m;
@@ -1184,17 +1465,292 @@ async function loadMembers(card, root, rel, offset, tbody) {
     h("button", {onclick: () => loadMembers(card, root, rel, offset + m.limit, tbody)}, "Load more members")));
 }
 
+// --- topology (storage <-> shares <-> catalog roots; GET /api/topology) -----
+function capBar(used, size) {
+  if (used == null || !size) return null;
+  const pct = Math.min(100, used / size * 100);
+  return h("span", {class: "cap" + (pct >= 90 ? " hot" : ""), title: `${bytes(used)} of ${bytes(size)} (${pct.toFixed(1)}%)`,
+                    role: "img", "aria-label": `${pct.toFixed(0)}% used`}, h("i", {style: `width:${pct.toFixed(1)}%`}));
+}
+function jumpToHost(key) {
+  const el = document.getElementById("host-" + key);
+  if (!el) return;
+  el.open = true;
+  el.scrollIntoView({block: "start"});
+  el.classList.add("flash");
+  setTimeout(() => el.classList.remove("flash"), 1600);
+}
+function hostLink(name, key) {
+  return h("a", {href: "#topology", onclick: e => { e.preventDefault(); jumpToHost((key || name).toLowerCase()); }}, name);
+}
+function shareRoot(n) {
+  const r = n.root;
+  if (!r) return h("div", {class: "sharebox muted"}, `${n.unc || n.name}: no catalog root scanned`);
+  const rootLine = (x, sub) => h("div", {},
+    h("a", {href: route("browse", {root: x.root, parent: ""})}, x.root), " ",
+    h("span", {class: "muted"}, `${x.files == null ? "no files counted" : num(x.files) + " files, " + bytes(x.bytes)}`
+      + (x.last_scan ? ` · last scan ${ago(x.last_scan)}` : " · never scanned")), " ",
+    h("a", {href: route("graph", {root: x.root})}, "graph"), " · ", h("a", {href: route("summary", {root: x.root})}, "summary"),
+    x.state && x.state !== "ok" && x.state !== "never" ? h("span", {class: "badge warn"}, x.state) : null,
+    sub ? h("span", {class: "muted"}, " (beneath the share)") : null);
+  return h("div", {class: "sharebox"}, r.root ? rootLine(r, false) : null, (r.below || []).map(b => rootLine(b, true)));
+}
+function topoNode(n) {
+  const label = h("span", {class: "nrow"},
+    h("span", {class: "badge"}, n.type), h("b", {}, n.name),
+    h("span", {class: "muted"}, [n.level, n.type === "group" && n.role && n.role !== "data" ? n.role : null, n.kind,
+      n.mount ? `${n.mount} ${n.fs_type || ""}`.trim() : null, n.type === "share" ? (n.protocols || []).join("/") : null,
+      n.thin === true ? "thin" : n.thin === false ? "thick" : null].filter(Boolean).join(" · ")),
+    n.size_bytes != null ? h("span", {class: "num", title: num(n.size_bytes) + " bytes"}, bytes(n.size_bytes)) : null,
+    n.type === "lun" || n.type === "vdisk" ? (n.allocated_bytes != null ? capBar(n.allocated_bytes, n.size_bytes) : null)
+      : capBar(n.used_bytes, n.size_bytes),
+    n.used_bytes != null && n.type !== "lun" && n.type !== "vdisk" ? h("span", {class: "muted"}, `${bytes(n.used_bytes)} used`
+      + (n.free_bytes != null ? `, ${bytes(n.free_bytes)} free` : "")) : null,
+    n.allocated_bytes != null && (n.type === "lun" || n.type === "vdisk") ? h("span", {class: "muted"}, `${bytes(n.allocated_bytes)} allocated`) : null,
+    n.type === "share" && n.unc ? h("span", {class: "mono muted"}, n.unc) : null,
+    n.target ? h("span", {class: "muted"}, `target ${n.target}`) : null,
+    n.vm ? h("span", {class: "muted"}, `vm ${n.vm.name || n.vm.id}`) : null,
+    n.attached === false ? h("span", {class: "badge"}, "not attached") : null,
+    n.health && n.health !== "ok" ? h("span", {class: "badge warn"}, n.health) : null,
+    n.detail && n.type === "volume" ? h("span", {class: "muted"}, n.detail) : null);
+  const extras = [];
+  if (n.type === "share") extras.push(shareRoot(n));
+  if ((n.guests || []).length) extras.push(h("div", {class: "sharebox"}, "guest server: ",
+    n.guests.map((g, i) => [i ? ", " : "", g.host ? hostLink(g.host) : h("span", {class: "mono"}, g.server)]),
+    h("span", {class: "muted"}, " (jump to its section)")));
+  else if ((n.consumers || []).length) extras.push(h("div", {class: "sharebox"}, "used by: ",
+    n.consumers.map((c, i) => [i ? ", " : "", hostLink(c.host), ` ${c.name}`])));
+  if (n.provider) extras.push(h("div", {class: "sharebox"}, "made of ", hostLink(n.provider.host), ` ${n.provider.name}`,
+    h("span", {class: "muted"}, ` (${n.provider.via}${n.provider.note ? ", " + n.provider.note : ""})`),
+    n.provider.initiator_ok === false ? h("span", {class: "badge warn"}, "not on the LUN's ACL") : null));
+  const kids = n.children || [];
+  if (!kids.length) return h("div", {class: "node leaf"}, label, extras);
+  return h("details", {class: "node", open: n.type !== "share"}, h("summary", {}, label), extras,
+    h("div", {class: "children"}, kids.map(topoNode)));
+}
+function topoHost(hst) {
+  const cap = hst.capacity || {};
+  const head = h("summary", {}, h("b", {}, hst.name), " ", h("span", {class: "badge"}, hst.platform),
+    h("span", {class: "badge" + (hst.source === "manual" ? "" : " ok")}, hst.source === "manual" ? "written by hand" : "collected"),
+    hst.kind === "cluster" ? h("span", {class: "badge"}, "cluster") : null, " ",
+    h("span", {class: "muted"}, [hst.os, hst.source === "manual" ? "no snapshot (filecat.toml)"
+      : hst.scanned_at ? `collected ${ago(hst.scanned_at, null)}` : null,
+      cap.volume_bytes ? `volumes ${bytes(cap.volume_used_bytes)} of ${bytes(cap.volume_bytes)}` : null].filter(Boolean).join(" · ")));
+  const links = [];
+  if ((hst.attached_to || []).length) links.push(h("div", {}, "made of storage on: ", hst.attached_to.map((x, i) => [i ? ", " : "", hostLink(x)])));
+  if ((hst.provides_to || []).length) links.push(h("div", {}, "provides storage to: ",
+    hst.provides_to.map((x, i) => [i ? ", " : "", hostLink(x)])));
+  const disks = hst.disks || [];
+  const diskTable = disks.length ? h("details", {}, h("summary", {class: "muted"}, `${num(disks.length)} disks · ${bytes(cap.disk_bytes)}`),
+    h("div", {class: "scroll"}, h("table", {}, h("thead", {}, h("tr", {}, ["disk", "model", "media", "slot", "serial"].map(c => h("th", {}, c)),
+      h("th", {class: "num"}, "size"), h("th", {}, "made of"))),
+      h("tbody", {}, disks.map(d => h("tr", {}, h("td", {}, d.name), h("td", {class: "muted"}, d.model || ""), h("td", {class: "muted"}, d.media || ""),
+        h("td", {class: "muted"}, d.slot || ""), h("td", {class: "mono muted"}, d.serial || ""),
+        h("td", {class: "num"}, bytes(d.size_bytes)),
+        h("td", {}, d.provider ? [hostLink(d.provider.host), ` ${d.provider.name}`] : d.virtual ? h("span", {class: "badge warn"}, "no provider found") : "")))))))
+    : null;
+  const vms = (hst.vms || []).length ? h("div", {class: "muted"}, `virtual machines: ${hst.vms.map(v => v.name).join(", ")}`) : null;
+  return h("details", {class: "host", id: "host-" + hst.key, open: true}, head,
+    h("div", {class: "hostbody"}, (hst.notes || []).map(t => h("div", {class: "note"}, "note: " + t)), links, diskTable,
+      h("h3", {}, "pools, volumes, shares and block storage"),
+      (hst.tree || []).length ? (hst.tree || []).map(topoNode) : h("div", {class: "muted"}, "nothing above the disks"), vms));
+}
+async function viewTopology() {
+  show(h("div", {class: "loading"}, "Loading topology…"));
+  let d;
+  try { d = await api("/api/topology"); } catch (e) { return show(failed(e)); }
+  if (parseHash().view !== "topology") return;
+  if (!d.hosts.length && !d.waiting.length) return show(h("div", {class: "topo"}, d.problem ? h("div", {class: "errors"}, d.problem) : null,
+    h("section", {class: "card"}, h("h2", {}, "Topology"),
+      h("div", {class: "empty"}, "No storage topology has been collected for this catalog. Run ", h("span", {class: "mono"}, "filecat storage collect"),
+        " (it reads each [[agents]] host through its agent), or describe hosts by hand with [[storage.hosts]] in filecat.toml."))));
+  const ps = d.physical_summary;
+  const kpi = (v, label) => h("div", {class: "kpi"}, h("b", {}, v), h("span", {}, label));
+  const sumRow = ps ? h("div", {class: "kpis"}, kpi(num(d.hosts.length), "hosts"), kpi(bytes(ps.disk_bytes), "physical disks"),
+    kpi(`${bytes(ps.volume_used_bytes)} of ${bytes(ps.volume_bytes)}`, "volumes used (counted once)"),
+    kpi(bytes(ps.share_used_bytes), "in shares"), kpi(num(d.links.length), "links between hosts")) : null;
+  const unresolved = d.unresolved.length ? h("section", {class: "card"}, h("h2", {}, "Expecting a provider, none found"),
+    h("div", {class: "scroll"}, h("table", {}, h("tbody", {}, d.unresolved.map(u => h("tr", {},
+      h("td", {}, hostLink(u.host), ` ${u.name}`), h("td", {class: "muted"}, u.reason + (u.wanted ? ` (${u.wanted})` : ""))))))))
+    : null;
+  const waiting = d.waiting.length ? h("section", {class: "card"}, h("h2", {}, "No snapshot yet"),
+    h("div", {class: "scroll"}, h("table", {}, h("tbody", {}, d.waiting.map(w => h("tr", {}, h("td", {}, w.name),
+      h("td", {class: "muted"}, `agent ${w.agent}: run filecat storage collect --agent ${w.agent}`)))))))
+    : null;
+  const outside = h("section", {class: "card"}, h("h2", {}, "Not in topology", h("small", {}, `${num(d.roots_not_in_topology.length)} of ${num(d.roots)} roots`)),
+    d.roots_not_in_topology.length ? h("div", {class: "scroll"}, h("table", {}, h("thead", {}, h("tr", {}, h("th", {}, "root"),
+      h("th", {class: "num"}, "files"), h("th", {class: "num"}, "size"), h("th", {}, "last scan"))),
+      h("tbody", {}, d.roots_not_in_topology.map(r => h("tr", {}, h("td", {class: "path"}, h("a", {href: route("browse", {root: r.root, parent: ""})}, r.root)),
+        h("td", {class: "num"}, num(r.files)), h("td", {class: "num"}, bytes(r.bytes)), h("td", {class: "muted"}, r.last_scan ? ago(r.last_scan) : "never"))))))
+      : h("div", {class: "empty"}, "Every root is a share (or beneath one) of a host above."));
+  const all = h("button", {onclick: () => document.querySelectorAll(".topo details").forEach(x => x.open = true)}, "Expand all");
+  const none = h("button", {onclick: () => document.querySelectorAll(".topo details.node, .topo details.host > .hostbody details").forEach(x => x.open = false)}, "Collapse trees");
+  show(h("div", {class: "topo"}, d.problem ? h("div", {class: "errors"}, "filecat.toml: " + d.problem) : null, sumRow,
+    h("div", {class: "toolbar"}, all, none, h("span", {class: "note"}, "collected by `filecat storage collect`; hosts are listed by name")),
+    d.hosts.map(topoHost), h("div", {class: "stack"}, unresolved, waiting, outside)));
+}
+
+// --- rollups (the audit of `filecat rollups list`; GET /api/rollups) ---------
+const ROLLUP_COLS = [
+  {key: "root", label: "root"}, {key: "tag", label: "tag"}, {key: "parent", label: "folder"},
+  {key: "files", label: "files", num: true}, {key: "dirs", label: "folders", num: true}, {key: "size", label: "size", num: true},
+  {key: "newest_mtime_ns", label: "newest", num: true}, {key: "flags", label: "", sortable: false},
+];
+async function viewRollups(params) {
+  const p = {...params};
+  const holder = h("div", {}, h("div", {class: "loading"}, "Loading rollups…"));
+  show(holder);
+  let d;
+  try { d = await api("/api/rollups", {root: p.root || "", tag: p.tag || ""}); } catch (e) { return fill(holder, failed(e)); }
+  if (parseHash().view !== "rollups") return;
+  const sort = ROLLUP_COLS.some(c => c.key === p.sort && c.sortable !== false) ? p.sort : "size";
+  const desc = p.desc == null ? !!ROLLUP_COLS.find(c => c.key === sort).num : p.desc === "1";
+  const cmp = (a, b) => {
+    const x = a[sort] ?? (typeof b[sort] === "number" ? 0 : ""), y = b[sort] ?? (typeof a[sort] === "number" ? 0 : "");
+    return (typeof x === "number" ? x - y : String(x).localeCompare(String(y))) || a.root.localeCompare(b.root) || a.parent.localeCompare(b.parent);
+  };
+  const rows = [...d.rows].sort((a, b) => desc ? cmp(b, a) : cmp(a, b));
+  const manyRoots = d.roots.length > 1;
+  const rootSel = h("select", {onchange: e => go("rollups", {...p, root: e.target.value || null})},
+    h("option", {value: ""}, "All roots"), d.roots.map(r => h("option", {value: r, selected: r === p.root}, r)));
+  const tagSel = h("select", {onchange: e => go("rollups", {...p, tag: e.target.value || null})},
+    h("option", {value: ""}, "All tags"), d.tags.map(t => h("option", {value: t, selected: t === p.tag}, t)));
+  const t = d.totals;
+  const kpi = (v, label) => h("div", {class: "kpi"}, h("b", {}, v), h("span", {}, label));
+  const byTag = h("section", {class: "card"}, h("h2", {}, "By tag"),
+    h("div", {class: "scroll"}, h("table", {}, h("thead", {}, h("tr", {}, h("th", {}, "tag"), h("th", {class: "num"}, "rollups"),
+      h("th", {class: "num"}, "files"), h("th", {class: "num"}, "size"), h("th", {class: "num"}, "newest"))),
+      h("tbody", {}, d.by_tag.map(x => h("tr", {class: "click", onclick: () => go("rollups", {...p, tag: x.tag})},
+        h("td", {}, h("span", {class: "badge"}, x.tag), x.partial ? h("span", {class: "badge warn"}, `${x.partial} partial`) : null),
+        h("td", {class: "num"}, num(x.rollups)), h("td", {class: "num"}, num(x.files)),
+        h("td", {class: "num", title: num(x.size) + " bytes"}, bytes(x.size)),
+        h("td", {class: "num muted"}, x.tag === "[REDACTED]" ? "" : when(x.newest_mtime_ns))))))));
+  const byRoot = manyRoots ? h("section", {class: "card"}, h("h2", {}, "By root"),
+    h("div", {class: "scroll"}, h("table", {}, h("thead", {}, h("tr", {}, h("th", {}, "root"), h("th", {class: "num"}, "rollups"),
+      h("th", {class: "num"}, "files"), h("th", {class: "num"}, "size"))),
+      h("tbody", {}, d.by_root.map(x => h("tr", {class: "click", onclick: () => go("rollups", {...p, root: x.root})},
+        h("td", {class: "path"}, x.root), h("td", {class: "num"}, num(x.rollups)), h("td", {class: "num"}, num(x.files)),
+        h("td", {class: "num", title: num(x.size) + " bytes"}, bytes(x.size)))))))) : null;
+  const head = h("tr", {}, ROLLUP_COLS.filter(c => c.key !== "root" || manyRoots).map(c => {
+    const on = sort === c.key, sortable = c.sortable !== false;
+    return h("th", {class: (c.num ? "num " : "") + (sortable ? "sort" : ""),
+      onclick: sortable ? () => go("rollups", {...p, sort: c.key, desc: on ? (desc ? "0" : "1") : (c.num ? "1" : "0")}) : null},
+      c.label, on ? (desc ? " ▼" : " ▲") : "");
+  }), h("th", {}, "made by"), h("th", {}));
+  const body = rows.map(r => {
+    const red = r.redacted;
+    const flags = [r.partial ? h("span", {class: "badge warn", title: "lower bound: some entries could not be read"}, "partial") : null,
+      r.errors ? h("span", {class: "badge warn"}, `${num(r.errors)} unreadable`) : null,
+      red ? h("span", {class: "badge", title: "counts only: names are never recorded"}, "counts only") : null];
+    return h("tr", {},
+      manyRoots ? h("td", {class: "path"}, r.root) : null,
+      h("td", {}, h("span", {class: "badge"}, r.tag)),
+      h("td", {class: "path"}, red ? (r.parent || "(the root)") : h("a", {href: route("browse", {root: r.root, parent: r.parent})}, r.parent || "(the root)")),
+      h("td", {class: "num"}, num(r.files)), h("td", {class: "num"}, num(r.dirs)),
+      h("td", {class: "num", title: num(r.size) + " bytes" + (r.allocated_size ? `, ${bytes(r.allocated_size)} allocated` : "")}, bytes(r.size)),
+      h("td", {class: "num muted"}, red ? "" : when(r.newest_mtime_ns)),
+      h("td", {}, flags),
+      h("td", {class: "muted"}, Object.entries(r.rules).map(([k, n]) => `${n} ${k}`).join(", ")),
+      h("td", {}, red ? "" : h("a", {href: route("record", {root: r.root, rel_path: r.rel_path})}, "record")));
+  });
+  fill(holder, h("div", {class: "toolbar"}, h("label", {}, "Root ", rootSel), h("label", {}, "Tag ", tagSel),
+      p.root || p.tag ? h("button", {onclick: () => go("rollups", {})}, "Clear filters") : null,
+      h("span", {class: "note"}, "from the rollup records; what `filecat rollups list` prints")),
+    h("div", {class: "kpis"}, kpi(num(t.rollups), "rollups"), kpi(num(t.files), "files inside"), kpi(num(t.dirs), "folders inside"),
+      kpi(bytes(t.size), "size"), t.partial ? kpi(num(t.partial), "partial (lower bounds)") : null),
+    d.rows.length ? h("div", {class: "stack"}, h("div", {class: "grid"}, byTag, byRoot),
+      h("section", {class: "card"}, h("h2", {}, "Rollups", h("small", {}, `${num(rows.length)} by ${manyRoots ? "root, " : ""}tag and folder`)),
+        h("div", {class: "scroll"}, h("table", {}, h("thead", {}, head), h("tbody", {}, body)))))
+      : h("section", {class: "card"}, h("div", {class: "empty"}, p.root || p.tag ? "No rollups match these filters."
+        : "No rollups in this catalog: nothing was folded into a [TAG] record. See `filecat rollups suggest`.")));
+}
+
+// --- search (file names across every root; /api/search) --------------------------
+const SEARCH_EXAMPLES = [
+  ["eve*.exe", "wildcards: * any run, ? one character; the whole name must match"],
+  ["setup", "plain text: the name contains it (the same as *setup*)"],
+  ["ext:iso size:>1gb", "extension and size (>, >=, <, <=, =, or 1mb..1gb; kb mb gb tb)"],
+  ["\"annual report\" ext:docx;xlsx after:2024-01-01", "quotes keep a space in one term; dates are UTC"],
+  ["backup*.zip host:nas-main", "only the roots on that host (wildcards allowed; host:- is the local disk)"],
+  ["kind:dir cache root:homes", "folders only (kind:file, kind:rollup, or a type like image); roots whose path contains the text"],
+];
+const SEARCH_FIELDS = ["q", "root", "host", "ext", "min_size", "max_size", "after", "before", "kind"];
+async function viewSearch(params) {
+  const p = {...params};
+  const input = (name, attrs) => h("input", {name, value: p[name] || "", ...attrs});
+  const q = h("input", {type: "search", name: "q", value: p.q || "", autofocus: true, size: 40,
+    placeholder: "name pattern and filters, e.g.  eve*.exe  ext:exe  size:>10mb  host:nas-main", "aria-label": "search"});
+  const roots = h("select", {name: "root"}, h("option", {value: ""}, "any root"),
+    INFO.roots.map(r => h("option", {value: r, selected: p.root === r}, r)));
+  if (p.root && !INFO.roots.includes(p.root)) roots.append(h("option", {value: p.root, selected: true}, p.root));
+  const kind = h("select", {name: "kind"}, [["", "files and folders"], ["file", "files only"], ["dir", "folders only"], ["rollup", "rollups only"]]
+    .map(([v, t]) => h("option", {value: v, selected: (p.kind || "") === v}, t)));
+  const form = h("form", {class: "search-form", onsubmit: e => {
+      e.preventDefault();
+      const next = {};
+      for (const f of SEARCH_FIELDS) { const v = (form.elements[f] || {}).value; if (v && v.trim()) next[f] = v.trim(); }
+      if (p.sort) { next.sort = p.sort; if (p.desc) next.desc = p.desc; }
+      go("search", next);
+    }},
+    h("div", {class: "q"}, q, h("button", {type: "submit"}, "Search")),
+    h("div", {class: "adv"},
+      h("label", {}, "root ", roots), h("label", {}, "host ", input("host", {size: 12, placeholder: "nas-main"})),
+      h("label", {}, "extension ", input("ext", {size: 10, placeholder: "exe;dll"})),
+      h("label", {}, "size ", input("min_size", {size: 7, placeholder: "min 1mb"}), " – ", input("max_size", {size: 7, placeholder: "max 1gb"})),
+      h("label", {}, "modified ", input("after", {type: "date"}), " – ", input("before", {type: "date"})),
+      h("label", {}, "show ", kind)));
+  const holder = h("section", {class: "card"});
+  const help = h("section", {class: "card search-help"}, h("h2", {}, "Search the names of every root"),
+    h("div", {class: "note"}, "Case-insensitive, against the file or folder name only. All terms must match. "
+      + "A folder that was rolled up ([CACHE], [BACKUP], [REDACTED]) is found by its own name; what is inside it is not listed anywhere."),
+    h("ul", {}, SEARCH_EXAMPLES.map(([ex, why]) => h("li", {}, h("code", {title: "use this", onclick: () => { q.value = ex; q.focus(); }}, ex), " ", h("span", {class: "muted"}, why)))));
+  show(h("div", {class: "stack"}, form, holder));
+  if (!SEARCH_FIELDS.some(f => p[f])) return fill(holder, help);
+  fill(holder, h("div", {class: "loading"}, "Searching…"));
+  let r;
+  try { r = await api("/api/search", p); } catch (e) { return fill(holder, e.login ? failed(e) : h("div", {class: "error"}, e.message)); }
+  if (parseHash().view !== "search") return;
+  const sortTh = (key, label, isNum) => {
+    const on = r.sort === key;
+    return h("th", {class: (isNum ? "num " : "") + "sort", onclick: () => go("search", {...p, sort: key, offset: "",
+      desc: on ? (r.desc ? "0" : "1") : (isNum ? "1" : "0")})}, label, on ? (r.desc ? " ▼" : " ▲") : "");
+  };
+  const rows = r.rows.map(d => h("tr", {class: "click", onclick: () => go("record", {root: d.root, rel_path: d.rel_path})},
+    h("td", {class: "path"}, d.name || d.rel_path || "(root)",
+      d.unreadable ? h("span", {class: "badge warn"}, "unreadable") : d.errors ? h("span", {class: "badge warn"}, `${d.errors} error${d.errors > 1 ? "s" : ""}`) : null),
+    h("td", {class: "path muted"}, h("a", {href: route("browse", {root: d.root, parent: d.folder}), title: "open this folder in Browse",
+      onclick: ev => ev.stopPropagation()}, d.folder || "(top of root)")),
+    h("td", {class: "muted hide-sm"}, d.root),
+    h("td", {class: "num", title: d.size == null ? "" : num(d.size) + " bytes"}, d.kind === "dir" ? "" : bytes(d.size)),
+    h("td", {class: "num muted"}, when(d.mtime_ns)),
+    h("td", {}, d.kind || "", d.rollup && d.rollup.total_files != null ? h("span", {class: "sub"}, `${num(d.rollup.total_files)} files folded in`) : null)));
+  const end = r.offset + r.rows.length;
+  const shown = r.rows.length ? `${num(r.offset + 1)}–${num(end)}` : "0";
+  const status = h("span", {class: "muted"}, r.rows.length || r.offset
+    ? `${shown}${r.more ? " (more results follow)" : ""} · ${r.elapsed_ms < 1000 ? Math.round(r.elapsed_ms) + " ms" : (r.elapsed_ms / 1000).toFixed(1) + " s"}`
+    : `No matching names · ${Math.round(r.elapsed_ms)} ms`);
+  const pager = h("div", {class: "pager"},
+    h("button", {disabled: r.offset <= 0, onclick: () => go("search", {...p, offset: Math.max(0, r.offset - r.limit)})}, "‹ Prev"),
+    h("button", {disabled: !r.more, onclick: () => go("search", {...p, offset: r.offset + r.limit})}, "Next ›"), status);
+  fill(holder, r.rows.length ? h("div", {class: "scroll"}, h("table", {},
+    h("thead", {}, h("tr", {}, sortTh("name", "name"), sortTh("rel_path", "folder"), h("th", {class: "hide-sm"}, "root"),
+      sortTh("size", "size", true), sortTh("mtime_ns", "modified", true), sortTh("kind", "kind"))),
+    h("tbody", {}, rows))) : null, pager);
+}
+
 // --- shell -----------------------------------------------------------
-const VIEWS = {roots: viewRoots, summary: viewSummary, graph: viewGraph, records: viewRecords, browse: viewBrowse,
+const VIEWS = {roots: viewRoots, server: viewServer, summary: viewSummary, graph: viewGraph, records: viewRecords, browse: viewBrowse,
                record: viewRecord};
+Object.assign(VIEWS, {rollups: viewRollups, topology: viewTopology});
+VIEWS.search = viewSearch;
 async function render() {
   const {view, params} = parseHash();
   if (params.root && params.root !== $root.value && INFO.roots.includes(params.root)) $root.value = params.root;
   for (const a of document.querySelectorAll("#nav a")) {
     a.classList.toggle("on", a.dataset.view === (view === "record" ? "browse" : view));
-    a.href = route(a.dataset.view, a.dataset.view === "graph" ? {} : {root: $root.value});  // Graph opens on every root
+    a.href = route(a.dataset.view, ["graph", "rollups", "topology", "search"].includes(a.dataset.view) ? {} : {root: $root.value});  // these open on every root
   }
-  if (!INFO.roots.length) return show(h("div", {class: "empty"}, "This catalog has no records yet."));
+  if (!INFO.roots.length && !["server", "topology", "roots"].includes(view)) return show(h("div", {class: "empty"}, "This catalog has no records yet."));
   (VIEWS[view] || viewRoots)(params);
 }
 $root.addEventListener("change", () => {

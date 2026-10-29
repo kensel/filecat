@@ -43,19 +43,19 @@ config.json carries an agent token; only named fields are copied out of it.
 from __future__ import annotations
 
 import json
-import os
 import re
 from typing import Any
 
-from .util import file_size, iso, listdir, read_json, sqlite_rows
+from .storefs import LOCAL, StoreFS
+from .util import iso
 
 STATUS = {5: "succeeded", 4: "failed"}
 _VERSION_DIR = re.compile(r"^ActiveBackup_\d{4}-\d{2}-\d{2}_\d{6}$")
 
 
-def _repo_size(path: str) -> list[int] | None:
+def _repo_size(path: str, fs: StoreFS = LOCAL) -> list[int] | None:
     try:
-        with open(path, "rb") as f:
+        with fs.open(path, "rb") as f:
             data = f.read(4096)
     except OSError:
         return None
@@ -72,6 +72,7 @@ def _json_field(text: str | None) -> Any:
 
 class _ActiveBackup:
     name = "synology-abb"
+    manifests = ("storage_info.json", "storage.cache", "@data/repo_size", "@data/file_map.db")
 
     def matches(self, dir_name: str, names: set[str]) -> bool:
         return dir_name == "@ActiveBackup" and "@data" in names and "storage_info.json" in names
@@ -79,23 +80,23 @@ class _ActiveBackup:
     def opaque(self, inner: str) -> bool:
         return inner.startswith(("@data/", "@Fuse/"))
 
-    def summarize(self, path: str, names: set[str]) -> dict[str, Any]:
+    def summarize(self, path: str, names: set[str], fs: StoreFS = LOCAL) -> dict[str, Any]:
         out: dict[str, Any] = {"format": self.name}
         problems: list[str] = []
         try:
-            out["install_id"] = read_json(os.path.join(path, "storage_info.json")).get("db_serial")
+            out["install_id"] = fs.read_json(fs.join(path, "storage_info.json")).get("db_serial")
         except (OSError, ValueError, AttributeError):
             pass
 
         try:
-            cache = (read_json(os.path.join(path, "storage.cache")) or {}).get("size") or {}
+            cache = (fs.read_json(fs.join(path, "storage.cache")) or {}).get("size") or {}
         except (OSError, ValueError, AttributeError):
             cache = {}
         storage: dict[str, Any] = {}
         backed_up = sum(int(v[0]) for v in cache.values() if v)
         if cache:
             storage["backed_up_bytes"] = backed_up
-        repo = _repo_size(os.path.join(path, "@data", "repo_size"))
+        repo = _repo_size(fs.join(path, "@data", "repo_size"), fs)
         if repo:
             usage, _, compressed = repo
             storage["usage_bytes"] = usage
@@ -107,17 +108,17 @@ class _ActiveBackup:
         out["storage"] = storage
 
         pool: dict[str, int] = {}
-        map_db = os.path.join(path, "@data", "file_map.db")
+        map_db = fs.join(path, "@data", "file_map.db")
         try:
-            pool = {r["path"]: r["size"] for r in sqlite_rows(map_db, "SELECT path, size FROM file_map")}
+            pool = {r["path"]: r["size"] for r in fs.sqlite_rows(map_db, "SELECT path, size FROM file_map")}
         except Exception as e:
             problems.append(f"pool index @data/file_map.db unreadable: {type(e).__name__}: {e}")
 
         tasks = []
         for name in sorted(names):
-            task_path = os.path.join(path, name)
-            if os.path.isfile(os.path.join(task_path, "target.db")):
-                task = _task(task_path, name, pool, cache.get(name))
+            task_path = fs.join(path, name)
+            if fs.isfile(fs.join(task_path, "target.db")):
+                task = _task(task_path, name, pool, cache.get(name), fs)
                 tasks.append(task)
                 problems += [f"{name}: {p}" for p in task.pop("problems")]
         out["tasks"] = tasks
@@ -132,11 +133,12 @@ class _ActiveBackup:
         return out
 
 
-def _task(path: str, folder: str, pool: dict[str, int], cached: list | None) -> dict[str, Any]:
+def _task(path: str, folder: str, pool: dict[str, int], cached: list | None,
+          fs: StoreFS = LOCAL) -> dict[str, Any]:
     task: dict[str, Any] = {"folder": folder}
     problems: list[str] = []
     try:
-        cfg = read_json(os.path.join(path, "config.json"))
+        cfg = fs.read_json(fs.join(path, "config.json"))
     except (OSError, ValueError):
         cfg = {}
     dev = ((cfg or {}).get("device_table") or [{}])[0]
@@ -153,17 +155,18 @@ def _task(path: str, folder: str, pool: dict[str, int], cached: list | None) -> 
     if cached:
         task["backed_up_bytes"] = int(cached[0])
 
-    db = os.path.join(path, "target.db")
+    db = fs.join(path, "target.db")
     try:
-        versions = sqlite_rows(db, "SELECT * FROM version_table ORDER BY version_id")
-        objects = sqlite_rows(db, "SELECT * FROM object_table ORDER BY object_id")
-        devices = sqlite_rows(db, "SELECT version_id, host_name, os_name, mount_map FROM device_table")
+        versions, objects, devices = fs.sqlite_many(db, [
+            ("SELECT * FROM version_table ORDER BY version_id", ()),
+            ("SELECT * FROM object_table ORDER BY object_id", ()),
+            ("SELECT version_id, host_name, os_name, mount_map FROM device_table", ())])
     except Exception as e:
         task["versions"] = []
         task["problems"] = problems + [f"target.db unreadable: {type(e).__name__}: {e}"]
         return task
 
-    on_disk = listdir(path)
+    on_disk = fs.listdir(path)
     mounts_by_version: dict[int, dict[str, str]] = {}
     for d in devices:
         task["machine"] = task.get("machine") or d.get("host_name")
@@ -185,10 +188,10 @@ def _task(path: str, folder: str, pool: dict[str, int], cached: list | None) -> 
         vp: list[str] = []
         if status == 4:
             vp.append("backup failed")
-        vdir = os.path.join(path, folder_name)
+        vdir = fs.join(path, folder_name)
         if folder_name not in on_disk:
             vp.append("version folder missing")
-        files = listdir(vdir)
+        files = fs.listdir(vdir)
         mounts = mounts_by_version.get(vid, {})
         transferred = 0
         for o in (o for o in objects if o["version_id"] == vid):
@@ -219,7 +222,7 @@ def _task(path: str, folder: str, pool: dict[str, int], cached: list | None) -> 
                     try:
                         size = entry.stat().st_size
                     except OSError:
-                        size = file_size(os.path.join(vdir, base))
+                        size = fs.file_size(fs.join(vdir, base))
                     if size is not None and size != o["file_size"]:
                         vp.append(f"{base}: {size} bytes on disk, manifest {o['file_size']}")
         ver["transferred_bytes"] = transferred
@@ -247,14 +250,14 @@ class _View:
     def opaque(self, inner: str) -> bool:
         return True
 
-    def summarize(self, path: str, names: set[str]) -> dict[str, Any]:
+    def summarize(self, path: str, names: set[str], fs: StoreFS = LOCAL) -> dict[str, Any]:
         tasks, versions, apparent = [], 0, 0
-        for task, e in sorted(listdir(path).items()):
+        for task, e in sorted(fs.listdir(path).items()):
             if not e.is_dir():
                 continue
-            vers = [n for n, v in listdir(os.path.join(path, task)).items() if v.is_dir()]
+            vers = [n for n, v in fs.listdir(fs.join(path, task)).items() if v.is_dir()]
             for v in vers:
-                for f in listdir(os.path.join(path, task, v)).values():
+                for f in fs.listdir(fs.join(path, task, v)).values():
                     try:
                         apparent += f.stat().st_size
                     except OSError:

@@ -1,0 +1,6 @@
+/dev/md0 / ext4 rw,relatime,data=ordered 0 0
+none /dev devtmpfs rw,nosuid,noexec,relatime,size=3919364k,nr_inodes=979841,mode=755 0 0
+none /proc proc rw,nosuid,nodev,noexec,relatime 0 0
+none /sys sysfs rw,nosuid,nodev,noexec,relatime 0 0
+/dev/mapper/cachedev_0 /volume1 btrfs rw,nodev,relatime,ssd,synoacl,space_cache=v2,auto_reclaim_space,metadata_ratio=50,block_group_cache_tree,subvolid=256,subvol=/@syno 0 0
+/dev/mapper/cachedev_0 /volume1/@docker btrfs rw,nodev,relatime,ssd,synoacl,space_cache=v2,subvolid=260,subvol=/@docker 0 0

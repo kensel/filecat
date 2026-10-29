@@ -15,6 +15,7 @@ import zlib
 from typing import Any
 
 from ..options import ScanOptions
+from ..fsource import fopen, fsize
 from . import members as members_mod
 
 _SIGNATURE = b"7z\xbc\xaf\x27\x1c"
@@ -436,7 +437,7 @@ def probe_7z(path: str, head: bytes, options: ScanOptions, result: Any) -> None:
     result.kind = "archive"
     result.container = "7z"
 
-    with open(path, "rb") as f:
+    with fopen(path, "rb") as f:
         start = f.read(_START_HEADER_SIZE)
         if len(start) < _START_HEADER_SIZE:
             result.errors.append({"stage": "7z", "message": "signature header truncated"})
@@ -448,7 +449,7 @@ def probe_7z(path: str, head: bytes, options: ScanOptions, result: Any) -> None:
         if zlib.crc32(start[12:32]) != start_crc:
             info7z["start_header_crc_ok"] = False
 
-        file_size = os.path.getsize(path)
+        file_size = fsize(path)
         header_end = _START_HEADER_SIZE + next_off + next_size
         info7z["expected_size"] = header_end
         if header_end > file_size:

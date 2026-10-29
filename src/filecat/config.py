@@ -17,6 +17,22 @@ when that value is used, so passwords can stay out of the file.
     verify  test, then open the backend as scan would (creating tables or
             collections) and put/get/delete one record and its members under
             a throwaway root
+
+`[[agents]]` tables name the NAS hosts running filecat-agent (see
+docs/agent-protocol.md); load_agents validates them and agent_for picks the
+one that covers a UNC path. `filecat agents` lists and tests them.
+
+`[rollups]` (a mode per built-in type) and `[[rollups.rule]]` say what a scan
+counts without listing (docs/rollups.md); load_rollups validates them, and no
+message or `config show` line repeats a pattern.
+
+`[server]` and `[[server.jobs]]` configure `filecat server` (health checks and scheduled scans, storage
+collects and store re-sums); server_cfg.load_server validates them. See docs/agent-server.md.
+
+`[[storage.hosts]]` (a host with no agent) and `[[storage.links]]` (which disk is made of which
+node on another host) are written by hand; load_storage validates them and
+`filecat storage links` checks them against saved topology snapshots. See
+docs/storage-topology.md.
 """
 from __future__ import annotations
 
@@ -26,10 +42,14 @@ import socket
 import sys
 import time
 import tomllib
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
+from . import rollup
+from .agent_client import DEFAULT_PORT, ShareMap, normalize_fingerprint
 from .backends import BACKENDS, DEFAULT_OUT
+from .topology import ManualLink, Topology, manual_topology, parse_ref
 
 FILE_NAME = "filecat.toml"
 FILE_BACKENDS = ("jsonl", "sqlite")
@@ -131,6 +151,266 @@ def mask(dsn: str | None) -> str | None:
     return re.sub(r"(?i)\b(pwd|password)=(?!\$\{)(\{[^}]*\}|[^;\s]*)", r"\1=***", dsn)
 
 
+# --- [[agents]] ---------------------------------------------------------
+AGENT_KEYS = ("name", "host", "port", "cert_sha256", "token", "alias", "shares", "volume",
+              "exclude", "timeout", "max_jobs")
+
+
+@dataclass(frozen=True)
+class AgentConfig:
+    """One [[agents]] table, validated. `token` is as written (it may hold
+    ${NAME}); resolved_token() reads the environment."""
+    name: str
+    host: str
+    cert_sha256: str                    # 64 lowercase hex digits
+    token: str
+    alias: str                          # \\nas-main: the server SMB scans record it under
+    port: int = DEFAULT_PORT
+    shares: dict[str, str] = field(default_factory=dict)    # POSIX prefix -> UNC root
+    volume: int = 1                     # the /volumeN whose /<share> folders are \\alias\<share>
+    exclude: tuple[str, ...] = ()
+    timeout: float = 30.0
+    max_jobs: int = 1                   # filecat server: jobs (its own plus other clients') this agent takes at once
+
+    @property
+    def endpoint(self) -> str:
+        return f"{self.host}:{self.port}"
+
+    def resolved_token(self) -> str:
+        return expand(self.token)
+
+    def policy(self) -> dict[str, Any]:
+        """The configure_policy payload; empty when nothing is configured."""
+        policy: dict[str, Any] = {}
+        if self.exclude:
+            policy["exclude"] = list(self.exclude)
+        return policy
+
+    def share_map(self) -> ShareMap:
+        return ShareMap(self.alias, self.shares, self.volume)
+
+
+def _agent(table: Any, index: int) -> AgentConfig:
+    label = f"[[agents]] #{index}"
+    if not isinstance(table, dict):
+        raise ConfigError(f"{label}: wants a table with name, host, cert_sha256 and token")
+    if isinstance(table.get("name"), str) and table["name"]:
+        label += f" ({table['name']})"
+
+    def bad(message: str) -> ConfigError:
+        return ConfigError(f"{label}: {message}")
+
+    if "rollup_groups" in table:
+        raise bad("rollup_groups was removed; write [[rollups.rule]] tables with a tag and match "
+                  "patterns instead (docs/rollups.md)")
+    unknown = [k for k in table if k not in AGENT_KEYS]
+    if unknown:
+        raise bad(f"unknown key {unknown[0]!r}; the keys are {', '.join(AGENT_KEYS)}")
+
+    def text(key: str, default: str | None = None) -> str:
+        value = table.get(key, default)
+        if value is None:
+            raise bad(f"{key} is required")
+        if not isinstance(value, str) or not value.strip():
+            raise bad(f"{key} wants a non-empty string")
+        return value.strip()
+
+    def number(key: str, default: Any, low: float, high: float | None, kind: type) -> Any:
+        value = table.get(key, default)
+        ok = (isinstance(value, (int, float)) and not isinstance(value, bool)
+              and (kind is float or isinstance(value, int)))
+        if not ok or value < low or (high is not None and value > high):
+            span = f"from {low:g} to {high:g}" if high is not None else f"of at least {low:g}"
+            raise bad(f"{key} = {value!r}; want a number {span}")
+        return kind(value)
+
+    name = text("name")
+    if any(c.isspace() for c in name):
+        raise bad("name must not contain spaces")
+    host = text("host")
+    if host.count(":") == 1 and host.rsplit(":", 1)[1].isdigit():
+        raise bad(f"host = {host!r} includes a port; put it in port = {host.rsplit(':', 1)[1]}")
+    try:
+        cert = normalize_fingerprint(text("cert_sha256"))
+    except ValueError as exc:
+        raise bad(f"cert_sha256: {exc}") from None
+    shares = table.get("shares", {})
+    if not isinstance(shares, dict) or not all(isinstance(k, str) and isinstance(v, str)
+                                               for k, v in shares.items()):
+        raise bad("[agents.shares] wants '/volume1/Share' = '\\\\server\\Share' string pairs")
+    volume = number("volume", 1, 1, None, int)
+    try:
+        smap = ShareMap(text("alias", "\\\\" + name), shares, volume)
+    except ValueError as exc:
+        raise bad(str(exc)) from None
+    exclude = table.get("exclude", [])
+    if not isinstance(exclude, list) or not all(isinstance(x, str) and x for x in exclude):
+        raise bad("exclude wants a list of paths or names")
+    return AgentConfig(
+        name=name, host=host, cert_sha256=cert, token=text("token"), alias=smap.alias,
+        port=number("port", DEFAULT_PORT, 1, 65535, int), shares=dict(shares), volume=volume,
+        exclude=tuple(exclude), timeout=number("timeout", 30.0, 0.001, None, float),
+        max_jobs=number("max_jobs", 1, 1, 64, int))
+
+
+def load_agents(cfg: dict[str, Any]) -> list[AgentConfig]:
+    """The validated [[agents]] tables, in file order."""
+    tables = cfg.get("agents")
+    if tables is None:
+        return []
+    if not isinstance(tables, list):
+        raise ConfigError("agents: write one [[agents]] table per host (double brackets)")
+    agents = [_agent(t, i) for i, t in enumerate(tables, 1)]
+    names = [a.name for a in agents]
+    for name in names:
+        if names.count(name) > 1:
+            raise ConfigError(f"[[agents]]: name {name!r} is used twice")
+    return agents
+
+
+# --- [rollups] ----------------------------------------------------------
+def load_rollups(cfg: dict[str, Any]) -> rollup.RollupConfig:
+    """The validated [rollups] section (modes, [[rollups.rule]], stores)."""
+    try:
+        return rollup.parse_config(cfg)
+    except ValueError as exc:
+        raise ConfigError(str(exc)) from None
+
+
+def parse_rollup_overrides(items: list[str] | None) -> dict[str, str]:
+    """`--rollup cache=automatic` (repeatable) as {type: mode}."""
+    out: dict[str, str] = {}
+    for item in items or []:
+        key, sep, value = item.partition("=")
+        if not sep:
+            raise ConfigError(f"--rollup wants TYPE=MODE, like cache=automatic, got {item!r}")
+        out[key.strip().lower()] = value.strip().lower()
+    return out
+
+
+# --- [[storage.hosts]] and [[storage.links]] -----------------------------
+STORAGE_KEYS = ("hosts", "links")
+HOST_KEYS = ("name", "unc_server", "platform", "nodes")
+LINK_KEYS = ("from", "to", "note")
+
+
+@dataclass(frozen=True)
+class StorageConfig:
+    """What the file says about storage. `links` are ManualLinks with source "config" and
+    `hosts` snapshots with source "manual", origin "config": the same records a catalog store
+    would hold with source "catalog" (read-only in the viewer when they come from here)."""
+    links: list[ManualLink] = field(default_factory=list)
+    hosts: list[Topology] = field(default_factory=list)
+
+
+def _storage_host(table: Any, index: int) -> Topology:
+    label = f"[[storage.hosts]] #{index}"
+    if not isinstance(table, dict):
+        raise ConfigError(f"{label}: wants a table with name, unc_server, platform and nodes")
+    if isinstance(table.get("name"), str) and table["name"]:
+        label += f" ({table['name']})"
+    unknown = [k for k in table if k not in HOST_KEYS]
+    if unknown:
+        raise ConfigError(f"{label}: unknown key {unknown[0]!r}; the keys are {', '.join(HOST_KEYS)}")
+
+    def text(key: str, default: str | None = None) -> str | None:
+        value = table.get(key, default)
+        if value is not None and (not isinstance(value, str) or not value.strip()):
+            raise ConfigError(f"{label}: {key} wants a non-empty string")
+        return value.strip() if value else None
+
+    name = text("name")
+    if not name:
+        raise ConfigError(f"{label}: name is required")
+    if "/" in name or any(c.isspace() for c in name):
+        raise ConfigError(f"{label}: name must not contain spaces or '/'")
+    nodes = table.get("nodes", [])
+    if not isinstance(nodes, list):
+        raise ConfigError(f"{label}: nodes wants a list of {{ type = ..., name = ... }} tables")
+    try:
+        return manual_topology(name, nodes, unc_server=text("unc_server"),
+                               platform=text("platform", "manual") or "manual", origin="config")
+    except ValueError as exc:
+        raise ConfigError(f"{label}: {exc}") from None
+
+
+def _storage_link(table: Any, index: int) -> ManualLink:
+    label = f"[[storage.links]] #{index}"
+    if not isinstance(table, dict):
+        raise ConfigError(f"{label}: wants a table with from and to")
+    unknown = [k for k in table if k not in LINK_KEYS]
+    if unknown:
+        raise ConfigError(f"{label}: unknown key {unknown[0]!r}; the keys are {', '.join(LINK_KEYS)}")
+    refs = {}
+    for key in ("from", "to"):
+        value = table.get(key)
+        if not isinstance(value, str) or not value.strip():
+            raise ConfigError(f"{label}: {key} is required, as host/node-id or host/type:name")
+        try:
+            refs[key] = parse_ref(value)
+        except ValueError as exc:
+            raise ConfigError(f"{label}: {key}: {exc}") from None
+    if refs["from"][0] == refs["to"][0]:
+        raise ConfigError(f"{label}: from and to are both on {refs['from'][0]} (a link joins different hosts)")
+    note = table.get("note")
+    if note is not None and not isinstance(note, str):
+        raise ConfigError(f"{label}: note wants a string")
+    return ManualLink(table["from"].strip(), table["to"].strip(), note or None, "config")
+
+
+def load_storage(cfg: dict[str, Any]) -> StorageConfig:
+    """The validated [[storage.hosts]] and [[storage.links]], in file order. Refs are checked
+    for their syntax only; whether a host or node exists is for resolve_links to report."""
+    section = cfg.get("storage")
+    if section is None:
+        return StorageConfig()
+    if not isinstance(section, dict):
+        raise ConfigError("storage: write [[storage.hosts]] and [[storage.links]] tables")
+    unknown = [k for k in section if k not in STORAGE_KEYS]
+    if unknown:
+        raise ConfigError(f"storage: unknown key {unknown[0]!r}; use [[storage.hosts]] and [[storage.links]]")
+    tables = {key: section.get(key, []) for key in STORAGE_KEYS}
+    for key, value in tables.items():
+        if not isinstance(value, list):
+            raise ConfigError(f"storage.{key}: write one [[storage.{key}]] table per entry (double brackets)")
+    hosts = [_storage_host(t, i) for i, t in enumerate(tables["hosts"], 1)]
+    seen: set[str] = set()
+    for host in hosts:
+        if host.key in seen:
+            raise ConfigError(f"[[storage.hosts]]: name {host.name!r} is used twice")
+        seen.add(host.key)
+    links = [_storage_link(t, i) for i, t in enumerate(tables["links"], 1)]
+    starts: set[tuple[str, str]] = set()
+    for link in links:
+        start = parse_ref(link.from_ref)
+        if start in starts:
+            raise ConfigError(f"[[storage.links]]: {link.from_ref!r} is linked twice (a disk is made of one thing)")
+        starts.add(start)
+    return StorageConfig(links, hosts)
+
+
+def agent_for(agents: list[AgentConfig], unc_path: str) -> AgentConfig | None:
+    """The agent that covers a UNC path: the one with the longest matching
+    alias or share root (components, case-insensitively); the first listed
+    wins a tie. None when no agent does."""
+    best, best_len = None, 0
+    for agent in agents:
+        length = agent.share_map().covers(unc_path)
+        if length > best_len:
+            best, best_len = agent, length
+    return best
+
+
+def has_agent(agents: list[AgentConfig], name: str) -> bool:
+    """Is there an agent called `name`? (the --agent check)"""
+    return any(a.name == name for a in agents)
+
+
+def mask_token(token: str) -> str:
+    """***, except a ${NAME} reference, which is not a secret (as in mask)."""
+    return token if "${" in token else "***"
+
+
 # --- applying to parsed arguments ---------------------------------------
 def apply(args: Any, cfg: dict[str, Any]) -> None:
     """Fill backend/out/dsn/model/ollama_url that the command line left unset,
@@ -145,6 +425,20 @@ def apply(args: Any, cfg: dict[str, Any]) -> None:
             args.aliases = {**table, **aliases.parse(args.alias)}
         except ValueError as exc:
             raise ConfigError(str(exc)) from None
+    if hasattr(args, "rollup"):
+        rollups = load_rollups(cfg)
+        overrides = parse_rollup_overrides(args.rollup)
+        if overrides:
+            try:
+                rollups = rollups.with_modes(overrides)
+            except ValueError as exc:
+                raise ConfigError(str(exc)) from None
+        args.rollup_config = rollups
+    if hasattr(args, "no_agent"):
+        args.agents = [] if args.no_agent else load_agents(cfg)
+        if args.agent and not has_agent(args.agents, args.agent):
+            known = ", ".join(a.name for a in args.agents) or "none configured"
+            raise ConfigError(f"--agent {args.agent}: no such [[agents]] in filecat.toml ({known})")
     if getattr(args, "command", None) == "scan-everything":
         everything = cfg.get("everything") or {}
         if not isinstance(everything, dict):
@@ -205,6 +499,33 @@ def server_default(name: str) -> str:
     return dsn % _odbc_driver() if name == "mssql" else dsn
 
 
+# A host with no agent, and the link no automatic rule can make: truenas2 is a TrueNAS VM whose
+# pool is one raw iSCSI LUN of nas3. `config init` writes these lines as they are.
+STORAGE_EXAMPLE = [
+    "# Storage written by hand (docs/storage-topology.md; check it with: filecat storage links).",
+    "# A host with no agent: pool tank on one virtual disk. Sizes are optional; the share names",
+    "# here are placeholders, and a share's UNC root defaults to <unc_server>\\<name>.",
+    "# [[storage.hosts]]",
+    '# name = "truenas2"',
+    "# unc_server = '\\\\truenas2'",
+    '# platform = "truenas"',
+    "# nodes = [",
+    '#   { type = "disk",   name = "tank-disk", virtual = true, size = "10.74 TiB" },',
+    '#   { type = "pool",   name = "tank", disks = ["tank-disk"] },',
+    '#   { type = "volume", name = "tank" },',
+    '#   { type = "share",  name = "Share1" },',
+    '#   { type = "share",  name = "Share2" },',
+    "# ]",
+    "#",
+    "# Which disk is made of which node on another host: host/node-id or host/type:name.",
+    "# Start at the disk, lun or vdisk; a name is matched when only one node of that type has it.",
+    "# [[storage.links]]",
+    '# from = "truenas2/disk:tank-disk"',
+    '# to = "nas3/lun:LUN-3"',
+    '# note = "tank is one iSCSI LUN on nas3, through Proxmox"',
+]
+
+
 def render(*, backend: str = "sqlite", dsns: dict[str, str] | None = None,
            outs: dict[str, str] | None = None, model: str = DEFAULT_MODEL,
            ollama_url: str = DEFAULT_OLLAMA_URL, notes: dict[str, str] | None = None) -> str:
@@ -237,6 +558,20 @@ def render(*, backend: str = "sqlite", dsns: dict[str, str] | None = None,
         "[ollama]",
         f"url = {_toml_str(ollama_url)}",
         f"model = {_toml_str(model)}",
+        "",
+        "# filecat-agent on a NAS (docs/agent-protocol.md), one [[agents]] per host. The agent prints",
+        "# its cert_sha256 when it starts; the token is the one it was started with.",
+        "# [[agents]]",
+        '# name = "nas-main"',
+        '# host = "192.0.2.13"',
+        "# port = 9876",
+        '# cert_sha256 = "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"',
+        '# token = "${FILECAT_NAS_MAIN_TOKEN}"',
+        "# alias = '\\\\nas-main'      # the server SMB scans record it under (default \\\\NAME)",
+        "# [agents.shares]           # folders that are not /volume1/<share>",
+        "# '/volume2/Archive' = '\\\\nas-main\\Archive'",
+        "",
+        *STORAGE_EXAMPLE,
         "",
     ]
     return "\n".join(lines)
@@ -300,6 +635,45 @@ def cmd_show(args: Any, path: Path | None, cfg: dict[str, Any]) -> int:
     ollama = cfg.get("ollama") or {}
     url = os.environ.get("OLLAMA_HOST") or ollama.get("url") or DEFAULT_OLLAMA_URL
     print(f"ollama:      {url}  model = {ollama.get('model') or '(none; pass --model)'}")
+    try:
+        agents = load_agents(cfg)
+    except ConfigError as exc:
+        print(f"agents:      invalid: {exc}")
+        return 1
+    if agents:
+        print(f"agents:      {len(agents)} configured (filecat agents test)")
+    for a in agents:
+        unset = missing_vars(a.token)
+        warn = f"   (not set: {', '.join(unset)})" if unset else ""
+        print(f"  {a.name:8} {a.endpoint}  alias = {a.alias}  cert_sha256 = {a.cert_sha256}")
+        print(f"  {'':8} token = {a.token if args.reveal else mask_token(a.token)}{warn}")
+        for prefix, unc in a.shares.items():
+            print(f"  {'':8} share {prefix} = {unc}")
+    try:
+        rollups = load_rollups(cfg)
+    except ConfigError as exc:
+        print(f"rollups:     invalid: {exc}")
+        return 1
+    modes = ", ".join(f"{t} {m}" for t, m in rollups.modes.items() if m != "manual")
+    if rollups.rules or modes:
+        print(f"rollups:     {len(rollups.rules)} rules" + (f"; {modes}" if modes else "")
+              + "  (filecat rollups rules)")
+    for line in rollups.warnings:
+        print(f"  warning: {line}")
+    for line in rollup.describe_rules(rollups):
+        print(f"  rule {line}")
+    try:
+        storage = load_storage(cfg)
+    except ConfigError as exc:
+        print(f"storage:     invalid: {exc}")
+        return 1
+    if storage.hosts or storage.links:
+        print(f"storage:     {len(storage.hosts)} manual hosts, {len(storage.links)} links "
+              "(filecat storage links; read-only in the viewer)")
+    for h in storage.hosts:
+        print(f"  host {h.name:8} {h.unc_server}  {h.platform}, {len(h.nodes)} nodes")
+    for link in storage.links:
+        print(f"  link {link.from_ref} -> {link.to_ref}" + (f"   ({link.note})" if link.note else ""))
     return 0
 
 

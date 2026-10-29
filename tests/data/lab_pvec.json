@@ -1,0 +1,66 @@
+{
+ "ok": true,
+ "topology": {
+  "version": 1,
+  "platform": "proxmox",
+  "host": {
+   "name": "pvec",
+   "kind": "cluster",
+   "nodes": [
+    "pve1",
+    "pve2"
+   ],
+   "iqns": [
+    "iqn.1993-08.org.debian:01:pve1",
+    "iqn.1993-08.org.debian:01:pve2"
+   ]
+  },
+  "collected_at": "2026-10-22T09:01:00Z",
+  "nodes": [
+   {
+    "id": "disk:naa.6001405f48f1514d6072d4193d989ed9",
+    "type": "disk",
+    "parent": null,
+    "name": "0.0.1.scsi-36001405f48f1514d6072d4193d989ed9",
+    "health": "ok",
+    "size_bytes": 11811160064000,
+    "match": [
+     "naa:6001405f48f1514d6072d4193d989ed9",
+     "volid:PVEC:0.0.1.scsi-36001405f48f1514d6072d4193d989ed9"
+    ],
+    "virtual": true,
+    "model": "SYNOLOGY iSCSI Storage",
+    "platform": {
+     "proxmox": {
+      "storage": "PVEC",
+      "lun": "0.0.1"
+     }
+    }
+   },
+   {
+    "id": "pool:PVEC",
+    "type": "pool",
+    "parent": null,
+    "name": "PVEC",
+    "health": "ok",
+    "size_bytes": 11811160064000,
+    "level": "single",
+    "members": [
+     {
+      "disk": "disk:naa.6001405f48f1514d6072d4193d989ed9",
+      "role": "data"
+     }
+    ],
+    "kind": "iscsi",
+    "platform": {
+     "proxmox": {
+      "type": "iscsi",
+      "portal": "nas3",
+      "shared": true,
+      "target": "iqn.2000-01.com.synology:nas3.PVEC"
+     }
+    }
+   }
+  ]
+ }
+}

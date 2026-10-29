@@ -1,0 +1,74 @@
+{
+ "/volume1/@iSCSI/LUN/BLUN/7949c2d0-3b1e-4f58-9a6d-0e5c8b1f2a33": {
+  "total_files": 3,
+  "total_dirs": 1,
+  "total_size": 549755813888,
+  "total_allocated_size": 0
+ },
+ "/volume1/@iSCSI/LUN/BLUN_THICK/47f5d7a8-5444-4932-93e3-c712f6aa0130": {
+  "total_files": 3,
+  "total_dirs": 1,
+  "total_size": 1623497637888,
+  "total_allocated_size": 1073741824000
+ },
+ "/volume1/@iSCSI/LUN/BLUN/f48f1514-6072-4193-989e-9e7bfbe6d0e1": {
+  "total_files": 3,
+  "total_dirs": 1,
+  "total_size": 11764774416384,
+  "total_allocated_size": 11215018602496
+ },
+ "/volume1/@iSCSI/LUN/BLUN/2a93d1c8-71e4-4b60-8c25-5f0e9a6b7d14": {
+  "total_files": 3,
+  "total_dirs": 1,
+  "total_size": 639091130368,
+  "total_allocated_size": 89335316480
+ },
+ "/volume1/@iSCSI/LUN/BLUN/a0061b7e-4c92-4d83-b5f1-26d8e3c90a57": {
+  "total_files": 3,
+  "total_dirs": 1,
+  "total_size": 550430150656,
+  "total_allocated_size": 674336768
+ },
+ "/volume1/@iSCSI/LUN/BLUN/83a1e4f6-0d57-4a29-9c3b-b71f58e2d640": {
+  "total_files": 3,
+  "total_dirs": 1,
+  "total_size": 562748088320,
+  "total_allocated_size": 12992274432
+ },
+ "/volume1/@iSCSI/LUN/BLUN/bd85bc23-c5d3-459e-8801-39d17f096c57": {
+  "total_files": 3,
+  "total_dirs": 1,
+  "total_size": 1549946322944,
+  "total_allocated_size": 1000190509056
+ },
+ "/volume1/@iSCSI/LUN/VDISK_BLUN/0b10c7a2-58de-4b3f-a641-9d02f7e8c5b1": {
+  "total_files": 3,
+  "total_dirs": 1,
+  "total_size": 556198264832,
+  "total_allocated_size": 6442450944
+ },
+ "/volume1/@iSCSI/LUN/VDISK_BLUN/ff8a106f-f063-439f-85e9-e21abb402ae1": {
+  "total_files": 3,
+  "total_dirs": 1,
+  "total_size": 1949755813888,
+  "total_allocated_size": 1400000000000
+ },
+ "/volume1/Backup": {
+  "total_files": 1000,
+  "total_dirs": 100,
+  "total_size": 22000000000000,
+  "total_allocated_size": 22000000000000
+ },
+ "/volume1/homes": {
+  "total_files": 1000,
+  "total_dirs": 100,
+  "total_size": 1900000000000,
+  "total_allocated_size": 1900000000000
+ },
+ "/volume1/Apps": {
+  "total_files": 1000,
+  "total_dirs": 100,
+  "total_size": 1600000000000,
+  "total_allocated_size": 1600000000000
+ }
+}

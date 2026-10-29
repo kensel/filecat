@@ -1,0 +1,1066 @@
+{
+ "version": 1,
+ "about": "Conformance vectors for the rollup matcher, the wire policy id and the sticky-redaction HMAC (docs/rollups.md sections 2 and 3.7). `match`: first matching rule's tag for a path (null: recorded normally); entries with agent=true are what the filecat-agent must pass (patterns already normalised, path in the agent's own form); the others are the Python matcher's share and local forms. `normalize`: Python only. `policy`: the id configure_policy answers. `redaction`: HMAC-SHA256(key, 'filecat-redact-v1\\0' + root + '\\0' + rel_path), hex of the first 16 bytes.",
+ "match": [
+  {
+   "name": "name pattern, directory",
+   "rules": [
+    {
+     "tag": "[CACHE]",
+     "match": [
+      "node_modules"
+     ],
+     "type": "dir",
+     "case": "sensitive"
+    }
+   ],
+   "path": "/volume1/a/node_modules",
+   "is_dir": true,
+   "expect": "[CACHE]",
+   "agent": true
+  },
+  {
+   "name": "name pattern, type dir skips a file",
+   "rules": [
+    {
+     "tag": "[CACHE]",
+     "match": [
+      "node_modules"
+     ],
+     "type": "dir",
+     "case": "sensitive"
+    }
+   ],
+   "path": "/volume1/a/node_modules",
+   "is_dir": false,
+   "expect": null,
+   "agent": true
+  },
+  {
+   "name": "name pattern is case sensitive by default",
+   "rules": [
+    {
+     "tag": "[CACHE]",
+     "match": [
+      "node_modules"
+     ],
+     "type": "dir",
+     "case": "sensitive"
+    }
+   ],
+   "path": "/volume1/a/Node_Modules",
+   "is_dir": true,
+   "expect": null,
+   "agent": true
+  },
+  {
+   "name": "name pattern, case insensitive",
+   "rules": [
+    {
+     "tag": "[CACHE]",
+     "match": [
+      "node_modules"
+     ],
+     "type": "dir",
+     "case": "insensitive"
+    }
+   ],
+   "path": "/volume1/a/Node_Modules",
+   "is_dir": true,
+   "expect": "[CACHE]",
+   "agent": true
+  },
+  {
+   "name": "name pattern matches at any depth",
+   "rules": [
+    {
+     "tag": "[CACHE]",
+     "match": [
+      "node_modules"
+     ],
+     "type": "dir",
+     "case": "sensitive"
+    }
+   ],
+   "path": "/a/b/c/d/node_modules",
+   "is_dir": true,
+   "expect": "[CACHE]",
+   "agent": true
+  },
+  {
+   "name": "name pattern matches the whole name",
+   "rules": [
+    {
+     "tag": "[CACHE]",
+     "match": [
+      "node_modules"
+     ],
+     "type": "dir",
+     "case": "sensitive"
+    }
+   ],
+   "path": "/a/node_modules2",
+   "is_dir": true,
+   "expect": null,
+   "agent": true
+  },
+  {
+   "name": "agent form, exact",
+   "rules": [
+    {
+     "tag": "[REDACTED]",
+     "match": [
+      "/volume1/homes/jdoe/vault"
+     ],
+     "type": "any",
+     "case": "sensitive",
+     "private": true
+    }
+   ],
+   "path": "/volume1/homes/jdoe/vault",
+   "is_dir": true,
+   "expect": "[REDACTED]",
+   "agent": true
+  },
+  {
+   "name": "agent form is anchored at the end",
+   "rules": [
+    {
+     "tag": "[REDACTED]",
+     "match": [
+      "/volume1/homes/jdoe/vault"
+     ],
+     "type": "any",
+     "case": "sensitive",
+     "private": true
+    }
+   ],
+   "path": "/volume1/homes/jdoe/vault/inner",
+   "is_dir": true,
+   "expect": null,
+   "agent": true
+  },
+  {
+   "name": "agent form is anchored at the start",
+   "rules": [
+    {
+     "tag": "[REDACTED]",
+     "match": [
+      "/volume1/homes/jdoe/vault"
+     ],
+     "type": "any",
+     "case": "sensitive",
+     "private": true
+    }
+   ],
+   "path": "/mnt/volume1/homes/jdoe/vault",
+   "is_dir": true,
+   "expect": null,
+   "agent": true
+  },
+  {
+   "name": "agent form, parent does not match",
+   "rules": [
+    {
+     "tag": "[REDACTED]",
+     "match": [
+      "/volume1/homes/jdoe/vault"
+     ],
+     "type": "any",
+     "case": "sensitive",
+     "private": true
+    }
+   ],
+   "path": "/volume1/homes/jdoe",
+   "is_dir": true,
+   "expect": null,
+   "agent": true
+  },
+  {
+   "name": "star does not cross a separator",
+   "rules": [
+    {
+     "tag": "[X]",
+     "match": [
+      "/volume1/homes/*/vault"
+     ],
+     "type": "any",
+     "case": "sensitive"
+    }
+   ],
+   "path": "/volume1/homes/a/b/vault",
+   "is_dir": true,
+   "expect": null,
+   "agent": true
+  },
+  {
+   "name": "star is one component",
+   "rules": [
+    {
+     "tag": "[X]",
+     "match": [
+      "/volume1/homes/*/vault"
+     ],
+     "type": "any",
+     "case": "sensitive"
+    }
+   ],
+   "path": "/volume1/homes/jdoe/vault",
+   "is_dir": true,
+   "expect": "[X]",
+   "agent": true
+  },
+  {
+   "name": "star inside a name",
+   "rules": [
+    {
+     "tag": "[TMP]",
+     "match": [
+      "*.tmp"
+     ],
+     "type": "any",
+     "case": "sensitive"
+    }
+   ],
+   "path": "/a/b/work.tmp",
+   "is_dir": false,
+   "expect": "[TMP]",
+   "agent": true
+  },
+  {
+   "name": "star may match nothing",
+   "rules": [
+    {
+     "tag": "[TMP]",
+     "match": [
+      "a*b"
+     ],
+     "type": "any",
+     "case": "sensitive"
+    }
+   ],
+   "path": "/x/ab",
+   "is_dir": false,
+   "expect": "[TMP]",
+   "agent": true
+  },
+  {
+   "name": "question mark is one character",
+   "rules": [
+    {
+     "tag": "[X]",
+     "match": [
+      "/volume1/h?mes/x"
+     ],
+     "type": "any",
+     "case": "sensitive"
+    }
+   ],
+   "path": "/volume1/homes/x",
+   "is_dir": true,
+   "expect": "[X]",
+   "agent": true
+  },
+  {
+   "name": "question mark is not zero characters",
+   "rules": [
+    {
+     "tag": "[X]",
+     "match": [
+      "/volume1/h?mes/x"
+     ],
+     "type": "any",
+     "case": "sensitive"
+    }
+   ],
+   "path": "/volume1/hmes/x",
+   "is_dir": true,
+   "expect": null,
+   "agent": true
+  },
+  {
+   "name": "question mark does not match a separator",
+   "rules": [
+    {
+     "tag": "[X]",
+     "match": [
+      "/a?b"
+     ],
+     "type": "any",
+     "case": "sensitive"
+    }
+   ],
+   "path": "/a/b",
+   "is_dir": true,
+   "expect": null,
+   "agent": true
+  },
+  {
+   "name": "double star in the middle, zero components",
+   "rules": [
+    {
+     "tag": "[X]",
+     "match": [
+      "/a/**/b"
+     ],
+     "type": "any",
+     "case": "sensitive"
+    }
+   ],
+   "path": "/a/b",
+   "is_dir": true,
+   "expect": "[X]",
+   "agent": true
+  },
+  {
+   "name": "double star in the middle, several components",
+   "rules": [
+    {
+     "tag": "[X]",
+     "match": [
+      "/a/**/b"
+     ],
+     "type": "any",
+     "case": "sensitive"
+    }
+   ],
+   "path": "/a/x/y/b",
+   "is_dir": true,
+   "expect": "[X]",
+   "agent": true
+  },
+  {
+   "name": "double star in the middle, wrong end",
+   "rules": [
+    {
+     "tag": "[X]",
+     "match": [
+      "/a/**/b"
+     ],
+     "type": "any",
+     "case": "sensitive"
+    }
+   ],
+   "path": "/a/x/c",
+   "is_dir": true,
+   "expect": null,
+   "agent": true
+  },
+  {
+   "name": "x/** is what is inside x",
+   "rules": [
+    {
+     "tag": "[X]",
+     "match": [
+      "/a/x/**"
+     ],
+     "type": "any",
+     "case": "sensitive"
+    }
+   ],
+   "path": "/a/x/y",
+   "is_dir": true,
+   "expect": "[X]",
+   "agent": true
+  },
+  {
+   "name": "x/** reaches any depth",
+   "rules": [
+    {
+     "tag": "[X]",
+     "match": [
+      "/a/x/**"
+     ],
+     "type": "any",
+     "case": "sensitive"
+    }
+   ],
+   "path": "/a/x/y/z",
+   "is_dir": false,
+   "expect": "[X]",
+   "agent": true
+  },
+  {
+   "name": "x/** is not x itself",
+   "rules": [
+    {
+     "tag": "[X]",
+     "match": [
+      "/a/x/**"
+     ],
+     "type": "any",
+     "case": "sensitive"
+    }
+   ],
+   "path": "/a/x",
+   "is_dir": true,
+   "expect": null,
+   "agent": true
+  },
+  {
+   "name": "suffix pattern",
+   "rules": [
+    {
+     "tag": "[CACHE]",
+     "match": [
+      "**/AppData/Local/Temp"
+     ],
+     "type": "dir",
+     "case": "sensitive"
+    }
+   ],
+   "path": "/home/u/AppData/Local/Temp",
+   "is_dir": true,
+   "expect": "[CACHE]",
+   "agent": true
+  },
+  {
+   "name": "suffix pattern needs the whole tail",
+   "rules": [
+    {
+     "tag": "[CACHE]",
+     "match": [
+      "**/AppData/Local/Temp"
+     ],
+     "type": "dir",
+     "case": "sensitive"
+    }
+   ],
+   "path": "/home/u/AppData/Local/Temp2",
+   "is_dir": true,
+   "expect": null,
+   "agent": true
+  },
+  {
+   "name": "suffix pattern matches with no leading component",
+   "rules": [
+    {
+     "tag": "[CACHE]",
+     "match": [
+      "**/AppData/Local/Temp"
+     ],
+     "type": "dir",
+     "case": "sensitive"
+    }
+   ],
+   "path": "/AppData/Local/Temp",
+   "is_dir": true,
+   "expect": "[CACHE]",
+   "agent": true
+  },
+  {
+   "name": "suffix pattern, case insensitive",
+   "rules": [
+    {
+     "tag": "[CACHE]",
+     "match": [
+      "**/AppData/Local/Temp"
+     ],
+     "type": "dir",
+     "case": "insensitive"
+    }
+   ],
+   "path": "/home/u/appdata/LOCAL/temp",
+   "is_dir": true,
+   "expect": "[CACHE]",
+   "agent": true
+  },
+  {
+   "name": "suffix pattern, case sensitive by default",
+   "rules": [
+    {
+     "tag": "[CACHE]",
+     "match": [
+      "**/AppData/Local/Temp"
+     ],
+     "type": "dir",
+     "case": "sensitive"
+    }
+   ],
+   "path": "/home/u/appdata/Local/Temp",
+   "is_dir": true,
+   "expect": null,
+   "agent": true
+  },
+  {
+   "name": "first match wins",
+   "rules": [
+    {
+     "tag": "[A]",
+     "match": [
+      "thing"
+     ],
+     "type": "any",
+     "case": "sensitive"
+    },
+    {
+     "tag": "[B]",
+     "match": [
+      "thing"
+     ],
+     "type": "any",
+     "case": "sensitive"
+    }
+   ],
+   "path": "/x/thing",
+   "is_dir": true,
+   "expect": "[A]",
+   "agent": true
+  },
+  {
+   "name": "a keep rule ends the search",
+   "rules": [
+    {
+     "match": [
+      "**/keep/node_modules"
+     ],
+     "type": "any",
+     "case": "sensitive",
+     "keep": true
+    },
+    {
+     "tag": "[CACHE]",
+     "match": [
+      "node_modules"
+     ],
+     "type": "dir",
+     "case": "sensitive"
+    }
+   ],
+   "path": "/p/keep/node_modules",
+   "is_dir": true,
+   "expect": null,
+   "agent": true
+  },
+  {
+   "name": "after a keep rule that does not match, the next rule applies",
+   "rules": [
+    {
+     "match": [
+      "**/keep/node_modules"
+     ],
+     "type": "any",
+     "case": "sensitive",
+     "keep": true
+    },
+    {
+     "tag": "[CACHE]",
+     "match": [
+      "node_modules"
+     ],
+     "type": "dir",
+     "case": "sensitive"
+    }
+   ],
+   "path": "/p/other/node_modules",
+   "is_dir": true,
+   "expect": "[CACHE]",
+   "agent": true
+  },
+  {
+   "name": "type file",
+   "rules": [
+    {
+     "tag": "[F]",
+     "match": [
+      "*.tmp"
+     ],
+     "type": "file",
+     "case": "sensitive"
+    }
+   ],
+   "path": "/a/x.tmp",
+   "is_dir": false,
+   "expect": "[F]",
+   "agent": true
+  },
+  {
+   "name": "type file skips a directory",
+   "rules": [
+    {
+     "tag": "[F]",
+     "match": [
+      "*.tmp"
+     ],
+     "type": "file",
+     "case": "sensitive"
+    }
+   ],
+   "path": "/a/x.tmp",
+   "is_dir": true,
+   "expect": null,
+   "agent": true
+  },
+  {
+   "name": "type dir",
+   "rules": [
+    {
+     "tag": "[D]",
+     "match": [
+      "build"
+     ],
+     "type": "dir",
+     "case": "sensitive"
+    }
+   ],
+   "path": "/a/build",
+   "is_dir": true,
+   "expect": "[D]",
+   "agent": true
+  },
+  {
+   "name": "ASCII letters fold, others do not",
+   "rules": [
+    {
+     "tag": "[X]",
+     "match": [
+      "Äbc"
+     ],
+     "type": "any",
+     "case": "insensitive"
+    }
+   ],
+   "path": "/a/ÄBC",
+   "is_dir": true,
+   "expect": "[X]",
+   "agent": true
+  },
+  {
+   "name": "no Unicode folding: a lower case umlaut is another character",
+   "rules": [
+    {
+     "tag": "[X]",
+     "match": [
+      "Äbc"
+     ],
+     "type": "any",
+     "case": "insensitive"
+    }
+   ],
+   "path": "/a/äbc",
+   "is_dir": true,
+   "expect": null,
+   "agent": true
+  },
+  {
+   "name": "no Unicode folding in a name pattern",
+   "rules": [
+    {
+     "tag": "[X]",
+     "match": [
+      "Ünï"
+     ],
+     "type": "any",
+     "case": "sensitive"
+    }
+   ],
+   "path": "/a/ünï",
+   "is_dir": true,
+   "expect": null,
+   "agent": true
+  },
+  {
+   "name": "non-ASCII names match exactly",
+   "rules": [
+    {
+     "tag": "[X]",
+     "match": [
+      "/a/δοκιμή"
+     ],
+     "type": "any",
+     "case": "sensitive"
+    }
+   ],
+   "path": "/a/δοκιμή",
+   "is_dir": true,
+   "expect": "[X]",
+   "agent": true
+  },
+  {
+   "name": "a bracket is an ordinary character",
+   "rules": [
+    {
+     "tag": "[X]",
+     "match": [
+      "/x/[y]"
+     ],
+     "type": "any",
+     "case": "sensitive"
+    }
+   ],
+   "path": "/x/[y]",
+   "is_dir": true,
+   "expect": "[X]",
+   "agent": true
+  },
+  {
+   "name": "a bracket is not a character class",
+   "rules": [
+    {
+     "tag": "[X]",
+     "match": [
+      "/x/[y]"
+     ],
+     "type": "any",
+     "case": "sensitive"
+    }
+   ],
+   "path": "/x/y",
+   "is_dir": true,
+   "expect": null,
+   "agent": true
+  },
+  {
+   "name": "a name with a space and a dot",
+   "rules": [
+    {
+     "tag": "[X]",
+     "match": [
+      "Quarterly Report. v2"
+     ],
+     "type": "any",
+     "case": "sensitive"
+    }
+   ],
+   "path": "/a/Quarterly Report. v2",
+   "is_dir": true,
+   "expect": "[X]",
+   "agent": true
+  },
+  {
+   "name": "a name with a private-use byte character",
+   "rules": [
+    {
+     "tag": "[X]",
+     "match": [
+      "/a/-x"
+     ],
+     "type": "any",
+     "case": "sensitive"
+    }
+   ],
+   "path": "/a/-x",
+   "is_dir": true,
+   "expect": "[X]",
+   "agent": true
+  },
+  {
+   "name": "share form, server and share ignore case",
+   "rules": [
+    {
+     "tag": "[REDACTED]",
+     "match": [
+      "//nas3/homes/jdoe/vault"
+     ],
+     "type": "any",
+     "case": "sensitive"
+    }
+   ],
+   "path": "\\\\NAS3\\Homes\\jdoe\\vault",
+   "is_dir": true,
+   "expect": "[REDACTED]",
+   "agent": false
+  },
+  {
+   "name": "share form, below the share the case is exact",
+   "rules": [
+    {
+     "tag": "[REDACTED]",
+     "match": [
+      "//nas3/homes/jdoe/vault"
+     ],
+     "type": "any",
+     "case": "sensitive"
+    }
+   ],
+   "path": "\\\\nas3\\homes\\JDOE\\vault",
+   "is_dir": true,
+   "expect": null,
+   "agent": false
+  },
+  {
+   "name": "share form is not an agent path",
+   "rules": [
+    {
+     "tag": "[REDACTED]",
+     "match": [
+      "//nas3/homes/jdoe/vault"
+     ],
+     "type": "any",
+     "case": "sensitive"
+    }
+   ],
+   "path": "/volume1/homes/jdoe/vault",
+   "is_dir": true,
+   "expect": null,
+   "agent": false
+  },
+  {
+   "name": "share form, wildcard in the tail",
+   "rules": [
+    {
+     "tag": "[X]",
+     "match": [
+      "//nas3/homes/*/vault"
+     ],
+     "type": "any",
+     "case": "sensitive"
+    }
+   ],
+   "path": "\\\\nas3\\homes\\u1\\vault",
+   "is_dir": true,
+   "expect": "[X]",
+   "agent": false
+  },
+  {
+   "name": "local form, the drive letter ignores case",
+   "rules": [
+    {
+     "tag": "[X]",
+     "match": [
+      "C:/Users/x/AppData"
+     ],
+     "type": "any",
+     "case": "sensitive"
+    }
+   ],
+   "path": "c:\\Users\\x\\AppData",
+   "is_dir": true,
+   "expect": "[X]",
+   "agent": false
+  },
+  {
+   "name": "local form, below the drive the case is exact",
+   "rules": [
+    {
+     "tag": "[X]",
+     "match": [
+      "C:/Users/x/AppData"
+     ],
+     "type": "any",
+     "case": "sensitive"
+    }
+   ],
+   "path": "c:\\users\\x\\appdata",
+   "is_dir": true,
+   "expect": null,
+   "agent": false
+  },
+  {
+   "name": "suffix pattern on a local path",
+   "rules": [
+    {
+     "tag": "[CACHE]",
+     "match": [
+      "**/AppData/Local/Temp"
+     ],
+     "type": "dir",
+     "case": "sensitive"
+    }
+   ],
+   "path": "C:\\Users\\x\\AppData\\Local\\Temp",
+   "is_dir": true,
+   "expect": "[CACHE]",
+   "agent": false
+  },
+  {
+   "name": "suffix pattern on a share path",
+   "rules": [
+    {
+     "tag": "[CACHE]",
+     "match": [
+      "**/AppData/Local/Temp"
+     ],
+     "type": "dir",
+     "case": "sensitive"
+    }
+   ],
+   "path": "\\\\nas\\homes\\jdoe\\AppData\\Local\\Temp",
+   "is_dir": true,
+   "expect": "[CACHE]",
+   "agent": false
+  },
+  {
+   "name": "drive wildcard of the built-in Windows rules",
+   "rules": [
+    {
+     "tag": "[WINDOWS]",
+     "match": [
+      "?:/pagefile.sys"
+     ],
+     "type": "file",
+     "case": "insensitive"
+    }
+   ],
+   "path": "D:\\PageFile.sys",
+   "is_dir": false,
+   "expect": "[WINDOWS]",
+   "agent": false
+  },
+  {
+   "name": "administrative share form of the built-in Windows rules",
+   "rules": [
+    {
+     "tag": "[WINDOWS]",
+     "match": [
+      "//*/*$/pagefile.sys"
+     ],
+     "type": "file",
+     "case": "insensitive"
+    }
+   ],
+   "path": "\\\\srv\\C$\\pagefile.sys",
+   "is_dir": false,
+   "expect": "[WINDOWS]",
+   "agent": false
+  }
+ ],
+ "normalize": [
+  {
+   "pattern": "node_modules",
+   "form": "name",
+   "text": "node_modules",
+   "dir_only": false
+  },
+  {
+   "pattern": "node_modules/",
+   "form": "name",
+   "text": "node_modules",
+   "dir_only": true
+  },
+  {
+   "pattern": "/volume1//homes/jdoe/",
+   "form": "agent",
+   "text": "/volume1/homes/jdoe",
+   "dir_only": true
+  },
+  {
+   "pattern": "\\\\nas3\\homes\\jdoe\\vault",
+   "form": "share",
+   "text": "//nas3/homes/jdoe/vault",
+   "dir_only": false
+  },
+  {
+   "pattern": "//nas3/homes/jdoe/vault",
+   "form": "share",
+   "text": "//nas3/homes/jdoe/vault",
+   "dir_only": false
+  },
+  {
+   "pattern": "C:\\Users\\x\\AppData",
+   "form": "local",
+   "text": "C:/Users/x/AppData",
+   "dir_only": false
+  },
+  {
+   "pattern": "**/AppData/Local/Temp",
+   "form": "suffix",
+   "text": "**/AppData/Local/Temp",
+   "dir_only": false
+  },
+  {
+   "pattern": "**\\AppData\\Local\\Temp",
+   "form": "suffix",
+   "text": "**/AppData/Local/Temp",
+   "dir_only": false
+  }
+ ],
+ "policy": [
+  {
+   "rules": [
+    {
+     "tag": "[CACHE]",
+     "match": [
+      "node_modules",
+      "**/AppData/Local/Temp"
+     ],
+     "type": "dir",
+     "case": "insensitive"
+    }
+   ],
+   "markers": [
+    ".filecat-cache"
+   ],
+   "id": "58dd0b41af50"
+  },
+  {
+   "rules": [
+    {
+     "tag": "[REDACTED]",
+     "match": [
+      "/volume1/project/private-project"
+     ],
+     "type": "any",
+     "case": "sensitive",
+     "private": true,
+     "id": 0
+    },
+    {
+     "match": [
+      "**/keep/node_modules"
+     ],
+     "type": "any",
+     "case": "sensitive",
+     "keep": true
+    },
+    {
+     "tag": "[SYNOLOGY]",
+     "match": [
+      "@eaDir"
+     ],
+     "type": "dir",
+     "case": "sensitive",
+     "suggest": true
+    }
+   ],
+   "markers": [
+    ".filecat-redacted",
+    ".filecat-cache"
+   ],
+   "id": "efc2ddfe66c9"
+  },
+  {
+   "rules": [],
+   "markers": [],
+   "id": "643d54371042"
+  }
+ ],
+ "redaction": [
+  {
+   "key_hex": "00112233445566778899aabbccddeeff00112233445566778899aabbccddeeff",
+   "root": "0123456789abcdef",
+   "rel_path": "jdoe/vault",
+   "hash": "754aec6cec2e9a5c40472d96b84762a5"
+  },
+  {
+   "key_hex": "00112233445566778899aabbccddeeff00112233445566778899aabbccddeeff",
+   "root": "0123456789abcdef",
+   "rel_path": "a",
+   "hash": "46f3e000cf12e4fce7d5e823db08bba4"
+  },
+  {
+   "key_hex": "00112233445566778899aabbccddeeff00112233445566778899aabbccddeeff",
+   "root": "0123456789abcdef",
+   "rel_path": "a/-x/b",
+   "hash": "2ee82a88b0b5439558e2b2a76ec3f279"
+  },
+  {
+   "key_hex": "00112233445566778899aabbccddeeff00112233445566778899aabbccddeeff",
+   "root": "0123456789abcdef",
+   "rel_path": "Quarterly Report. v2/final .",
+   "hash": "a5992b507c8b0c3a0aa29d769de33c02"
+  },
+  {
+   "key_hex": "00112233445566778899aabbccddeeff00112233445566778899aabbccddeeff",
+   "root": "0123456789abcdef",
+   "rel_path": "Ünïcode ✓/δοκιμή",
+   "hash": "8c411909619587af63d54c82ed52334a"
+  },
+  {
+   "key_hex": "00112233445566778899aabbccddeeff00112233445566778899aabbccddeeff",
+   "root": "fedcba9876543210",
+   "rel_path": "jdoe/vault",
+   "hash": "80d4d5d0593a197eebd85529fe621bd4"
+  }
+ ]
+}

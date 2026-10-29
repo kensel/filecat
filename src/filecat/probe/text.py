@@ -9,6 +9,7 @@ import codecs
 import re
 from typing import Any
 
+from ..fsource import fopen
 from ..options import SAMPLE_BYTES
 
 _XML_DECL_RE = re.compile(rb'<\?xml[^>]{0,200}?encoding=["\']([^"\']+)["\']', re.IGNORECASE)
@@ -154,7 +155,7 @@ def count_records(path: str, codec: str, cap: int = 10_000) -> tuple[int, bool]:
     data records (lines after the header), capped at `cap`."""
     count = 0
     try:
-        with open(path, "r", encoding=codec, errors="replace", newline="") as f:
+        with fopen(path, "r", encoding=codec, errors="replace", newline="") as f:
             for count, _ in enumerate(f, start=1):
                 if count > cap + 1:
                     break

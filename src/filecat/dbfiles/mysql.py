@@ -23,7 +23,8 @@ import re
 from collections import defaultdict
 from typing import Any
 
-from ..backup.util import iso, listdir
+from ..backup.storefs import LOCAL, StoreFS
+from ..backup.util import iso
 from . import Engine, add_totals, merge_trees, read_text, scan_tree
 
 _MEASURED_EXT = (".cnf", ".ini", ".err", ".pid", ".pem", ".log", ".txt", ".flag")
@@ -47,12 +48,12 @@ class _MySQL(Engine):
             return True     # schema folders, #innodb_redo, #innodb_temp
         return inner != "mysql_upgrade_info" and not inner.lower().endswith(_MEASURED_EXT)
 
-    def summarize(self, path: str, names: set[str]) -> dict[str, Any]:
-        entries = listdir(path)
-        upgrade = (read_text(os.path.join(path, "mysql_upgrade_info")) or "").strip() or None
+    def summarize(self, path: str, names: set[str], fs: StoreFS = LOCAL) -> dict[str, Any]:
+        entries = fs.listdir(path)
+        upgrade = (read_text(fs.join(path, "mysql_upgrade_info"), fs=fs) or "").strip() or None
         flavor = "mariadb" if "aria_log_control" in names or "mariadb" in (upgrade or "").lower() else "mysql"
         uuid = None
-        m = re.search(r"^\s*server-uuid\s*=\s*(\S+)", read_text(os.path.join(path, "auto.cnf")) or "", re.M)
+        m = re.search(r"^\s*server-uuid\s*=\s*(\S+)", read_text(fs.join(path, "auto.cnf"), fs=fs) or "", re.M)
         if m:
             uuid = m.group(1)
 
@@ -62,14 +63,14 @@ class _MySQL(Engine):
                 continue
             tables: set[str] = set()
             engines: set[str] = set()
-            for fname in listdir(e.path):
+            for fname in fs.listdir(fs.join(path, name)):
                 stem, ext = os.path.splitext(fname)
                 ext = ext.lower()
                 if ext in _TABLE_EXT:
                     tables.add(re.sub(r"#P#.*$", "", stem, flags=re.I))   # partitions
                     if _TABLE_EXT[ext]:
                         engines.add(_TABLE_EXT[ext])
-            t = scan_tree(e.path)
+            t = scan_tree(fs.join(path, name), fs=fs)
             trees.append(t)
             databases.append({"name": name, "system": name in _SYSTEM, "tables": len(tables),
                               "engines": sorted(engines), "files": t["files"], "bytes": t["bytes"],
@@ -97,7 +98,7 @@ class _MySQL(Engine):
                 top["newest_ns"] = max(top["newest_ns"], st.st_mtime_ns)
         for d in ("#innodb_redo", "#innodb_temp"):
             if d in names:
-                trees.append(scan_tree(os.path.join(path, d)))
+                trees.append(scan_tree(fs.join(path, d), fs=fs))
         running = any(n.lower().endswith(".pid") for n in names)
         out: dict[str, Any] = {
             "engine": self.name, "flavor": flavor, "version": upgrade,

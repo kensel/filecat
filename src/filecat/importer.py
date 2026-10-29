@@ -20,6 +20,7 @@ import time
 from dataclasses import dataclass, field
 from typing import Any, Callable
 
+from . import rootinfo
 from .backends import open_backend
 from .backends.base import Backend
 from .record import ROOT_REL, new_document, root_id as compute_root_id
@@ -57,6 +58,7 @@ class ImportStats:
     skipped_existing: int = 0
     malformed: int = 0
     out_of_root: int = 0
+    roots: set[str] = field(default_factory=set)    # the roots written to (their change stamp is touched)
     elapsed: float = 0.0
     open_error: str | None = None
     malformed_examples: list[tuple[int, str]] = field(default_factory=list)
@@ -365,6 +367,7 @@ def import_file(path: str, backend: Backend, *, fmt: str = "auto", root: str | N
                 stats.skipped_existing += 1
                 continue
 
+            stats.roots.add(doc["root"])
             batch.append(doc)
             stats.records += 1
             if len(batch) >= BATCH_SIZE:
@@ -413,6 +416,8 @@ def run(args) -> int:
                 any_total_failure = True
 
         if any(s.records or s.dirs_synthesized for s in all_stats):
+            for root in sorted(set().union(*(s.roots for s in all_stats))):
+                rootinfo.touch(backend, root)       # before the rebuild, so the new summary is the newer
             try:
                 backend.rebuild_aggregates()
             except (NotImplementedError, ImportError):

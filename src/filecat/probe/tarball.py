@@ -16,6 +16,7 @@ from __future__ import annotations
 from typing import Any, Iterator
 
 from ..options import ScanOptions
+from ..fsource import fopen
 from . import members
 
 _BLOCK = 512
@@ -75,7 +76,7 @@ def probe_tar(path: str, head: bytes, options: ScanOptions, result: Any) -> None
     result.container = "plain"
     result.probe["format"] = "tar"
     try:
-        with open(path, "rb") as f:
+        with fopen(path, "rb") as f:
             src = FileSource(f)
             rows, truncated = walk(src, max_members=options.max_members)
     except OSError as exc:

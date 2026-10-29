@@ -1,0 +1,119 @@
+{
+ "ok": true,
+ "topology": {
+  "version": 1,
+  "platform": "truenas",
+  "host": {
+   "name": "truenas2",
+   "unc_server": "\\\\truenas2",
+   "os": "TrueNAS SCALE 24.10"
+  },
+  "collected_at": "2026-10-22T09:03:00Z",
+  "nodes": [
+   {
+    "id": "disk:TRUENASDISK001",
+    "type": "disk",
+    "parent": null,
+    "health": "ok",
+    "size_bytes": 34359738368,
+    "match": [
+     "serial:TRUENASDISK001"
+    ],
+    "virtual": true,
+    "serial": "TRUENASDISK001",
+    "model": "QEMU HARDDISK",
+    "media": "ssd"
+   },
+   {
+    "id": "disk:TRUENASDISK002",
+    "type": "disk",
+    "parent": null,
+    "health": "ok",
+    "size_bytes": 11811160064000,
+    "match": [
+     "serial:TRUENASDISK002"
+    ],
+    "virtual": true,
+    "serial": "TRUENASDISK002",
+    "model": "QEMU HARDDISK",
+    "media": "ssd"
+   },
+   {
+    "id": "pool:9100000000000010",
+    "type": "pool",
+    "parent": null,
+    "name": "boot-pool",
+    "health": "ok",
+    "size_bytes": 32212254720,
+    "allocated_bytes": 3221225472,
+    "level": "single",
+    "members": [
+     {
+      "disk": "disk:TRUENASDISK001",
+      "role": "data"
+     }
+    ]
+   },
+   {
+    "id": "vol:9100000000000011",
+    "type": "volume",
+    "parent": "pool:9100000000000010",
+    "name": "boot-pool",
+    "size_bytes": 30064771072,
+    "used_bytes": 3221225472,
+    "free_bytes": 26843545600,
+    "fs_type": "zfs",
+    "device": "boot-pool"
+   },
+   {
+    "id": "pool:9100000000000001",
+    "type": "pool",
+    "parent": null,
+    "name": "tank",
+    "health": "ok",
+    "size_bytes": 11700000000000,
+    "allocated_bytes": 10900000000000,
+    "level": "single",
+    "members": [
+     {
+      "disk": "disk:TRUENASDISK002",
+      "role": "data"
+     }
+    ]
+   },
+   {
+    "id": "vol:9100000000000002",
+    "type": "volume",
+    "parent": "pool:9100000000000001",
+    "name": "tank",
+    "size_bytes": 11700000000000,
+    "used_bytes": 10900000000000,
+    "free_bytes": 800000000000,
+    "mount": "/mnt/tank",
+    "fs_type": "zfs",
+    "device": "tank"
+   },
+   {
+    "id": "vol:9100000000000003",
+    "type": "volume",
+    "parent": "vol:9100000000000002",
+    "name": "tank/migrated",
+    "used_bytes": 10800000000000,
+    "mount": "/mnt/tank/migrated",
+    "fs_type": "zfs",
+    "device": "tank/migrated"
+   },
+   {
+    "id": "share:migrated",
+    "type": "share",
+    "parent": "vol:9100000000000003",
+    "name": "migrated",
+    "used_bytes": 10800000000000,
+    "path": "/mnt/tank/migrated",
+    "protocols": [
+     "smb"
+    ]
+   }
+  ]
+ }
+}

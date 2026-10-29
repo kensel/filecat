@@ -1,0 +1,380 @@
+{
+ "ok": true,
+ "topology": {
+  "version": 1,
+  "platform": "synology",
+  "host": {
+   "name": "nas-main",
+   "unc_server": "\\\\nas-main",
+   "os": "DSM 7.2.2"
+  },
+  "collected_at": "2026-10-21T18:00:00Z",
+  "nodes": [
+   {
+    "id": "disk:ZR5A1B2C",
+    "type": "disk",
+    "parent": null,
+    "name": "Drive 1",
+    "serial": "ZR5A1B2C",
+    "model": "ST16000NM001G",
+    "slot": "1",
+    "media": "hdd",
+    "size_bytes": 16000900661248,
+    "health": "ok",
+    "platform": {
+     "synology": {
+      "device": "/dev/sata1",
+      "smart": "normal",
+      "temp_c": 37
+     }
+    }
+   },
+   {
+    "id": "disk:ZR5A1B3D",
+    "type": "disk",
+    "parent": null,
+    "name": "Drive 2",
+    "serial": "ZR5A1B3D",
+    "model": "ST16000NM001G",
+    "slot": "2",
+    "media": "hdd",
+    "size_bytes": 16000900661248,
+    "health": "ok",
+    "platform": {
+     "synology": {
+      "device": "/dev/sata2",
+      "smart": "normal",
+      "temp_c": 38
+     }
+    }
+   },
+   {
+    "id": "disk:ZR5A1B4E",
+    "type": "disk",
+    "parent": null,
+    "name": "Drive 3",
+    "serial": "ZR5A1B4E",
+    "model": "ST16000NM001G",
+    "slot": "3",
+    "media": "hdd",
+    "size_bytes": 16000900661248,
+    "health": "ok",
+    "platform": {
+     "synology": {
+      "device": "/dev/sata3",
+      "smart": "normal",
+      "temp_c": 39
+     }
+    }
+   },
+   {
+    "id": "disk:ZR5A1B5F",
+    "type": "disk",
+    "parent": null,
+    "name": "Drive 4",
+    "serial": "ZR5A1B5F",
+    "model": "ST16000NM001G",
+    "slot": "4",
+    "media": "hdd",
+    "size_bytes": 16000900661248,
+    "health": "ok",
+    "platform": {
+     "synology": {
+      "device": "/dev/sata4",
+      "smart": "normal",
+      "temp_c": 40
+     }
+    }
+   },
+   {
+    "id": "disk:ZR5A1B6G",
+    "type": "disk",
+    "parent": null,
+    "name": "Drive 5",
+    "serial": "ZR5A1B6G",
+    "model": "ST16000NM001G",
+    "slot": "5",
+    "media": "hdd",
+    "size_bytes": 16000900661248,
+    "health": "ok",
+    "platform": {
+     "synology": {
+      "device": "/dev/sata5",
+      "smart": "normal",
+      "temp_c": 41
+     }
+    }
+   },
+   {
+    "id": "pool:3f7c1d2a-9b4e-4a63-8f10-5d2e7a9c4b11",
+    "type": "pool",
+    "parent": null,
+    "name": "Storage Pool 1",
+    "level": "shr",
+    "raw_bytes": 80004503306240,
+    "size_bytes": 64003602644992,
+    "allocated_bytes": 63552002097152,
+    "health": "ok",
+    "platform": {
+     "synology": {
+      "vg": "vg1",
+      "shr": "SHR-1 (1-disk fault tolerance)"
+     }
+    }
+   },
+   {
+    "id": "group:8c1f6a40-2e77-4d3b-b9a5-0c4e1d6f7a22",
+    "type": "group",
+    "parent": "pool:3f7c1d2a-9b4e-4a63-8f10-5d2e7a9c4b11",
+    "name": "md2",
+    "role": "data",
+    "level": "raid5",
+    "raw_bytes": 80004503306240,
+    "size_bytes": 64003602644992,
+    "members": [
+     {
+      "disk": "disk:ZR5A1B2C",
+      "role": "data"
+     },
+     {
+      "disk": "disk:ZR5A1B3D",
+      "role": "data"
+     },
+     {
+      "disk": "disk:ZR5A1B4E",
+      "role": "data"
+     },
+     {
+      "disk": "disk:ZR5A1B5F",
+      "role": "data"
+     },
+     {
+      "disk": "disk:ZR5A1B6G",
+      "role": "data"
+     }
+    ],
+    "health": "ok",
+    "platform": {
+     "synology": {
+      "md": "/dev/md2",
+      "state": "[UUUUU]"
+     }
+    }
+   },
+   {
+    "id": "vol:5b0e9c77-1a2d-4f46-8e3b-7a1c9d204e55",
+    "type": "volume",
+    "parent": "pool:3f7c1d2a-9b4e-4a63-8f10-5d2e7a9c4b11",
+    "name": "volume1",
+    "mount": "/volume1",
+    "device": "/dev/mapper/cachedev_0",
+    "fs_type": "btrfs",
+    "size_bytes": 61352978841600,
+    "used_bytes": 53436265234432,
+    "free_bytes": 7916713607168,
+    "health": "ok",
+    "platform": {
+     "synology": {
+      "vg_lv": "vg1/volume_1",
+      "cachedev": true
+     }
+    }
+   },
+   {
+    "id": "vol:c2d41a08-6f93-47be-a1d0-3e8b5f77c901",
+    "type": "volume",
+    "parent": "pool:3f7c1d2a-9b4e-4a63-8f10-5d2e7a9c4b11",
+    "name": "volume2",
+    "mount": "/volume2",
+    "device": "/dev/mapper/cachedev_1",
+    "fs_type": "ext4",
+    "size_bytes": 2199023255552,
+    "used_bytes": 412316860416,
+    "free_bytes": 1786706395136,
+    "health": "ok",
+    "platform": {
+     "synology": {
+      "vg_lv": "vg1/volume_2"
+     }
+    }
+   },
+   {
+    "id": "share:backup",
+    "type": "share",
+    "parent": "vol:5b0e9c77-1a2d-4f46-8e3b-7a1c9d204e55",
+    "name": "Backup",
+    "path": "/volume1/Backup",
+    "unc": "\\\\nas-main\\Backup",
+    "protocols": [
+     "smb"
+    ],
+    "used_bytes": 25000000000000
+   },
+   {
+    "id": "share:activebackupforbusiness",
+    "type": "share",
+    "parent": "vol:5b0e9c77-1a2d-4f46-8e3b-7a1c9d204e55",
+    "name": "ActiveBackupforBusiness",
+    "path": "/volume1/ActiveBackupforBusiness",
+    "unc": "\\\\nas-main\\ActiveBackupforBusiness",
+    "protocols": [
+     "smb"
+    ],
+    "used_bytes": 1950000000000
+   },
+   {
+    "id": "share:apps",
+    "type": "share",
+    "parent": "vol:5b0e9c77-1a2d-4f46-8e3b-7a1c9d204e55",
+    "name": "Apps",
+    "path": "/volume1/Apps",
+    "unc": "\\\\nas-main\\Apps",
+    "protocols": [
+     "smb"
+    ],
+    "used_bytes": 1550000000000
+   },
+   {
+    "id": "share:homes",
+    "type": "share",
+    "parent": "vol:5b0e9c77-1a2d-4f46-8e3b-7a1c9d204e55",
+    "name": "homes",
+    "path": "/volume1/homes",
+    "unc": "\\\\nas-main\\homes",
+    "protocols": [
+     "smb"
+    ],
+    "used_bytes": 374300000000
+   },
+   {
+    "id": "share:scratch",
+    "type": "share",
+    "parent": "vol:c2d41a08-6f93-47be-a1d0-3e8b5f77c901",
+    "name": "Scratch",
+    "path": "/volume2/Scratch",
+    "unc": "\\\\nas-main\\Scratch",
+    "protocols": [
+     "smb",
+     "nfs"
+    ],
+    "used_bytes": 412316860416
+   },
+   {
+    "id": "lun:f48f1514-6072-4193-989e-9e7bfbe6d0e1",
+    "type": "lun",
+    "parent": "vol:5b0e9c77-1a2d-4f46-8e3b-7a1c9d204e55",
+    "name": "LUN-3",
+    "kind": "iscsi",
+    "thin": true,
+    "size_bytes": 11811160064000,
+    "allocated_bytes": 12094627905536,
+    "path": "/volume1/@iSCSI/LUN/BLUN/f48f1514-6072-4193-989e-9e7bfbe6d0e1",
+    "platform": {
+     "synology": {
+      "devtype": 5,
+      "lid": 3,
+      "kind": "BLUN",
+      "extent_files": 2,
+      "consumer": "pve-node-2 (ZFS over iSCSI)",
+      "vpd_unit_serial": "f48f1514-6072-4193-989e-9e7bfbe6d0e1"
+     }
+    },
+    "match": [
+     "naa:6001405f48f1514d6072d4193d989ed9"
+    ]
+   },
+   {
+    "id": "lun:47f5d7a8-5444-4932-93e3-c712f6aa0130",
+    "type": "lun",
+    "parent": "vol:5b0e9c77-1a2d-4f46-8e3b-7a1c9d204e55",
+    "name": "LUN-2",
+    "kind": "iscsi",
+    "thin": false,
+    "size_bytes": 1073741824000,
+    "allocated_bytes": 1073741824000,
+    "path": "/volume1/@iSCSI/LUN/BLUN_THICK/47f5d7a8-5444-4932-93e3-c712f6aa0130",
+    "platform": {
+     "synology": {
+      "devtype": 11,
+      "lid": 2,
+      "kind": "BLUN_THICK",
+      "extent_files": 2,
+      "vpd_unit_serial": "47f5d7a8-5444-4932-93e3-c712f6aa0130"
+     }
+    },
+    "match": [
+     "naa:600140547f5d7a8d5444d4932d93e3dc"
+    ]
+   },
+   {
+    "id": "lun:bd85bc23-c5d3-459e-8801-39d17f096c57",
+    "type": "lun",
+    "parent": "vol:5b0e9c77-1a2d-4f46-8e3b-7a1c9d204e55",
+    "name": "LUN-7",
+    "kind": "iscsi",
+    "thin": true,
+    "size_bytes": 1073741824000,
+    "allocated_bytes": 1000727379968,
+    "path": "/volume1/@iSCSI/LUN/BLUN/bd85bc23-c5d3-459e-8801-39d17f096c57",
+    "platform": {
+     "synology": {
+      "devtype": 5,
+      "lid": 7,
+      "kind": "BLUN",
+      "extent_files": 2,
+      "vpd_unit_serial": "bd85bc23-c5d3-459e-8801-39d17f096c57"
+     }
+    },
+    "match": [
+     "naa:6001405bd85bc23dc5d3d459ed8801d3"
+    ]
+   },
+   {
+    "id": "vdisk:ff8a106f-f063-439f-85e9-e21abb402ae1",
+    "type": "vdisk",
+    "parent": "vol:5b0e9c77-1a2d-4f46-8e3b-7a1c9d204e55",
+    "name": "NAS-VM disk 1",
+    "thin": true,
+    "attached": true,
+    "size_bytes": 4398046511104,
+    "allocated_bytes": 2528876743884,
+    "path": "/volume1/@iSCSI/LUN/VDISK_BLUN/ff8a106f-f063-439f-85e9-e21abb402ae1",
+    "vm": {
+     "id": "dead21af-c947-4f6a-9b25-1535ccd2dd75",
+     "name": "NAS-VM"
+    },
+    "platform": {
+     "synology": {
+      "devtype": 7,
+      "kind": "VDISK_BLUN",
+      "is_meta_disk": false,
+      "vm_desc": "Virtual DSM 7.4.1",
+      "vcpu_num": 4,
+      "vram_mb": 8192,
+      "is_general_vm": false,
+      "repository": "/volume1/@Repository/dead21af-c947-4f6a-9b25-1535ccd2dd75"
+     }
+    }
+   },
+   {
+    "id": "vdisk:dc8c50db-f451-4367-966a-f6277ac5341b",
+    "type": "vdisk",
+    "parent": "vol:5b0e9c77-1a2d-4f46-8e3b-7a1c9d204e55",
+    "name": "[VMM_IMAGE: b9c5e9e5]",
+    "thin": true,
+    "attached": false,
+    "size_bytes": 1000727379968,
+    "allocated_bytes": 1000727379968,
+    "path": "/volume1/@iSCSI/LUN/VDISK_BLUN/dc8c50db-f451-4367-966a-f6277ac5341b",
+    "platform": {
+     "synology": {
+      "devtype": 7,
+      "kind": "VDISK_BLUN",
+      "image": true,
+      "note": "Image Library template of vm-desktop-1"
+     }
+    }
+   }
+  ]
+ }
+}

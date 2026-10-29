@@ -27,10 +27,11 @@ continues a chain. Encrypted (.gpg) manifests are not read.
 """
 from __future__ import annotations
 
-import os
 import re
 from datetime import datetime
 from typing import Any
+
+from .storefs import LOCAL, StoreFS
 
 _NAME = re.compile(
     r"^duplicity-(full|inc|full-signatures|new-signatures)\."
@@ -91,7 +92,7 @@ class _Duplicity:
         info = "/" not in inner and _parse(inner)
         return bool(info) and info["part"] in ("volume", "sigtar")
 
-    def summarize(self, path: str, names: set[str]) -> dict[str, Any]:
+    def summarize(self, path: str, names: set[str], fs: StoreFS = LOCAL) -> dict[str, Any]:
         sets: dict[tuple, dict[str, Any]] = {}
         sigs: set[tuple] = set()
         for name in names:
@@ -110,7 +111,7 @@ class _Duplicity:
                 s["manifest"] = name
             else:
                 try:
-                    s["volumes"][info["vol"]] = os.stat(os.path.join(path, name)).st_size
+                    s["volumes"][info["vol"]] = fs.stat(fs.join(path, name)).st_size
                 except OSError:
                     s["volumes"][info["vol"]] = None
 
@@ -128,8 +129,8 @@ class _Duplicity:
                 problems.append(f"{label}: no manifest (the set did not finish)")
             elif not s["manifest"].endswith(".gpg"):
                 try:
-                    with open(os.path.join(path, s["manifest"]), "r", encoding="utf-8",
-                              errors="replace") as f:
+                    with fs.open(fs.join(path, s["manifest"]), "r", encoding="utf-8",
+                                 errors="replace") as f:
                         man = read_manifest(f.read(4 * 1024 * 1024))
                 except OSError as e:
                     problems.append(f"{label}: manifest unreadable: {e}")

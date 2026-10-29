@@ -91,12 +91,19 @@ filecat scan D:\Games --ollama --model gemma4:31b-cloud
 filecat scan \\192.0.2.13\home --alias \\192.0.2.13=\\nas-main   # read by IP, record as \\nas-main\home
 filecat summary --out catalog.sqlite [--by extension|mime|dir] [--depth 2] [--root R] [--top 50]
 filecat summary --disagree                                # name says one type, bytes another
+filecat summaries [--root R] [--all | --stale]             # rebuild the stored summaries the viewer shows (default: roots changed since)
+filecat summaries status [--json]                         # what is stored, when built, when the root last changed
 filecat show "sub/dir/file.txt" --root D:\Games
 filecat roots                                             # last scan, in progress, newest file, last error
+filecat roots case-check                                  # one share recorded as two roots (server\share case)?
+filecat roots remove ROOT [--force [--yes]] [--dry-run]   # forget a root with no records (typo); --force deletes its records too
 filecat dropped                                           # records of files that vanished (kept 90 days)
 filecat backups [--versions]                              # backup stores: machines, versions, problems, copies
 filecat databases                                         # database data folders: engine, version, databases, quiet?
 filecat scan-everything [--list] [--unfinished]           # every share of [everything] servers + local drives
+filecat agents enroll nas3 --host nas3 [--write]           # token + .env lines + [[agents]] stanza, fingerprint (docs/agent-server.md)
+filecat agents status [--strict]                          # version, pin, allowed roots, run ids, allowlist/deny hashes
+filecat server [--serve] [--once] [--dry-run]             # coordinator: agent health + scheduled scans and storage collects
 filecat programs                                          # registry, PATH, Start Menu
 filecat programs --reg uninstall-export.reg               # from a regedit export instead
 filecat signatures status
@@ -114,7 +121,8 @@ their anomalies, such as macros, embedded objects or a hidden `.exe`, are
 stored as members. `--expand-compound` stores every entry. The
 classification is in `src/filecat/data/compound_formats.toml`, described in
 [docs/compound-formats.md](docs/compound-formats.md). Planned releases are
-in [docs/roadmap.md](docs/roadmap.md).
+in [docs/roadmap.md](docs/roadmap.md); the NAS agent's wire protocol is
+[docs/agent-protocol.md](docs/agent-protocol.md).
 
 A scan exits 0 when every entry was recorded cleanly and 1 when any record has
 an `errors` entry. Reruns skip files whose size and mtime are unchanged
@@ -248,9 +256,12 @@ with a failed status, every file in the target's own `Guard` manifest
 that is missing or of another size (checked against the scan's listing, so
 it costs no extra reads), and errors in the last integrity check's log;
 the summary has the task, source NAS and folders, each version's size and
-file counts, and source vs target size. `scan --verify-backups` also reads
-every file Guard lists and compares its CRC32, which reads the whole
-target. What is known of the format itself, enough to build a reader, is in
+file counts, and source vs target size. With the target's `Pool/` rolled up
+into one `[BACKUP]` record (`--rollup backup=automatic`, see
+[docs/rollups.md](docs/rollups.md)) `scan --verify-backups` compares the
+pool's total bytes and file count with Guard's (`probe.backup.checked` is
+`totals`); Guard's per-file CRC32 read of the whole target is verify level 2,
+not in v0.2.0. What is known of the format itself, enough to build a reader, is in
 [docs/formats/synology-hyperbackup.md](docs/formats/synology-hyperbackup.md).
 For Veeam it covers every backup file the job's `.vbm` lists that is
 missing or of another size, restore points Veeam marked corrupt (and how
@@ -421,11 +432,22 @@ interrupted, failed, scanning, stalled and not scanned.
 
 ```
 filecat roots [--root R] [--json]
+filecat roots remove ROOT [--force [--yes]] [--dry-run]
 ```
 
 The web viewer's Roots page shows the same table, refreshing while a scan
-runs. Roots scanned before the index existed, or added by `import`, show
+runs, from the root index and the stored summaries alone (how old each is,
+and whether the root changed since: `filecat summaries status`). Roots scanned before the index existed, or added by `import`, show
 "not scanned". Their newest file is read from the records.
+
+`roots remove ROOT` forgets a root that should not be there, such as a typo
+or a folder that did not exist: its index entry, summary, treemap snapshots
+and resume state. It refuses while a scan runs and while the root still has
+records; `--force` deletes the records too (it asks you to type the root
+unless `--yes`). `--dry-run` says what would go. Under `filecat server
+--serve` the Roots page has a **Scan** button per root and, for a root with
+no records, **Remove**, behind the same password login as "Run now" (see
+[docs/agent-server.md](docs/agent-server.md) section 7).
 
 ## Dropped records
 
@@ -477,6 +499,7 @@ huge root into size-capped parts is planned in `docs/jsonl-parts-plan.md`.
 ```
 filecat serve [--backend B --out F | --dsn DSN] [--port 8765] [--host 127.0.0.1] [--open]
               [--no-save] [--graph-max-age MINUTES]
+              [--tls self-signed|acme|off | --tls-cert FILE --tls-key FILE]
 ```
 
 Serves a read-only page at http://127.0.0.1:8765/ for any backend. The page
@@ -493,9 +516,16 @@ has these views:
   seconds for a large share. Roots without a summary yet are sized from the
   root index until theirs arrives.
 
-  Each treemap is saved in the catalog as a snapshot and reused until it is
-  `--graph-max-age` minutes old (default 120). After that, the next viewer
-  gets a fresh one. **Refresh** re-reads the records now. **📌 Pin** keeps
+  Each root's top, two folders deep, is its stored summary: the Summary tables
+  and this treemap come from one pass over its records, saved in the catalog
+  and served at once for as long as the root has not changed (no age limit;
+  a scan that wrote or removed files, or any other tool that changed the
+  root, makes it stale). A stale one is shown marked "stale, refreshing…"
+  while the server rebuilds it in the background, and a root with none is
+  built on first use (`filecat summaries` and the scan's end build them
+  too). A folder or another depth is summarised on demand, saved as a
+  snapshot and reused until it is `--graph-max-age` minutes old (default
+  120). **Refresh** rebuilds now, keeping what is shown until it is ready. **📌 Pin** keeps
   the snapshots on screen indefinitely, with the time and an optional label.
   On the overview one pin covers every root. **Snapshot** switches the page
   between the latest and any pin. **Compare with** picks a pin to measure
@@ -510,6 +540,28 @@ has these views:
   directory records.
 - **Records:** filter, sort and page the files, then open one to see every
   field, its errors and its archive members.
+- **Rollups:** the audit of `filecat rollups list`: the rollup records by
+  root, tag and parent folder with files, folders, size, newest modification
+  and partial flags, filterable by root and tag and sortable. Each row links
+  to its folder in Browse and to the rollup's record. A `[REDACTED]` row is
+  counts only: no link, no name, no modification time.
+- **Topology:** the storage topology that `filecat storage collect` stored
+  (plus `[[storage.hosts]]` from filecat.toml): per host a collapsible tree
+  of disks, pools, volumes, shares, LUNs and VM disks with capacity bars,
+  each share joined to its catalog root (files, bytes, last scan, links to
+  Browse and Graph), links between hosts with a jump to the guest server, and
+  the roots no share accounts for under "Not in topology".
+- **Search:** file and folder names across every root, Everything-style and
+  case-insensitive: `eve*.exe` (`*` any run, `?` one character, the whole name
+  must match), plain text is a substring (`setup` is `*setup*`), and `ext:exe;dll`,
+  `size:>10mb` (or `1mb..1gb`), `after:2024-01-01`, `before:`, `kind:dir`,
+  `root:` and `host:nas-*` narrow it. Results show the name, its folder (a link
+  to Browse), root, size, modified time and kind, 100 at a time (up to 1000 per
+  page) with the time the query took; click one to open the record. Only names
+  are matched, and the lookup scans the catalog (no name index yet), so a
+  substring search of tens of millions of records takes seconds. A rolled-up
+  folder (`[CACHE]`, `[REDACTED]`) is found by its own name only; nothing inside
+  it is stored. `GET /api/search` is the same query as JSON.
 
 The **Backend** selector in the top-right corner switches the viewer to
 another catalog without a restart. It lists every backend with a location in
@@ -526,9 +578,25 @@ summary and marks it stale when the records have changed since. When a root
 has no stored summary, the viewer computes it and saves it. Rebuild & save
 recomputes at the selected depth. Graph snapshots go in a `treemaps` table
 (`<stem>.treemaps.json` for JSONL). `--no-save` keeps the viewer from writing
-anything. There
-is no authentication, so keep the default `--host 127.0.0.1` unless the
-network is trusted. The JSON API is under `/api/` (see `serve.py`).
+anything. A plain
+`filecat serve` has no authentication, so keep the default `--host 127.0.0.1`
+unless the network is trusted. The JSON API is under `/api/` (see `serve.py`).
+
+It speaks plain HTTP unless you ask for TLS, which filecat serves itself, with
+no reverse proxy and nothing reachable from the internet. `--tls self-signed`
+(or a `[server.tls]` table in `filecat.toml`) generates a certificate for the
+bind host, `localhost` and this machine's names, reuses it, renews it before
+it expires and prints its SHA-256 fingerprint to check in the browser;
+`--tls-cert`/`--tls-key` serve your own; `--tls acme` gets a publicly trusted
+one for a name on your own domain by DNS-01 (Cloudflare, or any provider
+through a hook script) and renews it. Encryption is not a login: for "run now"
+and `login_required_for_view` use `filecat server --serve`. Install the
+`tls` extra (`pip install 'filecat[tls]'`) for certificate generation, or have
+the `openssl` command; see [docs/agent-server.md](docs/agent-server.md#tls).
+```toml
+[server.tls]
+names = ["filecat.lan"]          # extra names in the certificate
+```
 
 ## Import and enrich
 
@@ -661,6 +729,8 @@ src/filecat/
   browse.py serve.py web/   drill-through queries, `filecat serve` and its page
   treemap.py        folder sizes split by extension/type for the Graph view
   rootinfo.py roots_cmd.py  root index (scan history) and `filecat roots`
+  root_remove.py    `roots remove` and the viewer's Remove button
+  search.py         the Search page's query language (patterns, LIKE and regex translations)
   programs.py reg.py lnk.py
   importer.py enrich.py
   data/             vendored freedesktop.org.xml and richprint comp_id.txt

@@ -46,10 +46,21 @@ class ScanOptions:
     keep_dropped: int = 90              # days a vanished file's record stays in the dropped store
     aliases: dict[str, str] = field(default_factory=dict)  # read PATH, record ROOT (aliases.py)
     measure_backups: bool = False       # read backup data files (chunks, volumes) like any other
-    verify_backups: bool = False        # read backup data and check it against its manifest's checksums
+    verify_backups: int = 0             # --verify-backups[=N]: 0 nothing, 1 rolled-up totals against the manifest (docs/rollups.md 4.5)
     measure_databases: bool = False     # read database data files that are quiet and big enough (dbfiles/)
     exclude: list[str] = field(default_factory=list)  # folders/files not walked (walker.excluded)
     check_only: bool = False            # preflight (open each root, account) and stop
+    agents: list[Any] = field(default_factory=list)  # config.AgentConfig: filecat-agent hosts (fsource.pick)
+    agent: str | None = None            # --agent NAME: use that agent for the roots it covers
+    no_agent: bool = False              # --no-agent: read every root over SMB, whatever agents are configured
+    agent_fallback: bool = False        # --agent-fallback: an unreachable agent's roots are read over SMB
+    rollup_config: Any = None           # rollup.RollupConfig: the [rollups] modes and rules (None: all manual)
+    rollup_workers: int = 4             # threads that sum rolled-up folders
+    rollup_timeout: float | None = None  # seconds one rollup may take on an SMB or local scan
+    new_redaction_key: bool = False     # --new-redaction-key: write a key although sticky entries exist
+    cancel: Any = None                  # threading.Event: when set the scan stops at the next entry (filecat server)
+    agent_label: str | None = None      # what an agent shows for this scan's connections (agent `activity`); None: "filecat by user@host"
+    live: Any = None                    # scan.LiveProgress: counters another thread reads while the scan runs (filecat server)
 
     @classmethod
     def from_args(cls, args: Any) -> "ScanOptions":

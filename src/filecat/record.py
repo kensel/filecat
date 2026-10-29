@@ -10,8 +10,12 @@ from typing import Any
 
 KINDS = (
     "dir", "link", "empty", "exe", "archive", "image", "texture", "mesh",
-    "audio", "video", "document", "text", "data", "save", "disk", "unknown",
+    "audio", "video", "document", "text", "data", "save", "disk", "unknown", "rollup",
 )
+# Records that are not files: a directory, and a rollup (docs/rollups.md), which
+# stands for files and folders the catalog counts but does not list. Wherever
+# a reader means "a file" it means kind NOT IN NON_FILE_KINDS.
+NON_FILE_KINDS = ("dir", "rollup")
 CONTAINERS = ("plain", "gzip", "gzip_xored", "zip", "pe", "bzip2", "xz", "7z", "unknown")
 
 # Fields stored as indexed columns by the SQL backends and the Mongo index.
@@ -23,6 +27,10 @@ ROOT_REL = ""
 # Transient key carrying an archive's member list from the probe to
 # Backend.store(); never written into a stored document.
 MEMBERS_KEY = "_members"
+
+
+def is_file_kind(kind: str | None) -> bool:
+    return kind not in NON_FILE_KINDS
 
 
 def root_id(root: str) -> str:
@@ -78,6 +86,39 @@ def new_document(root: str, rel_path: str, *, kind: str, size: int = 0,
     if ctime_ns is not None:
         doc["ctime_ns"] = ctime_ns
     return doc
+
+
+def add_fs_info(doc: dict[str, Any], *, allocated_size: int | None = None, ino: int | None = None,
+                dev: int | None = None, nlink: int | None = None) -> None:
+    """The optional file-system fields only a scan through filecat-agent knows
+    (an SMB scan leaves them out): `allocated_size`, the space the file really
+    takes (st_blocks * 512; a sparse file's is smaller than `size`), and
+    `ino` / `dev` / `nlink`, the identity of the file on its volume. Names
+    sharing (dev, ino) are hard links to one file; HardLinks counts it once."""
+    if allocated_size is not None:
+        doc["allocated_size"] = allocated_size
+    if ino:
+        doc["ino"], doc["dev"], doc["nlink"] = ino, dev or 0, nlink or 1
+
+
+class HardLinks:
+    """Counts the size of a hard-linked file once per (dev, ino), where a
+    scan totals sizes. Only files with nlink above 1 are remembered."""
+
+    def __init__(self) -> None:
+        self._seen: set[tuple[int, int]] = set()
+
+    def counted(self, size: int, ino: int | None, dev: int | None, nlink: int | None) -> int:
+        if not ino or not nlink or nlink <= 1:
+            return size
+        key = (dev or 0, ino)
+        if key in self._seen:
+            return 0
+        self._seen.add(key)
+        return size
+
+    def counted_doc(self, doc: dict[str, Any]) -> int:
+        return self.counted(doc.get("size") or 0, doc.get("ino"), doc.get("dev"), doc.get("nlink"))
 
 
 def add_error(doc: dict[str, Any], stage: str, message: str | BaseException) -> None:

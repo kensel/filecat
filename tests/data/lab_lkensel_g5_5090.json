@@ -1,0 +1,184 @@
+{
+ "ok": true,
+ "topology": {
+  "version": 1,
+  "platform": "windows",
+  "host": {
+   "name": "lkensel-g5-5090",
+   "unc_server": "\\\\lkensel-g5-5090",
+   "os": "Windows 11 Pro",
+   "iqn": "iqn.1991-05.com.microsoft:lkensel-g5-5090"
+  },
+  "collected_at": "2026-10-22T09:05:00Z",
+  "nodes": [
+   {
+    "id": "disk:WINNVME0001",
+    "type": "disk",
+    "parent": null,
+    "name": "Disk 0",
+    "health": "ok",
+    "size_bytes": 2000398934016,
+    "serial": "WINNVME0001",
+    "model": "WD_BLACK SN850X 2000GB",
+    "media": "nvme"
+   },
+   {
+    "id": "vol:{c5a1b3d2-0e47-4f89-96a8-71d2e0b5c3f4}",
+    "type": "volume",
+    "parent": null,
+    "name": "C:",
+    "size_bytes": 1998000000000,
+    "used_bytes": 612000000000,
+    "free_bytes": 1386000000000,
+    "members": [
+     {
+      "disk": "disk:WINNVME0001",
+      "role": "data"
+     }
+    ],
+    "mount": "C:\\",
+    "fs_type": "ntfs"
+   },
+   {
+    "id": "disk:naa.60014052a93d1c8d71e4d4b60d8c25d5",
+    "type": "disk",
+    "parent": null,
+    "name": "Disk 2",
+    "health": "ok",
+    "size_bytes": 107374182400,
+    "match": [
+     "naa:60014052a93d1c8d71e4d4b60d8c25d5"
+    ],
+    "virtual": true,
+    "model": "SYNOLOGY iSCSI Storage",
+    "platform": {
+     "windows": {
+      "bus": "iSCSI"
+     }
+    }
+   },
+   {
+    "id": "vol:{iscsi-e}",
+    "type": "volume",
+    "parent": null,
+    "name": "E:",
+    "size_bytes": 107357405184,
+    "used_bytes": 85362475008,
+    "free_bytes": 21994930176,
+    "members": [
+     {
+      "disk": "disk:naa.60014052a93d1c8d71e4d4b60d8c25d5",
+      "role": "data"
+     }
+    ],
+    "mount": "E:\\",
+    "fs_type": "ntfs"
+   },
+   {
+    "id": "disk:naa.6001405a0061b7ed4c92d4d83db5f1d2",
+    "type": "disk",
+    "parent": null,
+    "name": "Disk 3",
+    "health": "ok",
+    "size_bytes": 107374182400,
+    "match": [
+     "naa:6001405a0061b7ed4c92d4d83db5f1d2"
+    ],
+    "virtual": true,
+    "model": "SYNOLOGY iSCSI Storage",
+    "platform": {
+     "windows": {
+      "bus": "iSCSI"
+     }
+    }
+   },
+   {
+    "id": "vol:{iscsi-f}",
+    "type": "volume",
+    "parent": null,
+    "name": "F:",
+    "size_bytes": 107357405184,
+    "used_bytes": 629145600,
+    "free_bytes": 106728259584,
+    "members": [
+     {
+      "disk": "disk:naa.6001405a0061b7ed4c92d4d83db5f1d2",
+      "role": "data"
+     }
+    ],
+    "mount": "F:\\",
+    "fs_type": "ntfs"
+   },
+   {
+    "id": "disk:naa.600140583a1e4f6d0d57d4a29d9c3bdb",
+    "type": "disk",
+    "parent": null,
+    "name": "Disk 4",
+    "health": "ok",
+    "size_bytes": 107374182400,
+    "match": [
+     "naa:600140583a1e4f6d0d57d4a29d9c3bdb"
+    ],
+    "virtual": true,
+    "model": "SYNOLOGY iSCSI Storage",
+    "platform": {
+     "windows": {
+      "bus": "iSCSI"
+     }
+    }
+   },
+   {
+    "id": "vol:{iscsi-g}",
+    "type": "volume",
+    "parent": null,
+    "name": "G:",
+    "size_bytes": 107357405184,
+    "used_bytes": 12240656793,
+    "free_bytes": 95116748391,
+    "members": [
+     {
+      "disk": "disk:naa.600140583a1e4f6d0d57d4a29d9c3bdb",
+      "role": "data"
+     }
+    ],
+    "mount": "G:\\",
+    "fs_type": "ntfs"
+   },
+   {
+    "id": "disk:naa.6001405bd85bc23dc5d3d459ed8801d3",
+    "type": "disk",
+    "parent": null,
+    "name": "Disk 5",
+    "health": "ok",
+    "size_bytes": 1073741824000,
+    "match": [
+     "naa:6001405bd85bc23dc5d3d459ed8801d3"
+    ],
+    "virtual": true,
+    "model": "SYNOLOGY iSCSI Storage",
+    "platform": {
+     "windows": {
+      "bus": "iSCSI"
+     }
+    }
+   },
+   {
+    "id": "vol:{iscsi-h}",
+    "type": "volume",
+    "parent": null,
+    "name": "H:",
+    "size_bytes": 1073725046784,
+    "used_bytes": 971736350720,
+    "free_bytes": 101988696064,
+    "members": [
+     {
+      "disk": "disk:naa.6001405bd85bc23dc5d3d459ed8801d3",
+      "role": "data"
+     }
+    ],
+    "mount": "H:\\",
+    "fs_type": "ntfs"
+   }
+  ]
+ }
+}

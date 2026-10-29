@@ -11,6 +11,8 @@ import struct
 from typing import Any
 
 from ..options import ScanOptions
+from .. import fsource
+from ..fsource import fopen
 from . import images, media
 from . import members as members_mod
 
@@ -216,7 +218,7 @@ def decode_cat_entries(path: str) -> list[dict[str, Any]] | None:
     pack (03.cat .. 08.cat in X3 Reunion) and returns [].
     """
     try:
-        with open(path, "rb") as f:
+        with fopen(path, "rb") as f:
             raw = f.read()
     except OSError:
         return None
@@ -271,7 +273,7 @@ def probe_cat(path: str, result: Any, options: ScanOptions | None = None) -> boo
     summary.pop("entries")                  # probe.entries stays the dict list above
     result.probe.update(summary)
     result.probe["entries_total"] = len(entries)
-    result.probe["x3_dat"] = os.path.splitext(os.path.basename(path))[0] + ".dat"
+    result.probe["x3_dat"] = os.path.splitext(fsource.basename(path))[0] + ".dat"
     return True
 
 
@@ -282,8 +284,8 @@ def _sibling_cat_path(path: str) -> str:
 
 def probe_dat_sibling(path: str, options: ScanOptions, result: Any) -> bool:
     """A .dat file is an x3-dat payload when its sibling .cat decodes."""
-    cat_path = _sibling_cat_path(path)
-    if not os.path.isfile(cat_path):
+    cat_path = fsource.sibling(path, _sibling_cat_path(path))
+    if cat_path is None or not fsource.isfile(cat_path):
         return False
     entries = decode_cat_entries(cat_path)
     if entries is None:
@@ -293,7 +295,7 @@ def probe_dat_sibling(path: str, options: ScanOptions, result: Any) -> bool:
     result.probe["format"] = "x3-dat"
     result.probe["transform"] = "byte ^= 0x33"
     # pointer only: the entries are member rows on the .cat record
-    result.probe["x3_cat"] = os.path.basename(cat_path)
+    result.probe["x3_cat"] = fsource.basename(cat_path)
     result.probe["entries_total"] = len(entries)
     if options.expand_dat:
         result.probe["members"] = _expand_members(path, entries, options.member_cap)
@@ -323,7 +325,7 @@ def _expand_members(path: str, entries: list[dict[str, Any]], member_cap: int) -
     members: list[dict[str, Any]] = []
     sniff_window = 64
     try:
-        with open(path, "rb") as f:
+        with fopen(path, "rb") as f:
             for entry in entries[:member_cap]:
                 size = entry["size"]
                 out: dict[str, Any] = {"path": entry["path"], "size": size, "offset": entry["offset"]}

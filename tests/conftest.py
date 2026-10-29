@@ -46,3 +46,22 @@ def fixture_dir(request) -> Path:
 def _no_user_config(monkeypatch):
     """A filecat.toml in the repo or the user profile must not steer the tests."""
     monkeypatch.setenv("FILECAT_CONFIG", "none")
+
+
+def pytest_collection_modifyitems(config, items):
+    """FILECAT_TEST_AGENT_BIN set: the agent tests run against the real binary
+    (tests/_real_agent.py). These tests assert the fake's own constants or reach into the
+    fake and cannot mean the same thing there."""
+    if not os.environ.get("FILECAT_TEST_AGENT_BIN"):
+        return
+    from _real_agent import NOT_AGAINST_THE_REAL_AGENT
+    for item in items:
+        why = NOT_AGAINST_THE_REAL_AGENT.get(item.name)
+        if why:
+            item.add_marker(pytest.mark.skip(reason=f"real-agent run: {why}"))
+
+
+@pytest.fixture(autouse=True)
+def _redaction_key(monkeypatch, tmp_path):
+    """The sticky-redaction key of a test is its own file, never the user's."""
+    monkeypatch.setenv("FILECAT_REDACT_KEY_FILE", str(tmp_path / "redact.key"))

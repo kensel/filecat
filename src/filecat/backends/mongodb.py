@@ -23,7 +23,7 @@ import json
 import time
 from typing import Any, Iterable, Iterator
 
-from ..record import root_id
+from ..record import NON_FILE_KINDS, root_id
 from .base import Backend, Document, chunks
 
 BATCH_SIZE = 500
@@ -122,6 +122,13 @@ class MongoBackend(Backend):
         self.root_docs.create_index("root_id", unique=True)
         self.dropped = self.db["dropped"]
         self.treemaps = self.db["treemaps"]
+        self.redaction_docs = self.db["redactions"]
+        self.redaction_docs.create_index("id", unique=True)
+        self.redaction_docs.create_index([("root_id", 1), ("path_hash", 1)], unique=True)
+        self.topology_docs = {store: self.db[store] for store in self.DOC_STORES}
+        for coll in self.topology_docs.values():
+            coll.create_index("key", unique=True)
+        self.topology_docs["storage_topology_history"].create_index([("host", 1), ("scanned_at", 1)])
         self.dropped.create_index("dropped_at")
         self.dropped.create_index([("root_id", 1), ("rel_path", 1)])
         self.agg_meta.create_index("root_id", unique=True)
@@ -195,7 +202,9 @@ class MongoBackend(Backend):
         pipeline: list[dict[str, Any]] = [{"$match": match}]
         sort: dict[str, int] = {}
         if "parent" in q:  # folders first, like a file manager
-            pipeline.append({"$addFields": {"_notdir": {"$cond": [{"$eq": ["$kind", "dir"]}, 0, 1]}}})
+            pipeline.append({"$addFields": {"_notdir": {"$switch": {"branches": [
+                {"case": {"$eq": ["$kind", "dir"]}, "then": 0},
+                {"case": {"$eq": ["$kind", "rollup"]}, "then": 1}], "default": 2}}}})
             sort["_notdir"] = 1
         sort[q["sort"]] = -1 if q["desc"] else 1
         if q["sort"] != "rel_path":
@@ -211,7 +220,7 @@ class MongoBackend(Backend):
         size: dict[str, int] = {"$gt": above}
         if up_to is not None:
             size["$lte"] = up_to
-        query: dict[str, Any] = {"kind": {"$ne": "dir"}, "size": size}
+        query: dict[str, Any] = {"kind": {"$nin": ["dir", "rollup"]}, "size": size}
         if root is not None:
             query["root_id"] = root_id(root)
         yield from self.files.find(
@@ -229,9 +238,9 @@ class MongoBackend(Backend):
         if "kind" in q:
             and_.append({"kind": q["kind"]})
         if q.get("files_only"):
-            and_ += [{"kind": {"$ne": "dir"}}, {"$nor": [unreadable]}]
+            and_ += [{"kind": {"$nin": ["dir", "rollup"]}}, {"$nor": [unreadable]}]
         if q.get("unreadable"):
-            and_ += [{"kind": {"$ne": "dir"}}, unreadable]
+            and_ += [{"kind": {"$nin": ["dir", "rollup"]}}, unreadable]
         if q.get("errors"):
             and_.append(has_errors)
         if "suffix" in q:
@@ -262,7 +271,32 @@ class MongoBackend(Backend):
             and_.append(rel(r"^[^/]+$" if p == "" else "^" + re.escape(p) + "/[^/]+$"))
         if "q" in q:
             and_.append({"rel_path": {"$regex": re.escape(q["q"]), "$options": "i"}})
+        # file-name search (filecat.search): the regex is anchored at the ends the pattern is,
+        # so `eve*.exe` is ^eve.*\.exe$ and plain text is an unanchored literal
+        from ..search import regex_of
+        for glob in q.get("names", ()):
+            and_.append({"name": {"$regex": regex_of(glob), "$options": "is"}})
+        if "exts" in q:
+            and_.append({"suffix": {"$in": list(q["exts"])}})
+        for key, op, field in (("min_size", "$gte", "size"), ("max_size", "$lte", "size"),
+                               ("after", "$gte", "mtime_ns"), ("before", "$lt", "mtime_ns")):
+            if key in q:
+                and_.append({field: {op: q[key]}})
+        if "not_kinds" in q:
+            and_.append({"kind": {"$nin": list(q["not_kinds"])}})
+        if "roots" in q:
+            and_.append({"root_id": {"$in": [root_id(r) for r in q["roots"]]}})
         return {"$and": and_} if and_ else {}
+
+    def search_names(self, q: dict[str, Any]) -> dict[str, Any]:
+        """Backend.search_names in Mongo: no count, one page plus a look-ahead row."""
+        self.flush()
+        sort = {q["sort"]: -1 if q["desc"] else 1}
+        if q["sort"] != "rel_path":
+            sort["rel_path"] = 1
+        rows = list(self.files.find(self._browse_filter(q), {"_id": 0}).sort(list(sort.items()))
+                    .skip(q["offset"]).limit(q["limit"] + 1))
+        return {"rows": rows[:q["limit"]], "more": len(rows) > q["limit"]}
 
     def subtree(self, root: str, parent: str) -> list[dict[str, Any]]:
         """Child folders of `parent` with their readable files and bytes, grouped
@@ -301,6 +335,14 @@ class MongoBackend(Backend):
         self.flush()
         self.files.delete_one({"root_id": root_id(root), "rel_path": rel_path})
         self.delete_members(root, rel_path)
+
+    def delete_many(self, root: str, rel_paths: Iterable[str]) -> int:
+        self.flush()
+        rid, n = root_id(root), 0
+        for part in chunks(list(rel_paths)):
+            n += self.files.delete_many({"root_id": rid, "rel_path": {"$in": part}}).deleted_count
+            self.members.delete_many({"root_id": rid, "archive_rel_path": {"$in": part}})
+        return n
 
     # --- archive members -------------------------------------------
     def put_members(self, root: str, rel_path: str, members: list) -> None:
@@ -358,6 +400,22 @@ class MongoBackend(Backend):
             }
         return roots_out
 
+    def stored_totals(self, root: str | None = None) -> dict[str, Any]:
+        self.flush()
+        meta_query = {} if root is None else {"root": root}
+        return {m["root"]: {"total_files": m["total_files"], "total_bytes": m["total_bytes"],
+                            "unreadable": m["unreadable"], "depth": m.get("depth"), "built_at": m.get("built_at")}
+                for m in self.agg_meta.find(meta_query, {"_id": 0})}
+
+    def summary_docs(self, root: str) -> Iterator[Document]:
+        """Only the fields a summary reads, and no directory or rollup records."""
+        self.flush()
+        fields = {"_id": 0, "rel_path": 1, "kind": 1, "size": 1, "suffix": 1, "mime": 1, "errors": 1,
+                  "probe.mime_glob_desc": 1}
+        query = {"root_id": root_id(root), "kind": {"$nin": list(NON_FILE_KINDS)}}
+        for doc in self.files.find(query, fields, batch_size=5000):
+            yield {**doc, "root": root}
+
     def replace_aggregates(self, entries: dict[str, Any], depth: int, built_at: str,
                            root: str | None) -> None:
         query = {} if root is None else {"root_id": root_id(root)}
@@ -385,6 +443,50 @@ class MongoBackend(Backend):
     def purge_dropped(self, before: str) -> int:
         return self.dropped.delete_many({"dropped_at": {"$lt": before}}).deleted_count
 
+    def purge_dropped_paths(self, root: str, rel_paths: Iterable[str]) -> int:
+        import re
+        rid, paths = root_id(root), list(rel_paths)
+        if not paths:
+            return 0
+        pattern = "^(" + "|".join(re.escape(p) for p in paths) + ")(/|$)"
+        return self.dropped.delete_many(
+            {"root_id": rid, "rel_path": {"$regex": pattern}}).deleted_count
+
+    # --- sticky redactions ---------------------------------------------
+    def _redaction_rows(self, root: str | None = None) -> list[Document]:
+        return list(self.redaction_docs.find({}, {"_id": 0}))
+
+    def _redaction_put(self, entry: Document) -> None:
+        self.redaction_docs.replace_one({"id": entry["id"]}, _bson_safe(dict(entry)), upsert=True)
+
+    def _redaction_remove(self, entry: Document) -> None:
+        self.redaction_docs.delete_one({"id": entry["id"]})
+
+    # --- storage topology ------------------------------------------------
+    def _topology_rows(self, store: str) -> list[Document]:
+        return list(self.topology_docs[store].find({}, {"_id": 0}))
+
+    def _topology_put(self, store: str, doc: Document) -> None:
+        self.topology_docs[store].replace_one({"key": doc["key"]}, _bson_safe(dict(doc)), upsert=True)
+
+    def _topology_claim(self, store: str, doc: Document, holder: str, now: str, takeover: bool) -> bool:
+        """replace_one with upsert, filtered on key AND (holder is us OR expired). When the filter
+        matches nothing Mongo tries to insert, and the unique index on "key" rejects that for a
+        row someone else holds (DuplicateKeyError = lost). One document, one atomic operation."""
+        from pymongo.errors import DuplicateKeyError
+        mine: list[dict[str, Any]] = [{"holder": holder}]
+        if takeover:
+            mine.append({"expires_at": {"$lt": now}})
+        try:
+            res = self.topology_docs[store].replace_one({"key": doc["key"], "$or": mine},
+                                                        _bson_safe(dict(doc)), upsert=True)
+        except DuplicateKeyError:
+            return False
+        return bool(res.matched_count or res.upserted_id is not None)
+
+    def _topology_remove(self, store: str, key: str) -> None:
+        self.topology_docs[store].delete_one({"key": key})
+
     # --- root index ----------------------------------------------------
     def put_root_info(self, info: Document) -> None:
         self.root_docs.replace_one({"root_id": info["root_id"]}, _bson_safe(dict(info)), upsert=True)
@@ -395,6 +497,9 @@ class MongoBackend(Backend):
 
     def get_root_info(self, root: str) -> Document | None:
         return self.root_docs.find_one({"root_id": root_id(root)}, {"_id": 0})
+
+    def delete_root_info(self, root: str) -> None:
+        self.root_docs.delete_one({"root_id": root_id(root)})
 
     # --- stored treemaps ---------------------------------------------
     # {_id: id, root_id, meta, data}; the data is kept as JSON text so its

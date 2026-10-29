@@ -1,5 +1,9 @@
 # 04 - Web Viewer UI & End-to-End Storage Hierarchy
 
+> Design update: `parent_storage` and `child_server` below are superseded by links between individual disks (`backing` / `match` on the guest's disk, resolved across hosts' snapshots), and "Net Physical Storage Used" by the per-disk rule of `topology.physical_summary`. See [storage-topology.md](../storage-topology.md) section 5.
+
+> Status: the **Topology** page (`GET /api/topology`, built on the stored `storage_topology` snapshots rather than a `storage_pools` collection) implements the tree, capacity bars, share-to-root join and the jump from a LUN or VM disk to its guest server. SAN/VM treemap tiles and block-storage inspector cards are not done.
+
 This document describes the schema for the new storage_pools collection and the updates to filecat serve (treemap.py, serve.py, and the frontend web UI) to present a unified picture from physical RAID pools and volumes down to SAN LUNs, VMM Virtual Machines, child NAS servers (NAS-VM, nas-zfs), backup stores, and individual files.
 
 ## 1. End-to-End Storage Hierarchy Model

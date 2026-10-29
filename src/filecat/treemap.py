@@ -33,6 +33,16 @@ that "at", which is how they are listed and compared together. A snapshot
 already in another pin is copied, so each pin keeps what it was given.
 This is a size-per-folder record of the catalog at a time, not a history
 of files: comparing two of them shows which folders grew or shrank.
+Rollups (docs/rollups.md). `build(..., rollups=)` takes the rollup records
+beneath `prefix`. One whose path has at most `depth` components below the
+prefix is a folder entry of its own, named by that path ("proj/[CACHE]"),
+with `files` = its total_files, `bytes` = its size, extension and type split
+into one cell, the tag, and `"rollup": {"tag", "matched", "total_dirs",
+"allocated_size", "newest_mtime_ns", "oldest_mtime_ns", "partial"}` (a merged
+"..." entry keeps no rollup key). A deeper one is added to the folder it sits
+in, as a file would be, under its tag. The `files` and `bytes` totals include
+rollups, so a share's total matches `du`. A pin diff matches tiles by path,
+which is stable between snapshots, so it works on rollup tiles as on folders.
 """
 from __future__ import annotations
 
@@ -84,28 +94,50 @@ def _split(cells: dict[str, int], index: dict[str, int], other: int) -> list[lis
     return sorted(([i, b] for i, b in out.items()), key=lambda c: (-c[1], c[0]))
 
 
-def build(rows: Iterable[tuple[str, int, str, str]], prefix: str = "", depth: int = 2) -> dict[str, Any]:
+def build(rows: Iterable[tuple[str, int, str, str]], prefix: str = "", depth: int = 2,
+          rollups: Iterable[Document] = ()) -> dict[str, Any]:
     prefix = prefix.strip("/")
     start = len(prefix) + 1 if prefix else 0
     folders: dict[str, list[Any]] = {}  # path -> [files, bytes, {suffix: bytes}, {mime: bytes}]
     totals: dict[str, dict[str, list[int]]] = {"suffix": {}, "mime": {}}
-    for rel, size, suffix, mime in rows:
-        size = size or 0
-        suffix = suffix or "(none)"
-        f = folders.get(path := folder_of(rel, start, depth))
+    tiles: dict[str, dict[str, Any]] = {}   # path -> the "rollup" entry of a rollup's own tile
+
+    def add(path: str, files: int, size: int, suffix: str, mime: str) -> None:
+        f = folders.get(path)
         if f is None:
             f = folders[path] = [0, 0, {}, {}]
-        f[0] += 1
+        f[0] += files
         f[1] += size
         f[2][suffix] = f[2].get(suffix, 0) + size
         f[3][mime] = f[3].get(mime, 0) + size
         for table, key in (("suffix", suffix), ("mime", mime)):
             t = totals[table].get(key)
             if t is None:
-                totals[table][key] = [1, size]
+                totals[table][key] = [files, size]
             else:
-                t[0] += 1
+                t[0] += files
                 t[1] += size
+
+    for rel, size, suffix, mime in rows:
+        add(folder_of(rel, start, depth), 1, size or 0, suffix or "(none)", mime)
+    for doc in rollups:
+        rel = doc.get("rel_path") or ""
+        if not rel.startswith(prefix + "/" if prefix else "") or rel == prefix:
+            continue
+        info = (doc.get("probe") or {}).get("rollup") or {}
+        tag = info.get("tag") or doc.get("name") or "(rollup)"
+        files, size = info.get("total_files", 0), doc.get("size") or 0
+        below = rel[start:]
+        if len(below.split("/")) <= depth:
+            add(below, files, size, tag, tag)
+            tiles[below] = {"tag": tag, "matched": info.get("matched", 0),
+                            "total_dirs": info.get("total_dirs", 0),
+                            "allocated_size": doc.get("allocated_size"),
+                            "newest_mtime_ns": info.get("newest_mtime_ns"),
+                            "oldest_mtime_ns": info.get("oldest_mtime_ns"),
+                            "partial": bool(info.get("partial"))}
+        else:
+            add(folder_of(rel, start, depth), files, size, tag, tag)
 
     keys: dict[str, list[dict[str, Any]]] = {}
     indexes: dict[str, dict[str, int]] = {}
@@ -133,6 +165,8 @@ def build(rows: Iterable[tuple[str, int, str, str]], prefix: str = "", depth: in
                                "mime": _split(f[3], indexes["mime"], len(indexes["mime"]))}
         if len(f) > 4:
             row["merged"] = f[4]
+        elif path in tiles:
+            row["rollup"] = tiles[path]
         out_folders.append(row)
     return {"prefix": prefix, "depth": depth,
             "files": sum(f[0] for f in folders.values()), "bytes": sum(f[1] for f in folders.values()),

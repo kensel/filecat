@@ -3,12 +3,13 @@ a scan is in progress, the newest file and the last error. See rootinfo.py."""
 from __future__ import annotations
 
 import json
+import sys
 from datetime import datetime
 from typing import Any
 
 from . import rootinfo
 from .backends import open_backend
-from .summary import _human_bytes
+from .summary import _human_bytes, by_tag
 
 STATE_LABELS = {"in_progress": "SCANNING", "stalled": "STALLED", "never": "not scanned",
                 "ok": "ok", "errors": "errors", "unreachable": "UNREACHABLE",
@@ -62,7 +63,9 @@ def _print_root(row: dict[str, Any]) -> None:
         print(f"  last scan   {_local(last.get('started_at'))} -> {_local(last.get('finished_at'))} "
               f"({_duration(last.get('seconds'))}) on {last.get('host', '?')}: {last.get('status')}, "
               f"{last.get('files', 0)} files + {last.get('dirs', 0)} dirs written, "
-              f"{_human_bytes(last.get('bytes', 0))}, {last.get('errors', 0)} with errors")
+              f"{_human_bytes(last.get('bytes', 0))}, {last.get('errors', 0)} with errors"
+              + (f", {last['rollups']} rollups ({_human_bytes(last.get('rollup_bytes', 0))})"
+                 if last.get("rollups") else ""))
     elif not attempt:
         print("  last scan   none recorded (imported, or scanned before the root index existed)")
     newest = info.get("newest_file")
@@ -72,6 +75,11 @@ def _print_root(row: dict[str, Any]) -> None:
     if err:
         where = f" at {err['rel_path'] or 'the root itself'}" if err.get("rel_path") is not None else ""
         print(f"  last error  {_local(err.get('at'))} {err.get('stage')}: {err.get('message')}{where}")
+    tags = by_tag(row.get("rollups") or [])
+    if tags:
+        shown = ", ".join(f"{t['tag']} {_human_bytes(t['size'])}" for t in tags[:3])
+        print(f"  rollups     {shown}" + (f" and {len(tags) - 3} more" if len(tags) > 3 else "")
+              + f"  ({sum(t['folders'] for t in tags)} records, not listed)")
     totals = row["summary"]
     if totals:
         print(f"  summary     {totals.get('total_files')} files, {_human_bytes(totals.get('total_bytes') or 0)}, "
@@ -79,12 +87,68 @@ def _print_root(row: dict[str, Any]) -> None:
     print()
 
 
+def run_remove(args: Any) -> int:
+    """`roots remove ROOT [--force [--yes]] [--dry-run]`: see root_remove.py."""
+    from . import root_remove
+    if len(args.names) != 1:
+        print("filecat: roots remove wants exactly one ROOT, as `filecat roots` lists it", file=sys.stderr)
+        return 2
+    root = args.names[0]
+    with open_backend(args.backend, args.out, args.dsn) as backend:
+        if not root_remove.known(backend, root):
+            print(f"filecat: no root {root!r} in the catalog (`filecat roots` lists them)", file=sys.stderr)
+            return 2
+        records = root_remove.count_records(backend, root)
+        if records and not args.force:
+            print(f"filecat: {root} still has {records:,} record{'s' if records != 1 else ''}; "
+                  "--force deletes them too", file=sys.stderr)
+            return 1
+        if args.dry_run:
+            print(f"{root}: would remove the root and {records:,} record{'s' if records != 1 else ''}; "
+                  "nothing changed")
+            return 0
+        if records:
+            if not args.yes:
+                if not sys.stdin.isatty():
+                    print("filecat: roots remove --force needs --yes when there is no terminal", file=sys.stderr)
+                    return 2
+                answer = input(f"Delete {records:,} record{'s' if records != 1 else ''} of {root} and forget "
+                               f"the root? Type the root to confirm: ")
+                if answer.strip() != root:
+                    print("not removed")
+                    return 1
+        try:
+            removed = root_remove.remove_root(backend, root, force=args.force)
+        except root_remove.RootError as exc:
+            print(f"filecat: {exc}", file=sys.stderr)
+            return 1
+    parts = [f"{removed['records']:,} records"] if removed["records"] else []
+    parts += [f"{removed[k]} {label}" for k, label in (("treemaps", "treemap snapshots"),
+                                                       ("dropped", "dropped records"),
+                                                       ("redactions", "redaction entries"),
+                                                       ("resume_files", "resume entries")) if removed[k]]
+    print(f"{root}: removed" + (" (" + ", ".join(parts) + ")" if parts else ""))
+    return 0
+
+
 def run(args: Any) -> int:
+    if args.action in ("case-check", "case-merge"):
+        from . import rootcase
+        if not rootcase.SAMPLE_MIN <= args.sample <= rootcase.SAMPLE_MAX:
+            print(f"filecat: --sample must be {rootcase.SAMPLE_MIN}..{rootcase.SAMPLE_MAX}", file=sys.stderr)
+            return 2
+        return (rootcase.run_check if args.action == "case-check" else rootcase.run_merge)(args)
+    if args.action == "remove":
+        return run_remove(args)
     backend = open_backend(args.backend, args.out, args.dsn)
     try:
         rows = rootinfo.index(backend)
+        rollups = backend.rollup_totals()
     finally:
         backend.close()
+    for r in rows:
+        if r["root"] in rollups:
+            r["rollups"] = rollups[r["root"]]
     if args.root:
         rows = [r for r in rows if r["root"] in args.root]
     if args.json:

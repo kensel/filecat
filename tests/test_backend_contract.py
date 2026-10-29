@@ -345,6 +345,12 @@ def test_root_info_contract(backend, backend_name):
     listed = {i["root_id"]: i for i in backend.list_root_info()}
     assert listed[root_id(roots[0])] == done and listed[root_id(roots[1])] == infos[1]
     assert backend.get_root_info("C:\never-scanned") is None
+    backend.delete_root_info(roots[0])
+    backend.delete_root_info(roots[0])      # absent: no error
+    assert backend.get_root_info(roots[0]) is None
+    assert backend.get_root_info(roots[1]) == infos[1]
+    assert root_id(roots[0]) not in {i["root_id"] for i in backend.list_root_info()}
+    backend.delete_root_info(roots[1])
 
 
 def test_treemap_contract(backend, backend_name):
@@ -579,3 +585,159 @@ def test_get_stats_contract(backend, backend_name):
                      "kind": "empty", "size": 0})
     backend.flush()
     assert set(backend.get_stats(ROOT, many + ["a/b"])) == set(many) | {"a/b"}
+
+
+# --- rollups and sticky redactions (filecat/rollup.py, redaction.py) ---------------------
+
+def _rollup_doc(root: str, rel: str, size: int = 10, **info) -> dict:
+    return {"root_id": root_id(root), "root": root, "rel_path": rel, "name": rel.rsplit("/", 1)[-1],
+            "kind": "rollup", "suffix": "", "size": size, "mtime_ns": 5,
+            "probe": {"rollup": {"tag": rel.rsplit("/", 1)[-1], "rule": "builtin:cache", "matched": 2,
+                                 "total_files": 3, "total_dirs": 1, "newest_mtime_ns": 5,
+                                 "oldest_mtime_ns": 1, "errors": 0, "partial": False, **info}}}
+
+
+def test_rollups_do_not_count_as_files_and_are_read_back(backend, backend_name):
+    from filecat import browse
+    import uuid
+    root = rf"C:\rollup-contract-{uuid.uuid4().hex[:8]}"
+    docs = _make_docs(root) + [_rollup_doc(root, "a/b/[CACHE]", 500), _rollup_doc(root, "[REDACTED]", 70)]
+    for d in docs:
+        backend.put(copy.deepcopy(d))
+    backend.flush()
+    try:
+        backend.rebuild_aggregates(root=root)
+        summary = backend.summary(root=root)["roots"][root]
+        assert summary["total_files"] == 3 and summary["total_bytes"] == 123 + 2048
+        q = browse.normalize({"root": root, "files_only": "1", "limit": "100"})
+        assert backend.query(q)["total"] == 3
+        assert backend.query(browse.normalize({"root": root, "kind": "rollup"}))["total"] == 2
+        assert backend.query(browse.normalize({"root": root, "unreadable": "1"}))["total"] == 0
+        rows = backend.query(browse.normalize({"root": root, "parent": "a/b", "limit": "10"}))["rows"]
+        assert [r["kind"] for r in rows][0] == "rollup"
+        assert all(r[0] != "a/b/[CACHE]" for r in backend.sizes(root, ""))
+        assert all(s["name"] != "[CACHE]" for s in backend.subtree(root, "a"))
+        assert all(d["kind"] != "rollup" for d in backend.list_sized(0, root=root))
+        assert [d["rel_path"] for d in backend.rollups(root, "a")] == ["a/b/[CACHE]"]
+        assert len(list(backend.rollups(root))) == 2
+        totals = backend.rollup_totals(root)[root]
+        assert {(r["tag"], r["parent"]): r["size"] for r in totals} == {("[CACHE]", "a/b"): 500,
+                                                                         ("[REDACTED]", ""): 70}
+    finally:
+        for d in docs:
+            backend.delete(root, d["rel_path"])
+        backend.flush()
+
+
+def test_delete_many_is_a_hard_delete_with_members(backend, backend_name):
+    import uuid
+    root = rf"C:\delete-many-{uuid.uuid4().hex[:8]}"
+    docs = _make_docs(root)
+    for d in docs:
+        backend.put(copy.deepcopy(d))
+    backend.put_members(root, docs[2]["rel_path"], _make_members(2))
+    backend.flush()
+    assert backend.delete_many(root, [docs[0]["rel_path"], docs[2]["rel_path"], "never/there"]) == 2
+    backend.flush()
+    assert [d["rel_path"] for d in backend.list(root=root)] == [docs[1]["rel_path"]]
+    assert list(backend.list_members(root, docs[2]["rel_path"])) == []
+    assert list(backend.list_dropped(root)) == []          # nothing was moved to the dropped store
+    assert backend.delete_many(root, []) == 0
+    many = [f"bulk/{i:04d}" for i in range(1203)]
+    for p in many:
+        backend.put({"root_id": root_id(root), "root": root, "rel_path": p, "name": p[5:],
+                     "kind": "empty", "size": 0})
+    backend.flush()
+    assert backend.delete_many(root, many) == 1203
+    backend.delete(root, docs[1]["rel_path"])
+    backend.flush()
+
+
+def test_purge_dropped_paths_removes_entries_at_and_beneath(backend, backend_name):
+    import uuid
+    root = rf"C:\purge-dropped-{uuid.uuid4().hex[:8]}"
+    other = rf"C:\purge-other-{uuid.uuid4().hex[:8]}"
+    stamp = {"dropped_at": "2026-10-01T00:00:00+00:00", "drop_reason": "vanished"}
+    rels = ["secret", "secret/a.txt", "secret/deep/b.txt", "secretive/c.txt", "open/d.txt"]
+    for r in rels:
+        backend.put_dropped({**_rollup_doc(root, r), "kind": "text", **stamp})
+    backend.put_dropped({**_rollup_doc(other, "secret/a.txt"), "kind": "text", **stamp})
+    assert backend.purge_dropped_paths(root, ["secret"]) == 3
+    assert sorted(d["rel_path"] for d in backend.list_dropped(root)) == ["open/d.txt", "secretive/c.txt"]
+    assert len(list(backend.list_dropped(other))) == 1
+    assert backend.purge_dropped_paths(root, []) == 0
+    backend.purge_dropped_paths(root, ["secretive", "open"])
+    backend.purge_dropped_paths(other, ["secret"])
+
+
+def _entry(root: str, n: int, **kw) -> dict:
+    return {"id": f"{n:08x}", "root_id": root_id(root), "root": root, "parent": "jdoe",
+            "path_hash": f"{n:032x}", "status": "active", "source": "marker",
+            "created": "2026-10-23T00:00:00+00:00", "last_seen": "2026-10-23T00:00:00+00:00",
+            "key_id": "1a2b3c4d", **kw}
+
+
+def test_redactions_contract(backend, backend_name):
+    import uuid
+    root = rf"C:\redactions-{uuid.uuid4().hex[:8]}"
+    other = rf"\\nas\redactions-{uuid.uuid4().hex[:8]}"
+    a, b, c = _entry(root, 0xA1), _entry(root, 0xA2, dev=2049, ino=913442), _entry(other, 0xA3)
+    try:
+        for e in (a, b, c):
+            backend.put_redaction(copy.deepcopy(e))
+        assert sorted(e["id"] for e in backend.redactions(root)) == [a["id"], b["id"]]
+        assert {e["id"] for e in backend.redactions(other)} == {c["id"]}
+        assert {e["id"] for e in backend.redactions()} >= {a["id"], b["id"], c["id"]}
+        got = next(e for e in backend.redactions(root) if e["id"] == b["id"])
+        assert got == b
+        backend.touch_redaction(a["id"], "2026-10-24T00:00:00+00:00")
+        backend.set_redaction_status(a["id"], "pending", released="2026-10-24T01:00:00+00:00")
+        assert [e["id"] for e in backend.redactions(root, status="pending")] == [a["id"]]
+        got = next(e for e in backend.redactions(root) if e["id"] == a["id"])
+        assert got["last_seen"] == "2026-10-24T00:00:00+00:00" and got["released"].endswith("01:00:00+00:00")
+        # a rename: the same entry, a new hash, parent and inode
+        backend.update_redaction_identity(b["id"], f"{0xB2:032x}", 2049, 913999, "jdoe/new")
+        got = next(e for e in backend.redactions(root) if e["id"] == b["id"])
+        assert (got["path_hash"], got["parent"], got["ino"]) == (f"{0xB2:032x}", "jdoe/new", 913999)
+        # one entry per (root, path hash): a second id with the same hash replaces the first
+        backend.put_redaction(_entry(root, 0xA9, path_hash=a["path_hash"]))
+        ids = {e["id"] for e in backend.redactions(root)}
+        assert a["id"] not in ids and f"{0xA9:08x}" in ids
+        backend.delete_redaction(b["id"])
+        backend.delete_redaction(b["id"])       # absent: no error
+        assert b["id"] not in {e["id"] for e in backend.redactions(root)}
+        # not part of the records, the dropped store or the root listing
+        assert list(backend.list(root=root)) == [] and list(backend.list_dropped(root)) == []
+    finally:
+        for e in list(backend.redactions(root)) + list(backend.redactions(other)):
+            backend.delete_redaction(e["id"])
+
+
+# --- storage topology store (filecat/topology_store.py) ----------------------------------
+
+def test_storage_topology_contract(backend, backend_name):
+    import uuid
+    h = f"contract-{uuid.uuid4().hex[:8]}"
+    doc = {"host": h.upper(), "platform": "synology", "scanned_at": "2026-10-22T09:00:00Z",
+           "topology": {"nodes": [{"id": "disk:Zé1", "type": "disk", "size_bytes": 2 ** 62}]}, "structure_hash": "a"}
+    try:
+        backend.put_topology(copy.deepcopy(doc))
+        got = backend.get_topology(h)                       # keyed by the lowercased host
+        assert got == {**doc, "key": h} and backend.get_topology(h.upper()) == got
+        backend.put_topology({**doc, "structure_hash": "b"})        # replaced, not added
+        assert [d["structure_hash"] for d in backend.topologies() if d["key"] == h] == ["b"]
+        for at in ("2026-10-22T09:00:00Z", "2026-10-21T09:00:00Z"):
+            backend.add_topology_history({"host": h, "scanned_at": at, "structure_hash": at, "diff": {"added": []}})
+        backend.add_topology_history({"host": h, "scanned_at": "2026-10-21T09:00:00Z", "structure_hash": "again"})
+        rows = backend.topology_history(h)
+        assert [r["scanned_at"] for r in rows] == ["2026-10-21T09:00:00Z", "2026-10-22T09:00:00Z"]
+        assert rows[0]["structure_hash"] == "again"         # one row per (host, scanned_at)
+        assert backend.topology_history("nobody-" + h) == []
+        assert list(backend.list(root=ROOT)) == [] and list(backend.list_dropped(ROOT)) == []
+        backend.delete_topology(h)
+        backend.delete_topology(h)                          # absent: no error
+        assert backend.get_topology(h) is None and len(backend.topology_history(h)) == 2
+    finally:
+        backend.delete_topology(h)
+        for r in backend.topology_history(h):
+            backend._topology_remove("storage_topology_history", r["key"])

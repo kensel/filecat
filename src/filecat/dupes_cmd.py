@@ -29,7 +29,7 @@ from .backends import open_backend
 from .enrich import parse_path_map
 from .hashing import _sha256_full
 from .options import MiB
-from .record import join_root
+from .record import is_file_kind, join_root
 from .summary import _human_bytes
 
 ALIGN = 4096        # interior windows start on a 4 KiB boundary
@@ -76,7 +76,7 @@ def find_duplicates(docs: Iterable[dict[str, Any]], local_path: Callable[[str, s
     by_size: dict[int, list[dict[str, Any]]] = defaultdict(list)
     for d in docs:
         size = d.get("size")
-        if d.get("kind") != "dir" and isinstance(size, int) and size >= min_size:
+        if is_file_kind(d.get("kind")) and isinstance(size, int) and size >= min_size:
             by_size[size].append(d)
     todo = [d for group in by_size.values() if len(group) > 1
             and (include_backups or not all(_in_backup(x) for x in group)) for d in group]
@@ -132,6 +132,23 @@ def _cluster(size: int, group: list[dict[str, Any]], confirmed: str) -> dict[str
                               **({"backup": d["probe"]["backup_data"]} if _in_backup(d) else {})}
                              for d in group),
                             key=lambda p: (p["root"], p["rel_path"]))}
+
+
+def rollups_not_examined(backend: Any, roots: list[str] | None = None) -> dict[str, Any]:
+    """What dupes cannot look at: the rollup folders of the catalog (their files
+    are counted, not listed), {"folders", "files", "bytes", "by_tag": {tag: {...}}}."""
+    by_tag: dict[str, dict[str, int]] = {}
+    for root, rows in backend.rollup_totals().items():
+        if roots and root not in roots:
+            continue
+        for r in rows:
+            t = by_tag.setdefault(r["tag"], {"folders": 0, "files": 0, "bytes": 0})
+            t["folders"] += r["folders"]
+            t["files"] += r["total_files"]
+            t["bytes"] += r["size"]
+    return {"folders": sum(t["folders"] for t in by_tag.values()),
+            "files": sum(t["files"] for t in by_tag.values()),
+            "bytes": sum(t["bytes"] for t in by_tag.values()), "by_tag": by_tag}
 
 
 def _compare_images(exe: str, cluster: dict[str, Any], local_path: Callable[[str, str], str]) -> None:
@@ -214,6 +231,14 @@ def run(args: Any) -> int:
             for e in errors[:20]:
                 print(f"dupes: {e}", file=sys.stderr)
             sys.stdout.flush()
+        skipped = rollups_not_examined(backend, args.root)
+    if skipped["folders"]:
+        if args.json:
+            print(json.dumps({"rollups_not_examined": skipped}, ensure_ascii=False))
+        else:
+            tags = ", ".join(f"{tag} {_human_bytes(t['bytes'])}" for tag, t in sorted(skipped["by_tag"].items()))
+            print(f"dupes: not examined: {skipped['folders']} rollup folders, {_human_bytes(skipped['bytes'])} "
+                  f"in {skipped['files']} files ({tags})", file=sys.stderr)
     print(f"dupes: {total} clusters, {_human_bytes(wasted)} wasted, {bad} unreadable, "
           f"in {time.monotonic() - started:.1f}s", file=sys.stderr)
     return 0

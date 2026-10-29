@@ -11,7 +11,8 @@ summary row lists exactly the records that row counted:
              (the folder browser; dirs included)
 * kind    -- record kind
 * q       -- case-insensitive substring of rel_path
-* files_only -- what the aggregates sum: kind != "dir" and not unreadable
+* files_only -- what the aggregates sum: kind not a folder or a rollup
+                (record.NON_FILE_KINDS) and not unreadable
 * unreadable -- only the entries summary counts as unreadable
 * errors  -- only records that carry an `errors` entry (dirs included)
 
@@ -32,6 +33,7 @@ from __future__ import annotations
 from typing import Any, Callable, Iterable, Iterator
 
 from .aggregate import dir_key
+from .record import NON_FILE_KINDS
 
 FILTERS = ("root", "kind", "suffix", "mime", "dir", "parent", "q", "files_only", "unreadable", "errors")
 SORTS = ("size", "name", "rel_path", "mtime_ns", "kind", "suffix")
@@ -76,9 +78,9 @@ def matches(doc: dict[str, Any], q: Query) -> bool:
     rel = doc.get("rel_path") or ""
     if "kind" in q and doc.get("kind") != q["kind"]:
         return False
-    if q.get("files_only") and (doc.get("kind") == "dir" or is_unreadable(doc)):
+    if q.get("files_only") and (doc.get("kind") in NON_FILE_KINDS or is_unreadable(doc)):
         return False
-    if q.get("unreadable") and (doc.get("kind") == "dir" or not is_unreadable(doc)):
+    if q.get("unreadable") and (doc.get("kind") in NON_FILE_KINDS or not is_unreadable(doc)):
         return False
     if q.get("errors") and not doc.get("errors"):
         return False
@@ -91,6 +93,30 @@ def matches(doc: dict[str, Any], q: Query) -> bool:
     if "parent" in q and (not rel or parent_of(rel) != q["parent"]):
         return False
     if "q" in q and q["q"].lower() not in rel.lower():
+        return False
+    return matches_search(doc, q)
+
+
+def matches_search(doc: dict[str, Any], q: Query) -> bool:
+    """The file-name search keys (filecat.search): names, exts, min_size, max_size,
+    after, before, not_kinds and roots. A query without them matches everything here."""
+    if "names" in q:
+        from .search import name_matches
+        name = doc.get("name")
+        if not all(name_matches(name, g) for g in q["names"]):
+            return False
+    if "exts" in q and (doc.get("suffix") or "").lower() not in q["exts"]:
+        return False
+    size, mtime = doc.get("size"), doc.get("mtime_ns")
+    if ("min_size" in q and (size is None or size < q["min_size"])) or \
+            ("max_size" in q and (size is None or size > q["max_size"])):
+        return False
+    if ("after" in q and (mtime is None or mtime < q["after"])) or \
+            ("before" in q and (mtime is None or mtime >= q["before"])):
+        return False
+    if "not_kinds" in q and doc.get("kind") in q["not_kinds"]:
+        return False
+    if "roots" in q and doc.get("root") not in q["roots"]:
         return False
     return True
 
@@ -106,8 +132,8 @@ def query_documents(documents: Iterable[dict[str, Any]], q: Query) -> dict[str, 
     hits = [d for d in documents if matches(d, q)]
     hits.sort(key=lambda d: d.get("rel_path") or "")
     hits.sort(key=_sort_key(q["sort"]), reverse=q["desc"])
-    if "parent" in q:  # folders first, like a file manager
-        hits.sort(key=lambda d: d.get("kind") != "dir")
+    if "parent" in q:  # folders first, like a file manager; rollups after them
+        hits.sort(key=lambda d: {"dir": 0, "rollup": 1}.get(d.get("kind"), 2))
     page = hits[q["offset"]:q["offset"] + q["limit"]]
     return {"total": len(hits), "bytes": sum(d.get("size") or 0 for d in hits), "rows": page}
 
@@ -119,7 +145,7 @@ def subtree_documents(documents: Iterable[dict[str, Any]], parent: str) -> list[
     counts: dict[str, list[int]] = {}
     for doc in documents:
         rel = doc.get("rel_path") or ""
-        if doc.get("kind") == "dir" or is_unreadable(doc) or not rel.startswith(prefix):
+        if doc.get("kind") in NON_FILE_KINDS or is_unreadable(doc) or not rel.startswith(prefix):
             continue
         rest = rel[len(prefix):]
         if "/" not in rest:
@@ -131,6 +157,25 @@ def subtree_documents(documents: Iterable[dict[str, Any]], parent: str) -> list[
                   key=lambda r: (-r["bytes"], r["name"]))
 
 
+def with_rollups(folders: list[dict[str, Any]], rollups: Iterable[dict[str, Any]],
+                 parent: str) -> list[dict[str, Any]]:
+    """`subtree` rows with what the rollups beneath `parent` add: each folder
+    gains `rollup_bytes` / `rollup_files` (a folder's total is bytes +
+    rollup_bytes), and a folder that holds nothing but rollups appears too."""
+    prefix = parent + "/" if parent else ""
+    by_name = {f["name"]: dict(f) for f in folders}
+    for doc in rollups:
+        rel = doc.get("rel_path") or ""
+        if not rel.startswith(prefix) or "/" not in rel[len(prefix):]:
+            continue        # directly in `parent`: listed beside the folders, not in one
+        row = by_name.setdefault(rel[len(prefix):].split("/", 1)[0], {"name": rel[len(prefix):].split("/", 1)[0],
+                                                                    "files": 0, "bytes": 0})
+        row["rollup_bytes"] = row.get("rollup_bytes", 0) + (doc.get("size") or 0)
+        row["rollup_files"] = row.get("rollup_files", 0) + (((doc.get("probe") or {}).get("rollup") or {})
+                                                            .get("total_files", 0))
+    return sorted(by_name.values(), key=lambda r: (-(r["bytes"] + r.get("rollup_bytes", 0)), r["name"]))
+
+
 def size_rows(documents: Iterable[dict[str, Any]], prefix: str) -> Iterator[tuple[str, int, str, str]]:
     """(rel_path, size, suffix, mime key) of each readable file beneath
     `prefix` ("" = the whole root): what Backend.sizes() returns. The mime
@@ -138,7 +183,7 @@ def size_rows(documents: Iterable[dict[str, Any]], prefix: str) -> Iterator[tupl
     start = prefix + "/" if prefix else ""
     for doc in documents:
         rel = doc.get("rel_path") or ""
-        if not rel or doc.get("kind") == "dir" or is_unreadable(doc) or not rel.startswith(start):
+        if not rel or doc.get("kind") in NON_FILE_KINDS or is_unreadable(doc) or not rel.startswith(start):
             continue
         yield (rel, doc.get("size") or 0, doc.get("suffix") or "",
                doc.get("mime") or doc.get("kind") or "unknown")
@@ -165,24 +210,36 @@ class Dialect:
 
     def __init__(self, ph: str, substr: Callable[[str, str], str], left: Callable[[str, str], str],
                  instr: Callable[[str, str], str], lower: str, has_errors: str,
-                 byte_ranges: bool = False, collate: str = "", nulls_high: bool = False) -> None:
+                 byte_ranges: bool = False, collate: str = "", nulls_high: bool = False,
+                 ilike: str | None = None, brackets: bool = False) -> None:
         self.ph, self.substr, self.left, self.instr = ph, substr, left, instr
         self.lower, self.has_errors, self.byte_ranges = lower, has_errors, byte_ranges
         self.collate, self.nulls_high = collate, nulls_high
+        # name search: the case-insensitive LIKE operator, when the server has a better one than
+        # LOWER(col) LIKE LOWER(?); brackets: `[` is a LIKE wildcard there and gets escaped
+        self.ilike, self.brackets = ilike, brackets
+
+    def name_like(self, column: str) -> str:
+        """SQL for `column` matching a LIKE pattern parameter, case-insensitively, escape `!`."""
+        if self.ilike:
+            return f"{column} {self.ilike} {self.ph} ESCAPE '!'"
+        return f"{self.lower}({column}) LIKE {self.lower}({self.ph}) ESCAPE '!'"
 
 
 SQLITE = Dialect("?", lambda e, p: f"substr({e}, {p})", lambda e, n: f"substr({e}, 1, {n})",
                  lambda e, n: f"instr({e}, {n})",
-                 "lower", "json_extract(document, '$.errors') IS NOT NULL", byte_ranges=True)
+                 "lower", "json_extract(document, '$.errors') IS NOT NULL", byte_ranges=True,
+                 ilike="LIKE")       # ASCII-insensitive already, and the one LIKE sqlite may optimise
 POSTGRES = Dialect("%s", lambda e, p: f"substr({e}, {p})", lambda e, n: f"substr({e}, 1, {n})",
                    lambda e, n: f"strpos({e}, {n})", "lower", "document ? 'errors'",
-                   collate=' COLLATE "C"', nulls_high=True)
+                   collate=' COLLATE "C"', nulls_high=True, ilike="ILIKE")
 MYSQL = Dialect("%s", lambda e, p: f"SUBSTRING({e}, {p})", lambda e, n: f"SUBSTRING({e}, 1, {n})",
                 lambda e, n: f"LOCATE({n}, {e})",
                 "LOWER", "JSON_CONTAINS_PATH(document, 'one', '$.errors')", collate=" COLLATE utf8mb4_bin")
 MSSQL = Dialect("?", lambda e, p: f"SUBSTRING({e}, {p}, 4000)", lambda e, n: f"SUBSTRING({e}, 1, {n})",
                 lambda e, n: f"CHARINDEX({n}, {e})",
-                "LOWER", "JSON_QUERY(document, '$.errors') IS NOT NULL", collate=" COLLATE Latin1_General_BIN2")
+                "LOWER", "JSON_QUERY(document, '$.errors') IS NOT NULL", collate=" COLLATE Latin1_General_BIN2",
+                brackets=True)
 
 
 def sql_where(q: Query, d: Dialect, root_id_value: str | None) -> tuple[str, list[Any]]:
@@ -216,9 +273,9 @@ def sql_where(q: Query, d: Dialect, root_id_value: str | None) -> tuple[str, lis
     if "kind" in q:
         add(f"kind = {ph}", q["kind"])
     if q.get("files_only"):
-        add(f"kind <> 'dir' AND NOT {unreadable}")
+        add(f"kind NOT IN ('dir', 'rollup') AND NOT {unreadable}")
     if q.get("unreadable"):
-        add(f"kind <> 'dir' AND {unreadable}")
+        add(f"kind NOT IN ('dir', 'rollup') AND {unreadable}")
     if q.get("errors"):
         add(d.has_errors)
     if "suffix" in q:
@@ -246,7 +303,28 @@ def sql_where(q: Query, d: Dialect, root_id_value: str | None) -> tuple[str, lis
             no_slash_after(len(q["parent"]) + 2)
     if "q" in q:
         add(f"{d.instr(d.lower + '(rel_path)', d.lower + '(' + ph + ')')} > 0", q["q"])
+    _search_where(q, d, add)
     return (" WHERE " + " AND ".join(clauses)) if clauses else "", params
+
+
+def _search_where(q: Query, d: Dialect, add: Callable[..., None]) -> None:
+    """The file-name search keys of matches_search(), as SQL over the files columns."""
+    from .search import like_of
+    ph = d.ph
+    for glob in q.get("names", ()):
+        add(d.name_like("name"), like_of(glob, d.brackets))
+    if "exts" in q:
+        add(f"suffix IN ({', '.join([ph] * len(q['exts']))})", *q["exts"])
+    for key, sql in (("min_size", "size >= "), ("max_size", "size <= "),
+                     ("after", "mtime_ns >= "), ("before", "mtime_ns < ")):
+        if key in q:
+            add(f"{sql}{ph}", q[key])
+    if "not_kinds" in q:
+        add(f"(kind IS NULL OR kind NOT IN ({', '.join([ph] * len(q['not_kinds']))}))", *q["not_kinds"])
+    if "roots" in q:
+        from .record import root_id
+        ids = [root_id(r) for r in q["roots"]]
+        add(f"root_id IN ({', '.join([ph] * len(ids))})" if ids else "1 = 0", *ids)
 
 
 def sql_subtree(parent: str, d: Dialect, root_id_value: str) -> tuple[str, list[Any]]:
@@ -292,5 +370,5 @@ def sql_order(q: Query, d: Dialect = SQLITE) -> str:
     if col != "rel_path":  # SQL Server rejects a column listed twice
         parts.append(f"rel_path{d.collate} ASC")
     if "parent" in q:
-        parts.insert(0, "CASE WHEN kind = 'dir' THEN 0 ELSE 1 END")
+        parts.insert(0, "CASE WHEN kind = 'dir' THEN 0 WHEN kind = 'rollup' THEN 1 ELSE 2 END")
     return ", ".join(parts)
