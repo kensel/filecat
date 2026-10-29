@@ -322,6 +322,16 @@ class SqliteBackend(Backend):
             [*params, q["limit"], q["offset"]]).fetchall()
         return {"total": total, "bytes": nbytes, "rows": [json.loads(r[0]) for r in rows]}
 
+    def search_names(self, q: dict[str, Any]) -> dict[str, Any]:
+        from ..browse import SQLITE, sql_order, sql_where
+        self._flush_buffer()
+        rid = root_id(q["root"]) if q.get("root") is not None else None
+        where, params = sql_where(q, SQLITE, rid)
+        rows = self.conn.execute(
+            f"SELECT document FROM files{where} ORDER BY {sql_order(q)} LIMIT ? OFFSET ?",
+            [*params, q["limit"] + 1, q["offset"]]).fetchall()
+        return {"rows": [json.loads(r[0]) for r in rows[:q["limit"]]], "more": len(rows) > q["limit"]}
+
     def subtree(self, root: str, parent: str) -> list[dict[str, Any]]:
         from ..browse import SQLITE, sql_subtree
         self._flush_buffer()

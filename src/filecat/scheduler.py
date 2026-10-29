@@ -7,6 +7,7 @@ anchor (a missed slot runs once, late).
 """
 from __future__ import annotations
 
+import threading
 from dataclasses import dataclass, field
 from datetime import datetime, time, timedelta
 from typing import Iterable
@@ -76,6 +77,19 @@ class Scheduler:
                 anchor = (first_seen or {}).get(j.name)
             self.anchors[j.name] = anchor
         self.running: dict[str, str] = {}       # job name -> agent name
+        self._edit = threading.Lock()
+
+    def add(self, job: JobSpec) -> None:
+        """An ad-hoc job (the viewer's "scan this root"): it has no schedule, so it only ever starts
+        when forced, and is dropped when it has finished."""
+        with self._edit:
+            self.anchors[job.name] = None
+            self.jobs = [*self.jobs, job]
+
+    def drop(self, name: str) -> None:
+        with self._edit:
+            self.jobs = [j for j in self.jobs if j.name != name]
+            self.anchors.pop(name, None)
 
     def busy_agents(self) -> set[str]:
         return set(self.running.values())

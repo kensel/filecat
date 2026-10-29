@@ -275,6 +275,8 @@ def test_login_required_for_view_locks_the_apis_until_login(fixture_dir):
         assert r.request("GET", "/api/info")[0] == 401
         cookie = r.cookie()
         assert r.request("GET", "/api/info", cookie=cookie)[0] == 200
+        assert r.request("GET", "/api/search?q=x")[0] == 401          # the file-name search is behind it too
+        assert r.request("GET", "/api/search?q=x", cookie=cookie)[0] == 200
         assert r.request("GET", "/")[0] in (200, 500)       # the page itself (a login form) is served
     finally:
         r.close()

@@ -450,6 +450,11 @@ and samples of redacted files, the root index (`last_error`, `newest_file`,
 progress lines, preflight output, exceptions and tracebacks, checkpoint
 files, the agent's wire messages (agent scans), and the agent's own log.
 
+The viewer's file-name search (`/api/search`, docs/roadmap.md v0.2.5) matches the `name` of the
+stored records and nothing else, so it can show only what the catalog holds: a rollup is found by
+its own name (`[REDACTED]`, `[CACHE]`), and nothing of what it folds in exists to be found.
+`tests/test_rollup_privacy.py` runs it over a catalog with redacted subtrees.
+
 ### 3.2 SMB and local scans
 
 Python computes the rollup itself, and names exist only transiently in memory:
