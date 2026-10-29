@@ -271,7 +271,32 @@ class MongoBackend(Backend):
             and_.append(rel(r"^[^/]+$" if p == "" else "^" + re.escape(p) + "/[^/]+$"))
         if "q" in q:
             and_.append({"rel_path": {"$regex": re.escape(q["q"]), "$options": "i"}})
+        # file-name search (filecat.search): the regex is anchored at the ends the pattern is,
+        # so `eve*.exe` is ^eve.*\.exe$ and plain text is an unanchored literal
+        from ..search import regex_of
+        for glob in q.get("names", ()):
+            and_.append({"name": {"$regex": regex_of(glob), "$options": "is"}})
+        if "exts" in q:
+            and_.append({"suffix": {"$in": list(q["exts"])}})
+        for key, op, field in (("min_size", "$gte", "size"), ("max_size", "$lte", "size"),
+                               ("after", "$gte", "mtime_ns"), ("before", "$lt", "mtime_ns")):
+            if key in q:
+                and_.append({field: {op: q[key]}})
+        if "not_kinds" in q:
+            and_.append({"kind": {"$nin": list(q["not_kinds"])}})
+        if "roots" in q:
+            and_.append({"root_id": {"$in": [root_id(r) for r in q["roots"]]}})
         return {"$and": and_} if and_ else {}
+
+    def search_names(self, q: dict[str, Any]) -> dict[str, Any]:
+        """Backend.search_names in Mongo: no count, one page plus a look-ahead row."""
+        self.flush()
+        sort = {q["sort"]: -1 if q["desc"] else 1}
+        if q["sort"] != "rel_path":
+            sort["rel_path"] = 1
+        rows = list(self.files.find(self._browse_filter(q), {"_id": 0}).sort(list(sort.items()))
+                    .skip(q["offset"]).limit(q["limit"] + 1))
+        return {"rows": rows[:q["limit"]], "more": len(rows) > q["limit"]}
 
     def subtree(self, root: str, parent: str) -> list[dict[str, Any]]:
         """Child folders of `parent` with their readable files and bytes, grouped

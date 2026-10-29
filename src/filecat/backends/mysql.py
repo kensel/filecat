@@ -388,6 +388,17 @@ class MysqlBackend(Backend):
             rows = [json.loads(r[0]) for r in cur.fetchall()]
         return {"total": int(total), "bytes": int(nbytes), "rows": rows}
 
+    def search_names(self, q: dict[str, Any]) -> dict[str, Any]:
+        from ..browse import MYSQL, sql_order, sql_where
+        self.flush()
+        rid = root_id(q["root"]) if q.get("root") is not None else None
+        where, params = sql_where(q, MYSQL, rid)
+        with self.conn.cursor() as cur:
+            cur.execute(f"SELECT document FROM files{where} ORDER BY {sql_order(q, MYSQL)} "
+                        "LIMIT %s OFFSET %s", [*params, q["limit"] + 1, q["offset"]])
+            rows = [json.loads(r[0]) for r in cur.fetchall()]
+        return {"rows": rows[:q["limit"]], "more": len(rows) > q["limit"]}
+
     def subtree(self, root: str, parent: str) -> list[dict[str, Any]]:
         from ..browse import MYSQL, sql_subtree
         self.flush()

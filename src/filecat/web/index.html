@@ -109,6 +109,16 @@ td.wide { min-width: 220px; }
 .tm .tip b { font-variant-numeric: tabular-nums; }
 .tm .tip .mono { overflow-wrap: anywhere; display: block; }
 .status { min-height: 20px; }
+td.actions { white-space: nowrap; }
+td.actions button + button { margin-left: 6px; }
+button.danger { color: var(--warn); }
+.search-form { display: flex; flex-direction: column; gap: 8px; }
+.search-form .q { display: flex; gap: 8px; }
+.search-form .q input { flex: 1; min-width: 0; font-size: 15px; padding: 7px 10px; }
+.search-form .adv { display: flex; flex-wrap: wrap; gap: 8px 14px; align-items: center; }
+.search-form .adv label { display: inline-flex; gap: 5px; align-items: center; color: var(--muted); font-size: 12.5px; }
+.search-help code { background: var(--hover); border-radius: 4px; padding: 1px 5px; cursor: pointer; }
+.search-help ul { margin: 6px 0 0; padding-left: 18px; line-height: 1.8; }
 .swatch { display: inline-block; width: 12px; height: 12px; border-radius: 3px; vertical-align: -1px; margin-right: 6px; }
 tr.hl td { background: var(--hover); }
 @media (max-width: 640px) {
@@ -128,6 +138,7 @@ tr.hl td { background: var(--hover); }
     <a data-view="graph" href="#graph">Graph</a>
     <a data-view="browse" href="#browse">Browse</a>
     <a data-view="records" href="#records">Records</a>
+    <a data-view="search" href="#search">Search</a>
   </nav>
   <label>Root <select id="root"></select></label>
   <span class="spacer"></span>
@@ -259,6 +270,25 @@ function duration(sec) {
   return h ? `${h}h ${m}m` : m ? `${m}m ${s}s` : `${s}s`;
 }
 let rootsTimer = null;
+let rootsNote = "";         // the answer to the last Scan / Remove, kept across the page's refreshes
+// Scan now / Remove: the same login as "Run now". No session: the password form opens in the note, then
+// the action is repeated; the session is an HttpOnly cookie, nothing is kept in the page.
+async function rootAction(kind, root, confirmed) {
+  const msg = document.getElementById("roots-msg");
+  if (kind === "remove" && !confirmed && !confirm(`Remove the root ${root} from the catalog?\n\n`
+      + "It has no records. Its scan history, summary and treemap snapshots are forgotten."
+      + " Scanning it again brings it back.")) return;
+  try {
+    const res = await post("/api/roots/" + kind, kind === "remove" ? {root, confirm: root} : {root});
+    rootsNote = kind === "scan" ? (res.message || `scan of ${root} queued`) : `${root} was removed.`;
+    viewRoots();
+  } catch (e) {
+    if (e.status === 401 && e.login) {
+      msg.replaceChildren(loginForm(() => rootAction(kind, root, true)));
+      msg.querySelector("input").focus();
+    } else { rootsNote = e.message; msg.textContent = e.message; }
+  }
+}
 async function viewRoots() {
   clearTimeout(rootsTimer);
   const card = h("section", {class: "card"});
@@ -267,19 +297,22 @@ async function viewRoots() {
   try { data = await api("/api/roots"); } catch (e) { return show(failed(e)); }
   if (parseHash().view !== "roots") return;
   const now = data.now;
-  const live = data.roots.some(r => r.state === "in_progress");
+  const live = data.roots.some(r => r.state === "in_progress" || r.busy);
+  const control = data.control || {available: false, reason: ""};
   fill(card, h("h2", {}, "Roots", h("small", {}, `${num(data.roots.length)} in this catalog` + (live ? " · refreshing every 30s while a scan runs" : ""))),
     h("div", {class: "scroll"}, h("table", {},
       h("thead", {}, h("tr", {}, h("th", {}, "root"), h("th", {}, "scan"), h("th", {class: "num"}, "files"),
-        h("th", {class: "num"}, "size"), h("th", {}, "newest file"), h("th", {}, "last error"))),
-      h("tbody", {}, data.roots.map(r => rootRow(r, now))))));
+        h("th", {class: "num"}, "size"), h("th", {}, "newest file"), h("th", {}, "last error"), h("th", {}, ""))),
+      h("tbody", {}, data.roots.map(r => rootRow(r, now, control))))),
+    h("div", {id: "roots-msg", class: "muted"}, rootsNote || (control.available ? "" : control.reason)));
   card.id = "roots-card";
   const y = window.scrollY;
   fill($main, card);
   window.scrollTo(0, y);
-  if (live) rootsTimer = setTimeout(() => { if (parseHash().view === "roots") viewRoots(); }, 30000);
+  // not while the login form is open: a refresh would wipe what is being typed
+  if (live) rootsTimer = setTimeout(() => { if (parseHash().view === "roots" && !document.querySelector("#roots-msg input")) viewRoots(); }, 30000);
 }
-function rootRow(r, now) {
+function rootRow(r, now, control) {
   const root = r.root, info = r.info || {}, a = info.last_attempt || {}, last = info.last_scan;
   const [label, cls] = STATES[r.state] || [r.state, ""];
   const scan = [];
@@ -321,7 +354,17 @@ function rootRow(r, now) {
     h("td", {class: "wide"}, scan),
     h("td", {class: "num"}, s ? num(s.total_files) : ""),
     h("td", {class: "num", title: s ? num(s.total_bytes) + " bytes" : ""}, s ? bytes(s.total_bytes) : ""),
-    newest, errCell);
+    newest, errCell, rootButtons(r, control));
+}
+function rootButtons(r, control) {
+  const ok = control && control.available;
+  const scanning = r.state === "in_progress" || !!r.busy;
+  return h("td", {class: "actions"},
+    h("button", {disabled: !ok || scanning,
+      title: !ok ? (control && control.reason) : r.busy ? r.busy : scanning ? "a scan is running" : "scan exactly this root now",
+      onclick: () => rootAction("scan", r.root)}, r.busy && r.busy.includes("queued") ? "Queued" : "Scan"),
+    r.removable ? h("button", {class: "danger", disabled: !ok, title: ok ? "forget this root: it has no records" : control && control.reason,
+      onclick: () => rootAction("remove", r.root)}, "Remove") : null);
 }
 
 // --- server (agents and job history; filecat server) ----------------------
@@ -375,7 +418,7 @@ async function viewServer() {
         h("td", {}, j.name), h("td", {}, j.kind), h("td", {}, j.agent), h("td", {}, j.schedule),
         h("td", {}, j.running ? "running" : j.queued ? "queued" : stamp(j.next_due)),
         h("td", {}, j.last_outcome ? h("span", {class: "badge " + (OUTCOMES[j.last_outcome] || "")}, j.last_outcome) : ""),
-        h("td", {}, h("button", {disabled: !jobs.control.available || j.running || j.queued,
+        h("td", {}, j.adhoc ? h("span", {class: "muted"}, "from Roots") : h("button", {disabled: !jobs.control.available || j.running || j.queued,
           title: jobs.control.available ? "start this job now" : jobs.control.reason,
           onclick: () => runNow(j.name)}, "Run now"))))))),
     h("div", {id: "run-msg", class: "muted"}, jobs.control.available ? "" : jobs.control.reason)) : null;
@@ -1354,17 +1397,91 @@ async function loadMembers(card, root, rel, offset, tbody) {
     h("button", {onclick: () => loadMembers(card, root, rel, offset + m.limit, tbody)}, "Load more members")));
 }
 
+// --- search (file names across every root; /api/search) --------------------------
+const SEARCH_EXAMPLES = [
+  ["eve*.exe", "wildcards: * any run, ? one character; the whole name must match"],
+  ["setup", "plain text: the name contains it (the same as *setup*)"],
+  ["ext:iso size:>1gb", "extension and size (>, >=, <, <=, =, or 1mb..1gb; kb mb gb tb)"],
+  ["\"annual report\" ext:docx;xlsx after:2024-01-01", "quotes keep a space in one term; dates are UTC"],
+  ["backup*.zip host:nas-main", "only the roots on that host (wildcards allowed; host:- is the local disk)"],
+  ["kind:dir cache root:homes", "folders only (kind:file, kind:rollup, or a type like image); roots whose path contains the text"],
+];
+const SEARCH_FIELDS = ["q", "root", "host", "ext", "min_size", "max_size", "after", "before", "kind"];
+async function viewSearch(params) {
+  const p = {...params};
+  const input = (name, attrs) => h("input", {name, value: p[name] || "", ...attrs});
+  const q = h("input", {type: "search", name: "q", value: p.q || "", autofocus: true, size: 40,
+    placeholder: "name pattern and filters, e.g.  eve*.exe  ext:exe  size:>10mb  host:nas-main", "aria-label": "search"});
+  const roots = h("select", {name: "root"}, h("option", {value: ""}, "any root"),
+    INFO.roots.map(r => h("option", {value: r, selected: p.root === r}, r)));
+  if (p.root && !INFO.roots.includes(p.root)) roots.append(h("option", {value: p.root, selected: true}, p.root));
+  const kind = h("select", {name: "kind"}, [["", "files and folders"], ["file", "files only"], ["dir", "folders only"], ["rollup", "rollups only"]]
+    .map(([v, t]) => h("option", {value: v, selected: (p.kind || "") === v}, t)));
+  const form = h("form", {class: "search-form", onsubmit: e => {
+      e.preventDefault();
+      const next = {};
+      for (const f of SEARCH_FIELDS) { const v = (form.elements[f] || {}).value; if (v && v.trim()) next[f] = v.trim(); }
+      if (p.sort) { next.sort = p.sort; if (p.desc) next.desc = p.desc; }
+      go("search", next);
+    }},
+    h("div", {class: "q"}, q, h("button", {type: "submit"}, "Search")),
+    h("div", {class: "adv"},
+      h("label", {}, "root ", roots), h("label", {}, "host ", input("host", {size: 12, placeholder: "nas-main"})),
+      h("label", {}, "extension ", input("ext", {size: 10, placeholder: "exe;dll"})),
+      h("label", {}, "size ", input("min_size", {size: 7, placeholder: "min 1mb"}), " – ", input("max_size", {size: 7, placeholder: "max 1gb"})),
+      h("label", {}, "modified ", input("after", {type: "date"}), " – ", input("before", {type: "date"})),
+      h("label", {}, "show ", kind)));
+  const holder = h("section", {class: "card"});
+  const help = h("section", {class: "card search-help"}, h("h2", {}, "Search the names of every root"),
+    h("div", {class: "note"}, "Case-insensitive, against the file or folder name only. All terms must match. "
+      + "A folder that was rolled up ([CACHE], [BACKUP], [REDACTED]) is found by its own name; what is inside it is not listed anywhere."),
+    h("ul", {}, SEARCH_EXAMPLES.map(([ex, why]) => h("li", {}, h("code", {title: "use this", onclick: () => { q.value = ex; q.focus(); }}, ex), " ", h("span", {class: "muted"}, why)))));
+  show(h("div", {class: "stack"}, form, holder));
+  if (!SEARCH_FIELDS.some(f => p[f])) return fill(holder, help);
+  fill(holder, h("div", {class: "loading"}, "Searching…"));
+  let r;
+  try { r = await api("/api/search", p); } catch (e) { return fill(holder, e.login ? failed(e) : h("div", {class: "error"}, e.message)); }
+  if (parseHash().view !== "search") return;
+  const sortTh = (key, label, isNum) => {
+    const on = r.sort === key;
+    return h("th", {class: (isNum ? "num " : "") + "sort", onclick: () => go("search", {...p, sort: key, offset: "",
+      desc: on ? (r.desc ? "0" : "1") : (isNum ? "1" : "0")})}, label, on ? (r.desc ? " ▼" : " ▲") : "");
+  };
+  const rows = r.rows.map(d => h("tr", {class: "click", onclick: () => go("record", {root: d.root, rel_path: d.rel_path})},
+    h("td", {class: "path"}, d.name || d.rel_path || "(root)",
+      d.unreadable ? h("span", {class: "badge warn"}, "unreadable") : d.errors ? h("span", {class: "badge warn"}, `${d.errors} error${d.errors > 1 ? "s" : ""}`) : null),
+    h("td", {class: "path muted"}, h("a", {href: route("browse", {root: d.root, parent: d.folder}), title: "open this folder in Browse",
+      onclick: ev => ev.stopPropagation()}, d.folder || "(top of root)")),
+    h("td", {class: "muted hide-sm"}, d.root),
+    h("td", {class: "num", title: d.size == null ? "" : num(d.size) + " bytes"}, d.kind === "dir" ? "" : bytes(d.size)),
+    h("td", {class: "num muted"}, when(d.mtime_ns)),
+    h("td", {}, d.kind || "", d.rollup && d.rollup.total_files != null ? h("span", {class: "sub"}, `${num(d.rollup.total_files)} files folded in`) : null)));
+  const end = r.offset + r.rows.length;
+  const shown = r.rows.length ? `${num(r.offset + 1)}–${num(end)}` : "0";
+  const status = h("span", {class: "muted"}, r.rows.length || r.offset
+    ? `${shown}${r.more ? " (more results follow)" : ""} · ${r.elapsed_ms < 1000 ? Math.round(r.elapsed_ms) + " ms" : (r.elapsed_ms / 1000).toFixed(1) + " s"}`
+    : `No matching names · ${Math.round(r.elapsed_ms)} ms`);
+  const pager = h("div", {class: "pager"},
+    h("button", {disabled: r.offset <= 0, onclick: () => go("search", {...p, offset: Math.max(0, r.offset - r.limit)})}, "‹ Prev"),
+    h("button", {disabled: !r.more, onclick: () => go("search", {...p, offset: r.offset + r.limit})}, "Next ›"), status);
+  fill(holder, r.rows.length ? h("div", {class: "scroll"}, h("table", {},
+    h("thead", {}, h("tr", {}, sortTh("name", "name"), sortTh("rel_path", "folder"), h("th", {class: "hide-sm"}, "root"),
+      sortTh("size", "size", true), sortTh("mtime_ns", "modified", true), sortTh("kind", "kind"))),
+    h("tbody", {}, rows))) : null, pager);
+}
+
 // --- shell -----------------------------------------------------------
 const VIEWS = {roots: viewRoots, server: viewServer, summary: viewSummary, graph: viewGraph, records: viewRecords, browse: viewBrowse,
                record: viewRecord};
+VIEWS.search = viewSearch;
 async function render() {
   const {view, params} = parseHash();
   if (params.root && params.root !== $root.value && INFO.roots.includes(params.root)) $root.value = params.root;
   for (const a of document.querySelectorAll("#nav a")) {
     a.classList.toggle("on", a.dataset.view === (view === "record" ? "browse" : view));
-    a.href = route(a.dataset.view, a.dataset.view === "graph" ? {} : {root: $root.value});  // Graph opens on every root
+    a.href = route(a.dataset.view, ["graph", "search"].includes(a.dataset.view) ? {} : {root: $root.value});  // Graph opens on every root
   }
-  if (!INFO.roots.length && view !== "server") return show(h("div", {class: "empty"}, "This catalog has no records yet."));
+  if (!INFO.roots.length && view !== "server" && view !== "roots") return show(h("div", {class: "empty"}, "This catalog has no records yet."));
   (VIEWS[view] || viewRoots)(params);
 }
 $root.addEventListener("change", () => {

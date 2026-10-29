@@ -302,7 +302,25 @@ Everything does for one PC (e.g. `eve*.exe` on all NAS shares at once).
 - Substring: a trigram index where the backend has one (PostgreSQL
   `pg_trgm`), or an in-memory name table in `filecat server`, built from the
   catalog and kept current from scan deltas (a few GB for ~22M names).
-- A search page on `filecat server --serve`, behind its login.
+- [x] A search page, initial version (`GET /api/search`, the viewer's Search
+  view; `Backend.search_names`). Everything-style query: `eve*.exe`, plain
+  substring, `ext:`, `size:`, `after:`/`before:`, `kind:`, `root:`, `host:`.
+  Name matching only (`LIKE`/`ILIKE` on the `name` column, escaped; a
+  case-insensitive anchored or unanchored regex in MongoDB; a scan in memory and
+  JSONL), a page plus a "more" flag instead of a total, the elapsed time shown,
+  behind the login when `login_required_for_view` is set. Tests run on memory,
+  SQLite and both JSONL backends, and on the server backends when their DSNs are
+  set. Not done yet:
+  - the `name_lc` column and index (and its migration) and the trigram index, so
+    that `eve*` and `*setup*` stop being a scan of every record: today a search
+    reads the whole catalog unless another filter narrows it;
+  - the in-memory name table of `filecat server` kept current from scan deltas;
+  - searching archive members, and ranking (results are
+    sorted by name, size, date, kind or path);
+  - regular expressions, `dm:`-style relative dates and `content:`;
+  - case folding beyond ASCII on SQLite (`LIKE`), and a test run of the SQL
+    Server, MySQL, PostgreSQL and MongoDB paths in CI (they are only exercised
+    with `FILECAT_TEST_*` DSNs).
 - `[REDACTED]` and rollup members never appear in results; a rolled-up folder
   is found by its own name only.
 - Permissions: one password sees every host's names. Per-user filtering waits

@@ -10,6 +10,9 @@ Read-only. Serves one page (filecat/web/index.html) and a JSON API:
     GET /api/treemap?root=&prefix=&depth=&refresh=   folders beneath prefix split by extension/type
     GET /api/treemap?id=               one stored snapshot (a pinned one, say)
     GET /api/pins?root=&prefix=&depth= the pinned snapshots of that view, grouped by pin
+    GET /api/search?q=&root=&host=&ext=&min_size=&max_size=&after=&before=&kind=&sort=&limit=&offset=
+                                       file-name search, Everything-style (filecat/search.py); a page of
+                                       rows and `more`, never anything inside a rollup
     GET /api/record?root=&rel_path=    the full stored document
     GET /api/members?root=&rel_path=&offset=&limit=   archive members
     GET /api/backends                  the backends in filecat.toml (plus the one served), which is active
@@ -22,6 +25,9 @@ Read-only. Serves one page (filecat/web/index.html) and a JSON API:
     POST /api/login {"password": ...}  filecat server --serve only: a session cookie (docs/agent-server.md)
     POST /api/logout                   end the session
     POST /api/jobs/<name>/run          start a job now (needs the session, custom header, same origin)
+    POST /api/roots/scan {"root": ...} queue an ad-hoc scan of exactly that root (same guards as run now)
+    POST /api/roots/remove {"root": ..., "confirm": <root>}
+                                       remove a root that has no records (same guards; 409 otherwise)
 
 The HTTP side is threaded, but every backend call runs on one worker
 thread that owns the connection: sqlite3 connections (and some drivers)
@@ -279,8 +285,67 @@ class Catalog:
         return {"available": True, "reason": None}
 
     def roots(self, p: dict[str, str]) -> dict[str, Any]:
+        """The root index. Each row also says whether the viewer may remove it (`removable`: no
+        records at all and no scan running) and, with a coordinator, why a scan of it is already
+        running or queued here (`busy`); `control` is what jobs() reports."""
+        from . import rootinfo, root_remove
+
+        def build(b: Any) -> list[dict[str, Any]]:
+            rows = rootinfo.index(b)
+            for r in rows:
+                r["removable"] = self._removable(b, r, root_remove)
+            return rows
+        rows = self.call(build)
+        for r in rows:
+            r["busy"] = self.coordinator.scanning(r["root"]) if self.coordinator is not None else None
+            r["removable"] = r["removable"] and not r["busy"]
+        return {"now": rootinfo.now(), "roots": rows, "control": self.control()}
+
+    @staticmethod
+    def _removable(b: Any, row: dict[str, Any], root_remove: Any) -> bool:
+        """A cheap look at the row's totals first, then one record lookup: the Remove button is
+        offered for a root with nothing in it (the server checks again when it is asked)."""
+        if row["state"] == "in_progress":
+            return False
+        if (row["summary"] or {}).get("total_files"):
+            return False
+        last = (row["info"] or {}).get("last_scan") or {}
+        if any(last.get(k) for k in ("files", "dirs", "rollups")):
+            return False
+        return not root_remove.has_records(b, row["root"])
+
+    # --- the Roots page actions (docs/agent-server.md section 7): behind the same guards as run now ---
+    def _root_row(self, root: Any) -> dict[str, Any] | None:
         from . import rootinfo
-        return {"now": rootinfo.now(), "roots": self.call(rootinfo.index)}
+        if not isinstance(root, str) or not root:
+            raise ValueError("root must be a root path")
+        return next((r for r in self.call(rootinfo.index) if r["root"] == root), None)
+
+    def scan_root(self, root: Any, remote: str) -> tuple[int, dict[str, Any]]:
+        """POST /api/roots/scan: queue an ad-hoc scan of exactly this root (Coordinator.request_scan)."""
+        if self._root_row(root) is None:
+            return 404, {"error": f"no such root {root!r}"}
+        return self.coordinator.request_scan(root, remote)
+
+    def remove_root(self, root: Any, confirm: Any, remote: str) -> tuple[int, dict[str, Any]]:
+        """POST /api/roots/remove: remove a root that has no records (root_remove.remove_root);
+        `confirm` must repeat the root string."""
+        from . import root_remove
+        if self._root_row(root) is None:
+            return 404, {"error": f"no such root {root!r}"}
+        if confirm != root:
+            return 400, {"error": "confirm must repeat the root exactly"}
+        busy = self.coordinator.scanning(root)
+        if busy:
+            return 409, {"error": f"{root} is being scanned here: {busy}"}
+        try:
+            removed = self.call(lambda b: root_remove.remove_root(b, root))
+        except root_remove.RootError as exc:
+            return exc.status, {"error": str(exc)}
+        self._summaries = {k: v for k, v in self._summaries.items() if k[0] != root}
+        self._treemaps = {k: v for k, v in self._treemaps.items() if k[0] != root}
+        self.coordinator.log(f"root {root} removed from the catalog (requested from {remote})")
+        return 200, {"removed": removed}
 
     def summary(self, p: dict[str, str]) -> dict[str, Any]:
         """The stored aggregates for (root, depth) when there are some.
@@ -466,11 +531,42 @@ class Catalog:
             return {"supported": True, "rows": rows[:limit], "more": len(rows) > limit}
         return {"offset": offset, "limit": limit, **self.call(page)}
 
+    # --- search (filecat/search.py) ------------------------------------------
+    def search(self, p: dict[str, str]) -> dict[str, Any]:
+        """GET /api/search?q=&root=&host=&ext=&min_size=&max_size=&after=&before=&kind=&sort=&desc=&limit=&offset=
+
+        File-name search (Everything-style, see filecat.search): `q` holds name patterns and
+        `key:value` filters, the other parameters add to them. Returns one page of
+        {name, folder, root, host, size, mtime_ns, kind, rel_path, ...} rows, `more` when another
+        page follows (no total: see Backend.search_names), the parsed criteria and the time taken.
+        Rows are the stored records matched by their own name; nothing inside a rollup exists to
+        match, so a [REDACTED] or [CACHE] folder is found as itself."""
+        from . import search as srch
+        started = time.perf_counter()
+        spec = srch.with_params(srch.parse_query(p.get("q")), p)
+        if not srch.has_criteria(spec):
+            raise ValueError("type a name pattern or a filter (ext:, size:, root:, host:, ...)")
+        query_roots = srch.resolve_roots(spec, self.call(lambda b: b.roots()))
+        q = srch.to_query(spec, query_roots, sort=p.get("sort"), desc=p.get("desc"),
+                          offset=p.get("offset"), limit=p.get("limit"))
+        found = {"rows": [], "more": False} if query_roots == [] else self.call(lambda b: b.search_names(q))
+        rows = []
+        for doc in found["rows"]:
+            row = _row(doc)
+            rel = doc.get("rel_path") or ""
+            root = doc.get("root") or ""
+            rows.append({**row, "root": root, "host": srch.host_of(root), "folder": browse.parent_of(rel)})
+        return {"query": srch.describe(spec), "rows": rows, "more": found["more"], "offset": q["offset"],
+                "limit": q["limit"], "sort": q["sort"], "desc": q["desc"],
+                "elapsed_ms": round((time.perf_counter() - started) * 1000, 1)}
+
 
 ROUTES = {"/api/info": "info", "/api/roots": "roots", "/api/summary": "summary", "/api/records": "records",
           "/api/subtree": "subtree", "/api/treemap": "treemap", "/api/record": "record", "/api/members": "members",
-          "/api/backends": "backends", "/api/pins": "pins", "/api/agents": "agents", "/api/jobs": "jobs"}
+          "/api/backends": "backends", "/api/pins": "pins", "/api/agents": "agents", "/api/jobs": "jobs",
+          "/api/search": "search"}
 POST_ROUTES = {"/api/backend": "select", "/api/pin": "pin", "/api/unpin": "unpin"}
+ROOT_ACTIONS = {"/api/roots/scan": "scan_root", "/api/roots/remove": "remove_root"}   # POST only, like run now
 RUN_PATH = re.compile(r"^/api/jobs/([A-Za-z0-9._@-]{1,128})/run$")      # POST only: "run now"
 CONTROL_HEADER = "X-Filecat-Control"
 LOOPBACK_HOSTS = ("127.0.0.1", "localhost", "::1", "[::1]")
@@ -503,7 +599,7 @@ def make_handler(catalog: Catalog, page: bytes) -> type[BaseHTTPRequestHandler]:
             url = urlsplit(self.path)
             if url.path in ("/", "/index.html"):
                 return self._send(HTTPStatus.OK, page, "text/html; charset=utf-8")
-            if RUN_PATH.match(url.path) or url.path in ("/api/login", "/api/logout"):
+            if RUN_PATH.match(url.path) or url.path in ("/api/login", "/api/logout") or url.path in ROOT_ACTIONS:
                 return self._json(HTTPStatus.METHOD_NOT_ALLOWED, {"error": "POST only"}, {"Allow": "POST"})
             method = ROUTES.get(url.path)
             if method is None:
@@ -615,11 +711,36 @@ def make_handler(catalog: Catalog, page: bytes) -> type[BaseHTTPRequestHandler]:
             status, data = catalog.coordinator.request_run(name, self.client_address[0])
             self._json(status, data)
 
+        def _root_action(self, action: str) -> None:
+            """POST /api/roots/scan {"root"} and /api/roots/remove {"root", "confirm"}: exactly the
+            guards of _run_job (coordinator and password configured, session, CSRF header, JSON,
+            same origin); nothing happens otherwise."""
+            if not self._control_ready():
+                return
+            if not self._logged_in():
+                return self._json(HTTPStatus.UNAUTHORIZED, {"error": "log in first", "login": True})
+            body = self._body()
+            if body is None:
+                return
+            try:
+                if action == "scan_root":
+                    status, data = catalog.scan_root(body.get("root"), self.client_address[0])
+                else:
+                    status, data = catalog.remove_root(body.get("root"), body.get("confirm"),
+                                                       self.client_address[0])
+            except ValueError as exc:
+                return self._json(HTTPStatus.BAD_REQUEST, {"error": str(exc)})
+            except Exception as exc:     # backend failure: report it, keep serving
+                return self._json(HTTPStatus.INTERNAL_SERVER_ERROR, {"error": f"{type(exc).__name__}: {exc}"})
+            self._json(status, data)
+
         def do_POST(self) -> None:
             path = urlsplit(self.path).path
             run = RUN_PATH.match(path)
             if run:
                 return self._run_job(run.group(1))
+            if path in ROOT_ACTIONS:
+                return self._root_action(ROOT_ACTIONS[path])
             if path == "/api/login":
                 return self._login()
             if path == "/api/logout":

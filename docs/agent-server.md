@@ -323,7 +323,8 @@ can lose one of the two updates. Use SQLite or a server backend for a long-runni
   `jobs` is empty when the server is not in this process.
 
 A **Server** view in the page (nav link next to Roots) shows both as two tables, refreshed every 15
-seconds. `/api/jobs` also carries `control: {available, reason}`.
+seconds. `/api/jobs` also carries `control: {available, reason}`. An ad-hoc scan from the Roots page
+(below) appears in `jobs` while it is queued or running, marked `"adhoc": true`.
 
 ### Run now (and the login it needs)
 
@@ -375,6 +376,43 @@ authentication, so this is the one action that starts work, and it is guarded:
   anchor is the last start); an `at` job is unaffected (its next slot still comes). Shell
   equivalent: `filecat server --once --job NAME`. Not done: picking up a manual trigger written by
   another process (the viewer and the coordinator share a process, so it is not needed).
+
+### Scan now and Remove (the Roots page)
+
+Two more actions use exactly the guards above: only inside `filecat server --serve` (a plain
+`filecat serve` answers 404), disabled without `control_password_hash` (403), a valid session (401,
+`"login": true`: the page opens the same password form and repeats the action), the CSRF checks
+(header, JSON, same origin, loopback `Host`), `GET` is 405, nothing happens otherwise. `GET
+/api/roots` carries the same `control: {available, reason}` as `/api/jobs`, and per root `busy` (why
+a scan of it is running or queued here) and `removable` (see below), so the buttons are disabled
+with the reason, or absent.
+
+* **Scan** is `POST /api/roots/scan {"root": ...}`. The root must be in the root index (404). The
+  coordinator's `request_scan(root, remote)` queues an ad-hoc job named `scan:<root>`, kind
+  `scan-root`, for exactly that root. The agent is the one `filecat scan` would choose: the
+  `[[agents]]` entry with the longest alias or share match (`config.agent_for`), run as `scan ROOT
+  --agent NAME`; a root no agent covers is read over SMB or from the local disk (`--no-agent`) and
+  counts as the pseudo-agent `(local)`, so those scans do not overlap each other. It goes through
+  the scheduler like a scheduled job, so the per-agent exclusivity and the global limit apply (a scan
+  whose agent is busy shows as queued). 202 queued; 409 when that root is already being scanned
+  or queued (an ad-hoc scan, or a running job that names the root or whose agent covers it), the
+  agent is down, or the server is stopping; 400 for a bad body. The run is stored in the job
+  history like any other (`trigger: "manual"`, `requested_from`, `kind: "scan-root"`,
+  `roots: [root]`) and shows on the Server page (Jobs while it is queued or running, then Recent runs);
+  an ad-hoc job leaves no trace in the configuration or the schedule.
+* **Remove** is `POST /api/roots/remove {"root": ..., "confirm": <the root string>}`, for the root
+  nobody wanted (a typo, a folder that did not exist, scanned with nothing in it). `confirm` must
+  repeat `root` (400), the root must exist (404). **409 unless the root has no records at all**
+  (files, folders and rollups are all counted, by the backend) **and no scan is running** here or
+  elsewhere (root index state `in_progress`). Then it deletes the root's index entry
+  (`Backend.delete_root_info`), its stored aggregates and treemap snapshots (pins too), its dropped
+  and sticky-redaction entries, and its entry in the resume files beside the catalog. The web never
+  deletes records. The page offers the button only where `removable` is true (the row's totals say
+  nothing is there and one record lookup found none) and asks with a `confirm()` dialog naming the
+  root. Shell equivalent: `filecat roots remove ROOT [--force [--yes]] [--dry-run]`; `--force` also
+  deletes the records (after typing the root to confirm, unless `--yes`; without a terminal `--yes`
+  is required), never while a scan runs. Samples and member sets that only those records named stay
+  until `filecat samples prune` / `member-sets prune`.
 
 Residual risk: HTTP carries the password and the cookie in clear text. Bind to loopback (the
 default), or put a TLS reverse proxy in front before using this over a network.

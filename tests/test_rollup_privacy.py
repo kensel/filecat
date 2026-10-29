@@ -187,9 +187,17 @@ def serve_output(db: str, root: str) -> dict[str, bytes]:
                  "records folders": ({"root": root, "parent": "", "limit": "500"},),
                  "records rollup": ({"root": root, "kind": "rollup"},),
                  "subtree": ({"root": root, "parent": ""},),
-                 "treemap": ({"root": root, "prefix": "", "depth": "3"},)}
+                 "treemap": ({"root": root, "prefix": "", "depth": "3"},),
+                 # file-name search: everything, by pattern, by extension, the rollups, by host
+                 "search all": ({"q": "*", "limit": "1000"},),
+                 "search token": ({"q": "ZXQ", "limit": "1000"},),
+                 "search ext": ({"q": "ext:zxqext0;zxqext1 size:>0", "limit": "1000"},),
+                 "search rollup": ({"q": "REDACTED", "root": root, "kind": "rollup"},),
+                 "search dirs": ({"q": "kind:dir", "limit": "1000", "sort": "rel_path"},)}
         for name, (params,) in calls.items():
             fn = getattr(catalog, name.split()[0])
+            if name == "search all":        # the control: a search for everything lists the visible names
+                assert any(r["name"] == "ZXQ-visible-ok.txt" for r in fn(params)["rows"])
             out["serve " + name] = json.dumps(fn(params), default=str).encode("utf-8", "surrogatepass")
     finally:
         catalog.close()

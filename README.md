@@ -94,6 +94,7 @@ filecat summary --disagree                                # name says one type, 
 filecat show "sub/dir/file.txt" --root D:\Games
 filecat roots                                             # last scan, in progress, newest file, last error
 filecat roots case-check                                  # one share recorded as two roots (server\share case)?
+filecat roots remove ROOT [--force [--yes]] [--dry-run]   # forget a root with no records (typo); --force deletes its records too
 filecat dropped                                           # records of files that vanished (kept 90 days)
 filecat backups [--versions]                              # backup stores: machines, versions, problems, copies
 filecat databases                                         # database data folders: engine, version, databases, quiet?
@@ -429,11 +430,21 @@ interrupted, failed, scanning, stalled and not scanned.
 
 ```
 filecat roots [--root R] [--json]
+filecat roots remove ROOT [--force [--yes]] [--dry-run]
 ```
 
 The web viewer's Roots page shows the same table, refreshing while a scan
 runs. Roots scanned before the index existed, or added by `import`, show
 "not scanned". Their newest file is read from the records.
+
+`roots remove ROOT` forgets a root that should not be there, such as a typo
+or a folder that did not exist: its index entry, summary, treemap snapshots
+and resume state. It refuses while a scan runs and while the root still has
+records; `--force` deletes the records too (it asks you to type the root
+unless `--yes`). `--dry-run` says what would go. Under `filecat server
+--serve` the Roots page has a **Scan** button per root and, for a root with
+no records, **Remove**, behind the same password login as "Run now" (see
+[docs/agent-server.md](docs/agent-server.md) section 7).
 
 ## Dropped records
 
@@ -518,6 +529,17 @@ has these views:
   directory records.
 - **Records:** filter, sort and page the files, then open one to see every
   field, its errors and its archive members.
+- **Search:** file and folder names across every root, Everything-style and
+  case-insensitive: `eve*.exe` (`*` any run, `?` one character, the whole name
+  must match), plain text is a substring (`setup` is `*setup*`), and `ext:exe;dll`,
+  `size:>10mb` (or `1mb..1gb`), `after:2024-01-01`, `before:`, `kind:dir`,
+  `root:` and `host:nas-*` narrow it. Results show the name, its folder (a link
+  to Browse), root, size, modified time and kind, 100 at a time (up to 1000 per
+  page) with the time the query took; click one to open the record. Only names
+  are matched, and the lookup scans the catalog (no name index yet), so a
+  substring search of tens of millions of records takes seconds. A rolled-up
+  folder (`[CACHE]`, `[REDACTED]`) is found by its own name only; nothing inside
+  it is stored. `GET /api/search` is the same query as JSON.
 
 The **Backend** selector in the top-right corner switches the viewer to
 another catalog without a restart. It lists every backend with a location in
@@ -669,6 +691,8 @@ src/filecat/
   browse.py serve.py web/   drill-through queries, `filecat serve` and its page
   treemap.py        folder sizes split by extension/type for the Graph view
   rootinfo.py roots_cmd.py  root index (scan history) and `filecat roots`
+  root_remove.py    `roots remove` and the viewer's Remove button
+  search.py         the Search page's query language (patterns, LIKE and regex translations)
   programs.py reg.py lnk.py
   importer.py enrich.py
   data/             vendored freedesktop.org.xml and richprint comp_id.txt

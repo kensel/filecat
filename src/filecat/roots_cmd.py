@@ -87,6 +87,50 @@ def _print_root(row: dict[str, Any]) -> None:
     print()
 
 
+def run_remove(args: Any) -> int:
+    """`roots remove ROOT [--force [--yes]] [--dry-run]`: see root_remove.py."""
+    from . import root_remove
+    if len(args.names) != 1:
+        print("filecat: roots remove wants exactly one ROOT, as `filecat roots` lists it", file=sys.stderr)
+        return 2
+    root = args.names[0]
+    with open_backend(args.backend, args.out, args.dsn) as backend:
+        if not root_remove.known(backend, root):
+            print(f"filecat: no root {root!r} in the catalog (`filecat roots` lists them)", file=sys.stderr)
+            return 2
+        records = root_remove.count_records(backend, root)
+        if records and not args.force:
+            print(f"filecat: {root} still has {records:,} record{'s' if records != 1 else ''}; "
+                  "--force deletes them too", file=sys.stderr)
+            return 1
+        if args.dry_run:
+            print(f"{root}: would remove the root and {records:,} record{'s' if records != 1 else ''}; "
+                  "nothing changed")
+            return 0
+        if records:
+            if not args.yes:
+                if not sys.stdin.isatty():
+                    print("filecat: roots remove --force needs --yes when there is no terminal", file=sys.stderr)
+                    return 2
+                answer = input(f"Delete {records:,} record{'s' if records != 1 else ''} of {root} and forget "
+                               f"the root? Type the root to confirm: ")
+                if answer.strip() != root:
+                    print("not removed")
+                    return 1
+        try:
+            removed = root_remove.remove_root(backend, root, force=args.force)
+        except root_remove.RootError as exc:
+            print(f"filecat: {exc}", file=sys.stderr)
+            return 1
+    parts = [f"{removed['records']:,} records"] if removed["records"] else []
+    parts += [f"{removed[k]} {label}" for k, label in (("treemaps", "treemap snapshots"),
+                                                       ("dropped", "dropped records"),
+                                                       ("redactions", "redaction entries"),
+                                                       ("resume_files", "resume entries")) if removed[k]]
+    print(f"{root}: removed" + (" (" + ", ".join(parts) + ")" if parts else ""))
+    return 0
+
+
 def run(args: Any) -> int:
     if args.action in ("case-check", "case-merge"):
         from . import rootcase
@@ -94,6 +138,8 @@ def run(args: Any) -> int:
             print(f"filecat: --sample must be {rootcase.SAMPLE_MIN}..{rootcase.SAMPLE_MAX}", file=sys.stderr)
             return 2
         return (rootcase.run_check if args.action == "case-check" else rootcase.run_merge)(args)
+    if args.action == "remove":
+        return run_remove(args)
     backend = open_backend(args.backend, args.out, args.dsn)
     try:
         rows = rootinfo.index(backend)

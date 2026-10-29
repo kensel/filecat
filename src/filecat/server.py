@@ -28,6 +28,9 @@ from .server_cfg import JobSpec, ServerConfig
 from .server_store import ServerStore, iso
 
 FILE_BACKENDS = ("sqlite", "jsonl")
+LOCAL_AGENT = "(local)"         # the "agent" of an ad-hoc scan no [[agents]] covers: read over SMB or from disk
+ADHOC_KIND = "scan-root"        # an ad-hoc scan of one root (the viewer's Scan button)
+ADHOC_PREFIX = "scan:"
 TICK = 1.0
 SCAN_PROGRESS_SECONDS = 60.0
 
@@ -52,7 +55,7 @@ class JobResult:
 @dataclass
 class JobContext:
     spec: JobSpec
-    agent: config.AgentConfig
+    agent: config.AgentConfig | None            # None: an ad-hoc scan of a root no agent covers
     agents: list[config.AgentConfig]
     cfg: dict[str, Any]                         # the parsed filecat.toml
     catalog: argparse.Namespace                 # backend / out / dsn the server was started with
@@ -114,7 +117,8 @@ def _scan_counts(backend: Any, roots: list[str]) -> dict[str, Any]:
 def _run_scan(ctx: JobContext, roots: list[str], backend: Any) -> JobResult:
     from . import resume, scan
     from .options import ScanOptions
-    args = _argv_args(ctx, ["scan", *roots, *ctx.spec.options, "--agent", ctx.agent.name])
+    through = ["--agent", ctx.agent.name] if ctx.agent is not None else ["--no-agent"]
+    args = _argv_args(ctx, ["scan", *roots, *ctx.spec.options, *through])
     options = ScanOptions.from_args(args)
     options.cancel = ctx.cancel
     options.progress_interval = SCAN_PROGRESS_SECONDS
@@ -135,6 +139,15 @@ def run_scan_job(ctx: JobContext) -> JobResult:
             return JobResult("skipped", counts={"roots": 0}, error="no roots: name them in roots = [...] "
                              "or run a storage-collect so the agent's shares are known")
         return _run_scan(ctx, roots, backend)
+    finally:
+        backend.close()
+
+
+def run_scan_root_job(ctx: JobContext) -> JobResult:
+    """The ad-hoc scan of exactly the one root the viewer asked for (spec.roots)."""
+    backend = _open(ctx)
+    try:
+        return _run_scan(ctx, list(ctx.spec.roots or ()), backend)
     finally:
         backend.close()
 
@@ -187,6 +200,7 @@ def scan_cancelled() -> BaseException:
 
 RUNNERS: dict[str, Callable[[JobContext], JobResult]] = {
     "scan": run_scan_job, "storage-collect": run_storage_collect_job, "store-resum": run_store_resum_job,
+    ADHOC_KIND: run_scan_root_job,
 }
 
 
@@ -299,6 +313,68 @@ class Coordinator:
                      "message": f"{name} will start now, or as soon as agent {spec.agent} and the "
                                 "concurrency limit allow"}
 
+    # --- "scan now" for one root (the viewer's POST /api/roots/scan) ---
+    def scan_agent(self, root: str) -> config.AgentConfig | None:
+        """The agent a scan of `root` goes through: the one `filecat scan` picks by default (the
+        longest alias or share match among [[agents]]), None for SMB or a local path."""
+        return config.agent_for(list(self.agents.values()), root)
+
+    def scanning(self, root: str) -> str | None:
+        """Why `root` counts as being scanned by this server (running, or queued), else None: an
+        ad-hoc scan of it, or a running job that names it or whose agent covers it."""
+        key = root.lower()
+        with self._lock:
+            name = ADHOC_PREFIX + root
+            if name in self.runs:
+                return "a scan of this root is running"
+            if name in self.manual:
+                return "a scan of this root is queued"
+            for run in self.runs.values():
+                spec = run.spec
+                if spec.kind not in ("scan", "store-resum"):
+                    continue
+                if spec.roots is not None:
+                    if any(r.lower() == key for r in spec.roots):
+                        return f"job {spec.name} is scanning it"
+                else:
+                    covering = self.scan_agent(root)
+                    if covering is not None and covering.name == spec.agent:
+                        return f"job {spec.name} is scanning the roots of agent {spec.agent}"
+        return None
+
+    def request_scan(self, root: str, remote: str) -> tuple[int, dict[str, Any]]:
+        """Queue an ad-hoc scan of exactly `root`: (http status, body). It goes through the agent
+        that covers the root (see scan_agent), else SMB or the local disk; the next tick starts it
+        through the scheduler, so the per-agent exclusivity and the concurrency limit apply as for
+        scheduled jobs. 409 when the root is already being scanned or queued, or its agent is down."""
+        if not isinstance(root, str) or not root.strip():
+            return 400, {"error": "root must be a root path"}
+        if self.lost or self.stopping:
+            return 409, {"error": "this server is stopping or has lost the catalog lease"}
+        agent = self.scan_agent(root)
+        agent_name = agent.name if agent is not None else LOCAL_AGENT
+        name = ADHOC_PREFIX + root
+        with self._lock:
+            busy = self.scanning(root)
+            if busy:
+                return 409, {"error": f"{root} is already being scanned: {busy}"}
+            if agent is not None and self.health[agent.name].state == "down":
+                return 409, {"error": f"agent {agent.name} is down"}
+            spec = JobSpec(name=name, kind=ADHOC_KIND, agent=agent_name, roots=(root,))
+            self.sched.add(spec)
+            self.manual[name] = remote
+        self.log(f"scan of {root}: requested from {remote} (through {agent_name})")
+        return 202, {"job": name, "queued": True, "agent": agent_name,
+                     "message": f"scan of {root} will start now, or as soon as "
+                                + (f"agent {agent_name}" if agent else "the local/SMB slot")
+                                + " and the concurrency limit allow"}
+
+    def _forget_adhoc(self, spec: JobSpec) -> None:
+        if spec.kind == ADHOC_KIND:
+            self.sched.drop(spec.name)
+            with self._lock:
+                self.manual.pop(spec.name, None)
+
     # --- lease ---
     def acquire(self) -> server_store.LeaseResult:
         res = self.store.acquire(self.holder, socket.gethostname(), os.getpid(), self.cfg.lease_ttl)
@@ -399,7 +475,7 @@ class Coordinator:
 
     def _work(self, run: Run) -> None:
         spec = run.spec
-        ctx = JobContext(spec, self.agents[spec.agent], list(self.agents.values()), self.file_cfg,
+        ctx = JobContext(spec, self.agents.get(spec.agent), list(self.agents.values()), self.file_cfg,
                          self.catalog, run.cancel, self.log)
         try:
             run.result = self.runners[spec.kind](ctx)
@@ -420,6 +496,7 @@ class Coordinator:
         self.outcomes.append(outcome)
         self.runs.pop(run.spec.name, None)
         self.sched.finished(run.spec.name)
+        self._forget_adhoc(run.spec)
         extra = ""
         if run.row["counts"]:
             extra = " " + " ".join(f"{k}={v}" for k, v in run.row["counts"].items())
@@ -457,6 +534,7 @@ class Coordinator:
             plan = self.sched.plan(now, max_concurrent=self.max_concurrent, down=down, unknown=unknown,
                                    forced=set(forced or ()) | set(manual))
             for spec, reason in plan.skipped:
+                self._forget_adhoc(spec)
                 self.log(f"job {spec.name} skipped: {reason}")
                 self.store.put_run(self._row(spec, now, self._trigger(spec, trigger, manual), "skipped", reason,
                                              manual.get(spec.name)))
@@ -549,6 +627,13 @@ class Coordinator:
         now = self.clock()
         out = []
         for spec in self.sched.jobs:
+            if spec.kind == ADHOC_KIND:         # no schedule: it is queued or running, then gone
+                out.append({"name": spec.name, "kind": spec.kind, "agent": spec.agent,
+                            "roots": list(spec.roots or ()), "schedule": "ad hoc", "options": [],
+                            "enabled": True, "run_on_start": False, "next_due": None, "adhoc": True,
+                            "running": spec.name in self.runs, "queued": spec.name in self.manual,
+                            "last_outcome": self.last_outcome.get(spec.name)})
+                continue
             out.append({**spec.to_dict(), "next_due": iso(self.sched.next_due(spec, now)),
                         "running": spec.name in self.runs, "queued": spec.name in self.manual,
                         "last_outcome": self.last_outcome.get(spec.name)})

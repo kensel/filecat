@@ -115,6 +115,21 @@ class Backend(ABC):
         from ..browse import query_documents
         return query_documents(self.list(kind=q.get("kind"), root=q.get("root")), q)
 
+    def search_names(self, q: dict[str, Any]) -> dict[str, Any]:
+        """File-name search for the viewer: records whose *name* matches (filecat.search).
+
+        q is a filecat.search.to_query() query: browse-style filters plus the
+        keys names (patterns, all must match), exts, min_size, max_size, after,
+        before (mtime_ns), not_kinds and roots, with sort / desc / offset / limit.
+        Returns {"rows": [document, ...], "more": bool}: one page and whether
+        another follows; no total, because counting a substring match costs a
+        second full scan on a catalog of millions. This default runs query()
+        (a Python scan, with a look-ahead row); SQL backends and MongoDB
+        select just the page.
+        """
+        res = self.query({**q, "limit": q["limit"] + 1})
+        return {"rows": res["rows"][:q["limit"]], "more": len(res["rows"]) > q["limit"]}
+
     def subtree(self, root: str, parent: str) -> list[dict[str, Any]]:
         """Child folders of `parent` ("" = the root) with the readable files
         and bytes anywhere beneath each: [{"name", "files", "bytes"}],

@@ -374,6 +374,17 @@ class MssqlBackend(Backend):
         rows = [json.loads(r[0]) for r in cur.fetchall()]
         return {"total": int(total), "bytes": int(nbytes), "rows": rows}
 
+    def search_names(self, q: dict[str, Any]) -> dict[str, Any]:
+        from ..browse import MSSQL, sql_order, sql_where
+        self.flush()
+        rid = root_id(q["root"]) if q.get("root") is not None else None
+        where, params = sql_where(q, MSSQL, rid)
+        cur = self.conn.cursor()
+        cur.execute(f"SELECT document FROM files{where} ORDER BY {sql_order(q, MSSQL)} "
+                    "OFFSET ? ROWS FETCH NEXT ? ROWS ONLY", [*params, q["offset"], q["limit"] + 1])
+        rows = [json.loads(r[0]) for r in cur.fetchall()]
+        return {"rows": rows[:q["limit"]], "more": len(rows) > q["limit"]}
+
     def subtree(self, root: str, parent: str) -> list[dict[str, Any]]:
         from ..browse import MSSQL, sql_subtree
         self.flush()

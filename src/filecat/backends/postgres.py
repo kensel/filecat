@@ -299,6 +299,18 @@ class PostgresBackend(Backend):
         self.conn.commit()
         return {"total": int(total), "bytes": int(nbytes), "rows": rows}
 
+    def search_names(self, q: dict[str, Any]) -> dict[str, Any]:
+        from ..browse import POSTGRES, sql_order, sql_where
+        self.flush()
+        rid = root_id(q["root"]) if q.get("root") is not None else None
+        where, params = sql_where(q, POSTGRES, rid)
+        with self.conn.cursor() as cur:
+            cur.execute(f"SELECT document FROM files{where} ORDER BY {sql_order(q, POSTGRES)} "
+                        "LIMIT %s OFFSET %s", [*params, q["limit"] + 1, q["offset"]])
+            rows = [r[0] for r in cur.fetchall()]
+        self.conn.commit()
+        return {"rows": rows[:q["limit"]], "more": len(rows) > q["limit"]}
+
     def subtree(self, root: str, parent: str) -> list[dict[str, Any]]:
         from ..browse import POSTGRES, sql_subtree
         self.flush()
