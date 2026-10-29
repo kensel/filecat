@@ -1,6 +1,6 @@
 [project]
 name = "filecat"
-version = "0.1.3"
+version = "0.2.1"
 description = "Walk local drives and NAS shares, record every file and directory, and measure what the bytes support."
 readme = "README.md"
 requires-python = ">=3.11"
