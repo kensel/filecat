@@ -518,6 +518,17 @@ has these views:
   directory records.
 - **Records:** filter, sort and page the files, then open one to see every
   field, its errors and its archive members.
+- **Rollups:** the audit of `filecat rollups list`: the rollup records by
+  root, tag and parent folder with files, folders, size, newest modification
+  and partial flags, filterable by root and tag and sortable. Each row links
+  to its folder in Browse and to the rollup's record. A `[REDACTED]` row is
+  counts only: no link, no name, no modification time.
+- **Topology:** the storage topology that `filecat storage collect` stored
+  (plus `[[storage.hosts]]` from filecat.toml): per host a collapsible tree
+  of disks, pools, volumes, shares, LUNs and VM disks with capacity bars,
+  each share joined to its catalog root (files, bytes, last scan, links to
+  Browse and Graph), links between hosts with a jump to the guest server, and
+  the roots no share accounts for under "Not in topology".
 
 The **Backend** selector in the top-right corner switches the viewer to
 another catalog without a restart. It lists every backend with a location in

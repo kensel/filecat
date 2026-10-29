@@ -259,11 +259,22 @@ server keeps store detection, manifest verification, probing and Ollama.
     `/etc/space/space_history_*.xml` is the authority for pools, RAID levels, member disks and
     SSD cache. Still open: `-d sat`, ext4 LUN backing directories, ACL `authority`.
   - [ ] Then: the Rust agent with `read_file`, `statfs`, `run`, `capabilities`;
-    derived share entries merged into `ShareMap` (config wins); the viewer
-    drill-down; Proxmox and TrueNAS collectors.- A `storage_pools` store and the storage hierarchy in the web viewer
-  (note 04): pool and volume capacity bars, SAN/VM tiles behind a toggle,
-  inspector cards for backup stores, block storage and rollups, and a jump
-  from a VM disk to its guest server's shares.
+    derived share entries merged into `ShareMap` (config wins); Proxmox and
+    TrueNAS collectors.
+  - [x] The viewer drill-down: the **Topology** page (`GET /api/topology`):
+    per host a collapsible tree from the disks to shares, LUNs and VM disks
+    with capacity bars, shares joined to their catalog roots, links between
+    hosts with a jump to the guest server, roots "not in topology".
+- A `storage_pools` store and the storage hierarchy in the web viewer
+  (note 04):
+  - [x] pool and volume capacity bars, a jump from a LUN or VM disk to its
+    guest server (the Topology page, over `storage_topology`; no separate
+    `storage_pools` store was needed)
+  - [x] inspector cards for rollups (backup stores' cards read the store
+    record)
+  - [ ] SAN/VM tiles behind a toggle in the Graph treemap
+  - [ ] inspector cards for block storage; a jump from a VM disk to its
+    guest server's *shares* (the page jumps to the host's section)
 - Embedded metadata: creator, title, subject, revision and application
   version from Office and OpenDocument files (the `metadata` parts listed
   in `compound_formats.toml`), EXIF/XMP from images, and tags from audio
@@ -273,8 +284,9 @@ server keeps store detection, manifest verification, probing and Ollama.
 
 After the v0.2.0 rollups (stages A and B of [rollups.md](rollups.md)):
 
-- Web viewer: an **audit screen** with the counts of `filecat rollups list`
-  (by tag and parent folder, `[REDACTED]` as counts only).
+- [x] Web viewer: an **audit screen** with the counts of `filecat rollups list`
+  (by tag and parent folder, `[REDACTED]` as counts only): the **Rollups**
+  page, `GET /api/rollups`.
 - Web viewer: **suggestions**, the folders a built-in rule would match for a
   type that is not automatic, with "add this rollup" writing the rule.
 - Web viewer: **redaction approval**, the screen behind

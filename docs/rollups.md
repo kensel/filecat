@@ -257,7 +257,7 @@ children folded in, files, bytes, newest modification, how many are `partial`
 and how many came from a rule, a marker, a store or the sticky store
 (`rollup.rule`). An administrator checks that the rollups are what was
 expected: `[REDACTED]` appears as counts and parent folders, never names.
-Roadmap: a web viewer screen with the same counts (v0.2.x).
+The web viewer's **Rollups** page shows the same counts (`GET /api/rollups`); a `[REDACTED]` row there is counts only, with no link and no modification time.
 
 ### Where rules come from
 
