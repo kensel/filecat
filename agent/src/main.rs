@@ -13,6 +13,7 @@ mod prims;
 mod proto;
 mod run;
 mod scope;
+mod session;
 mod server;
 mod tls;
 mod walk;
@@ -54,6 +55,8 @@ fn main() {
     println!("allowed_roots ({}) {}", cfg.roots_source.as_str(), scope.roots.join(":"));
     use std::io::Write;
     let _ = std::io::stdout().flush();
+    let registry = Arc::new(session::Registry::default());
+    session::spawn_status_log(registry.clone(), cfg.status_interval);
     let shared = Arc::new(server::Shared {
         token: cfg.token.clone().into_bytes(),
         scope,
@@ -62,6 +65,7 @@ fn main() {
         runner: run::Runner::default(),
         hostname: server::hostname(),
         connections: AtomicUsize::new(0),
+        registry: registry.clone(),
     });
     server::serve(listener, shared);
 }

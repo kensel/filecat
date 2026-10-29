@@ -7,6 +7,7 @@ use crate::matcher::{self, Policy};
 use crate::proto::*;
 use crate::run::Runner;
 use crate::scope::Scope;
+use crate::session::{Registry, Session};
 use crate::walk::Sums;
 use crate::{prims, walk};
 use rustls::{ServerConfig, ServerConnection, StreamOwned};
@@ -35,6 +36,7 @@ pub struct Shared {
     pub runner: Runner,
     pub hostname: String,
     pub connections: AtomicUsize,
+    pub registry: Arc<Registry>,
 }
 
 pub fn hostname() -> String {
@@ -111,6 +113,7 @@ fn read_line(stream: &mut Stream, pending: &mut Vec<u8>) -> std::io::Result<Line
 struct State {
     authed: bool,
     policy: Policy,
+    sess: Arc<Session>,
 }
 
 fn handle(shared: &Shared, tcp: TcpStream) {
@@ -118,9 +121,11 @@ fn handle(shared: &Shared, tcp: TcpStream) {
     let _ = tcp.set_read_timeout(Some(HANDSHAKE_TIMEOUT));
     let _ = tcp.set_write_timeout(Some(WRITE_TIMEOUT));
     let Ok(conn) = ServerConnection::new(shared.tls.clone()) else { return };
+    let peer = tcp.peer_addr().map(|a| a.to_string()).unwrap_or_else(|_| "unknown".into());
+    let registered = shared.registry.open(peer);
     let mut stream = StreamOwned::new(conn, tcp);
     let mut pending = Vec::new();
-    let mut st = State { authed: false, policy: Policy::default() };
+    let mut st = State { authed: false, policy: Policy::default(), sess: registered.session.clone() };
     let mut first = true;
     loop {
         let line = match read_line(&mut stream, &mut pending) {
@@ -164,6 +169,7 @@ fn dispatch_inner(shared: &Shared, st: &mut State, stream: &mut Stream, line: &[
     let cmd = req.get("cmd").and_then(Value::as_str).unwrap_or("");
     match cmd {
         "hello" => {
+            set_label(st, req)?;
             return Ok(json!({"ok": true, "protocol": PROTOCOL, "agent_version": env!("CARGO_PKG_VERSION"), "hostname": shared.hostname,
                              "os": std::env::consts::OS, "arch": std::env::consts::ARCH}));
         }
@@ -174,13 +180,43 @@ fn dispatch_inner(shared: &Shared, st: &mut State, stream: &mut Stream, line: &[
                 *close = true;
                 return Err(Fail::new("unauthorized", "invalid token"));
             }
+            set_label(st, req)?;
             st.authed = true;
+            st.sess.set_authenticated();
             return Ok(json!({"ok": true}));
         }
         _ if !st.authed => return Err(Fail::new("unauthorized", "authenticate first")),
         _ => {}
     }
+    let Some(name) = command_name(cmd) else {
+        return Err(Fail::bad(format!("unknown cmd {cmd:?}")));
+    };
+    let sess = st.sess.clone();
+    let _running = sess.begin(name);
+    let out = authed(shared, st, stream, req, cmd);
+    sess.account(name, &out);
+    out
+}
+
+/// `label` of `hello` or `auth` (the client sends it with `hello`): what the connection is for,
+/// shown by `activity` and in the status log.
+fn set_label(st: &State, req: &Obj) -> R<()> {
+    if let Some(label) = opt_str(req, "label")? {
+        st.sess.set_label(label);
+    }
+    Ok(())
+}
+
+/// The commands of an authenticated connection, as a fixed set: a client cannot put its own text
+/// into the registry as a command name.
+fn command_name(cmd: &str) -> Option<&'static str> {
+    const NAMES: [&str; 12] = ["activity", "configure_policy", "cancel", "list_dir", "sum_subtree", "measure", "read_range", "read_file", "statfs", "run", "capabilities", "wmi"];
+    NAMES.iter().copied().find(|n| *n == cmd)
+}
+
+fn authed(shared: &Shared, st: &mut State, stream: &mut Stream, req: &Obj, cmd: &str) -> R<Value> {
     match cmd {
+        "activity" => Ok(shared.registry.activity(st.sess.id)),
         "configure_policy" => {
             let raw = match req.get("policy") {
                 None | Some(Value::Null) => Obj::new(),
@@ -203,11 +239,11 @@ fn dispatch_inner(shared: &Shared, st: &mut State, stream: &mut Stream, line: &[
         }
         "list_dir" => {
             let mut emit = |v: &Value| write_line(stream, v);
-            walk::list_dir(&shared.scope, &st.policy, &shared.sums, req, &mut emit)
+            walk::list_dir(&shared.scope, &st.policy, &shared.sums, &st.sess.counters, req, &mut emit)
         }
         "sum_subtree" => {
             let mut emit = |v: &Value| write_line(stream, v);
-            walk::sum_subtree(&shared.scope, &st.policy, &shared.sums, req, &mut emit)
+            walk::sum_subtree(&shared.scope, &st.policy, &shared.sums, &st.sess.counters, req, &mut emit)
         }
         "measure" => prims::measure(&shared.scope, req),
         "read_range" => prims::read_range(&shared.scope, req),

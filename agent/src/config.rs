@@ -19,6 +19,8 @@ pub struct Config {
     pub roots_source: RootsSource,
     pub test_root: Option<PathBuf>,
     pub print_fingerprint: bool,
+    /// seconds between status log lines; 0 is off
+    pub status_interval: u64,
 }
 
 pub enum Parsed {
@@ -40,6 +42,8 @@ settings (command line, else environment, else the .env file next to the binary)
                               (default: filecat-agent.crt / .key next to the binary)
   FILECAT_AGENT_ALLOW_ROOTS   paths the agent may serve, ':' separated, '*' inside one component
                               (default: DSM or Linux metadata paths, see docs/agent-protocol.md)
+  FILECAT_AGENT_STATUS_INTERVAL  seconds between status log lines for busy connections
+                              (default 600, 0 turns them off)
 
 The first start prints the certificate's SHA-256 fingerprint: paste it into filecat.toml as
 `cert_sha256` of the [[agents]] entry.";
@@ -121,6 +125,7 @@ pub fn load(args: &[String], env: &dyn Fn(&str) -> Option<String>) -> Result<Par
     for r in &roots {
         scope::validate_root(r)?;
     }
+    let status_interval = crate::session::parse_interval(get("FILECAT_AGENT_STATUS_INTERVAL").as_deref())?;
     let dir = exe_dir();
     #[cfg(feature = "test-root")]
     let test_root = env("FILECAT_AGENT_TEST_ROOT").map(PathBuf::from);
@@ -135,6 +140,7 @@ pub fn load(args: &[String], env: &dyn Fn(&str) -> Option<String>) -> Result<Par
         roots_source,
         test_root,
         print_fingerprint,
+        status_interval,
     })))
 }
 
@@ -183,6 +189,24 @@ mod tests {
         };
         let Parsed::Run(c) = load(&args(&["--env-file", f.to_str().unwrap(), "--listen", "127.0.0.1:0"]), &env).unwrap() else { panic!() };
         assert_eq!((c.token.as_str(), c.listen.as_str(), c.roots_source), ("fromenv", "127.0.0.1:0", RootsSource::Env));
+        let _ = std::fs::remove_file(&f);
+    }
+
+    #[test]
+    fn status_interval_resolves_like_the_other_settings() {
+        let f = std::env::temp_dir().join(format!("fc-cfg-iv-{}", std::process::id()));
+        std::fs::write(&f, "FILECAT_AGENT_TOKEN=t\nFILECAT_AGENT_STATUS_INTERVAL=120\n").unwrap();
+        let a = args(&["--env-file", f.to_str().unwrap()]);
+        let Parsed::Run(c) = load(&a, &|_| None).unwrap() else { panic!() };
+        assert_eq!(c.status_interval, 120);
+        let env = |k: &str| (k == "FILECAT_AGENT_STATUS_INTERVAL").then(|| "0".to_string());
+        let Parsed::Run(c) = load(&a, &env).unwrap() else { panic!() };
+        assert_eq!(c.status_interval, 0);
+        let bad = |k: &str| (k == "FILECAT_AGENT_STATUS_INTERVAL").then(|| "soon".to_string());
+        assert!(load(&a, &bad).is_err());
+        std::fs::write(&f, "FILECAT_AGENT_TOKEN=t\n").unwrap();
+        let Parsed::Run(c) = load(&a, &|_| None).unwrap() else { panic!() };
+        assert_eq!(c.status_interval, 600);
         let _ = std::fs::remove_file(&f);
     }
 
