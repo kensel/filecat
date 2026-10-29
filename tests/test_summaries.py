@@ -482,3 +482,15 @@ def test_the_command_refreshes_and_reports(tmp_path, capsys):
     assert cli.main([*base, "--all", "--stale"]) == 2
     assert cli.main(status) == 0
     assert "fresh" in capsys.readouterr().out
+
+
+def test_a_build_stamped_the_same_instant_as_a_change_is_stale():
+    # Windows' clock ticks coarsely: a change and a build can carry one timestamp
+    at = "2026-10-29T19:18:47.540000+00:00"
+    assert summaries.state_of({"changed_at": at}, at) == "stale"
+    # and a pass begun at that instant waits for the clock to move on, so it comes out fresh
+    backend = MemoryBackend()
+    put_files(backend)
+    rootinfo.touch(backend, ROOT, at=rootinfo.now_precise())
+    summaries.refresh(backend, ROOT)
+    assert summaries.status(backend, ROOT)["state"] == "fresh"

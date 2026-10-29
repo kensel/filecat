@@ -51,7 +51,8 @@ def state_of(info: Document | None, built_at: str | None) -> str:
     if rootinfo.state(info) == "in_progress":
         return "scanning"
     built, changed = rootinfo.parse(built_at), rootinfo.changed_stamp(info)
-    return "stale" if built is None or (changed is not None and built < changed) else "fresh"
+    # a build stamped the same instant as a change may have missed it (Windows' clock ticks in ms)
+    return "stale" if built is None or (changed is not None and built <= changed) else "fresh"
 
 
 def needs_refresh(state: str) -> bool:
@@ -91,12 +92,28 @@ def is_fresh(backend: Backend, root: str) -> bool:
     return status(backend, root)["state"] == "fresh"
 
 
+def _after_change(backend: Backend, root: str) -> str:
+    """Now, once the clock has moved past the root's change stamp: a pass that begins after a
+    change is stamped later than it, even where the clock is coarse."""
+    try:
+        changed = rootinfo.changed_stamp(backend.get_root_info(root))
+    except NotImplementedError:
+        changed = None
+    at = datetime.now(timezone.utc)
+    for _ in range(100):
+        if changed is None or at > changed:
+            break
+        time.sleep(0.001)
+        at = datetime.now(timezone.utc)
+    return at.isoformat()
+
+
 def refresh(backend: Backend, root: str, *, cancel: Callable[[], bool] | None = None,
             depth: int = DEPTH) -> dict[str, Any]:
     """Read the records of `root` once and store the aggregates and the treemap of its top, both
     built_at the moment the pass began. Raises NotImplementedError when the backend stores neither."""
     began = time.monotonic()
-    built_at = datetime.now(timezone.utc).isoformat()
+    built_at = _after_change(backend, root)
     backend.flush()
     agg = Aggregator(depth)
     seen = 0
