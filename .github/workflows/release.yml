@@ -1,0 +1,81 @@
+name: Release
+
+# A tag vX.Y.Z builds the static filecat-agent binaries and publishes them as a GitHub release.
+# The tag must match the agent's version in agent/Cargo.toml.
+
+on:
+  push:
+    tags: ["v[0-9]+.[0-9]+.[0-9]+"]
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    name: build the static agents
+    runs-on: ubuntu-latest
+    env:
+      RUST_TOOLCHAIN: "1.98.0"
+    defaults:
+      run:
+        working-directory: agent
+    steps:
+      - uses: actions/checkout@v5
+      - name: Tag matches agent/Cargo.toml
+        run: |
+          tag="${GITHUB_REF_NAME#v}"
+          crate=$(sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | head -n1)
+          echo "tag $tag, agent $crate"
+          [ "$tag" = "$crate" ] || { echo "::error::tag v$tag does not match agent/Cargo.toml version $crate"; exit 1; }
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: ${{ env.RUST_TOOLCHAIN }}
+          targets: x86_64-unknown-linux-musl,armv7-unknown-linux-musleabihf,aarch64-unknown-linux-musl
+      - name: Cross compilers for the ARM builds (ring compiles a little C)
+        run: sudo apt-get update && sudo apt-get install -y gcc-arm-linux-gnueabihf gcc-aarch64-linux-gnu
+      - name: cargo test (native x86_64, glibc)
+        run: cargo test
+      - name: Build the static musl agents (x86_64, armv7, aarch64)
+        run: ./build.sh all
+      - name: Each artefact is statically linked; checksums
+        run: |
+          mkdir -p dist
+          ver="${GITHUB_REF_NAME#v}"
+          for pair in x86_64:x86_64-unknown-linux-musl armv7:armv7-unknown-linux-musleabihf aarch64:aarch64-unknown-linux-musl; do
+            short=${pair%%:*}; triple=${pair#*:}
+            bin="target/$triple/release/filecat-agent"
+            desc=$(file -b "$bin"); echo "$short: $desc"
+            echo "$desc" | grep -Eq 'statically linked|static-pie linked' || { echo "::error::$short is not static"; exit 1; }
+            cp "$bin" "dist/filecat-agent-$ver-linux-$short"
+          done
+          (cd dist && sha256sum filecat-agent-* | tee SHA256SUMS)
+      - uses: actions/upload-artifact@v4
+        with:
+          name: filecat-agent-release
+          path: |
+            agent/dist/filecat-agent-*
+            agent/dist/SHA256SUMS
+          if-no-files-found: error
+
+  release:
+    name: publish the GitHub release
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: filecat-agent-release
+          path: dist
+      - name: Create the release with the agents and SHA256SUMS
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          notes=$(gh api "repos/$GITHUB_REPOSITORY/git/tags/$(gh api "repos/$GITHUB_REPOSITORY/git/ref/tags/$GITHUB_REF_NAME" --jq .object.sha)" --jq .message 2>/dev/null || true)
+          [ -n "$notes" ] || notes="filecat $GITHUB_REF_NAME"
+          gh release create "$GITHUB_REF_NAME" dist/filecat-agent-* dist/SHA256SUMS \
+            --repo "$GITHUB_REPOSITORY" --title "filecat $GITHUB_REF_NAME" \
+            --notes "$notes
+
+          Static Linux agents (musl): pick by \`uname -m\`: x86_64 -> linux-x86_64, armv7l -> linux-armv7, aarch64 -> linux-aarch64. Verify with \`sha256sum -c SHA256SUMS\`."
