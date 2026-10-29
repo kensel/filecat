@@ -128,6 +128,7 @@ All run **in-process** (a thread of the server), calling the functions the comma
 | `storage-collect` | `storage_cmd.collect_agent` then `topology_store.save_snapshot` for the job's agent | `filecat storage collect --agent NAME` |
 | `scan` | `scan.scan_roots` over the job's roots, forced through the job's agent | `filecat scan --agent NAME ROOT...` |
 | `store-resum` | a `scan` of the roots whose last finished scan is older than `min_age` | see below |
+| `summaries` | rebuild the stored summaries of the roots whose records changed since they were built | `filecat summaries` |
 
 Why in-process and not a subprocess: the commands are library functions already (`scan_roots`,
 `collect_agent`), a server needs the result (counts, outcome) and cancellation without parsing
@@ -144,6 +145,17 @@ catalog whose roots are not scanned often: for each root it selects it reads the
 (`rootinfo`), and scans (without `--force`) those whose `last_scan.finished_at` is older than
 `min_age` (default `store_resum` minus one day); when none is that old it ends `ok` with
 `stale_roots: 0` and does nothing. Typical: `every = "24h"`.
+
+**`summaries`.** Reads each root's records once and stores its aggregates and its depth-2 treemap
+(section 7, "Stored summaries"), for the roots with no summary or whose records changed after it
+was built; the others, and a root a scan is walking, are skipped. It reads the catalog, not an
+agent, so it has no `agent` (naming one is an error) and counts as the pseudo-agent `(local)`,
+like a scan no agent covers: it does not run beside one. `roots = [...]` limits it, `options =
+["--all"]` rebuilds every selected root whatever its state. The run's counts are `roots`,
+`refreshed`, `skipped`, `failed`; `failed` makes the outcome `errors`. A scan already ends by
+summarising the roots it changed, so this job is for what scans do not cover: records changed by
+other tools, a catalog restored or migrated, summaries lost to `--no-save` viewers. Typical:
+`every = "6h"`.
 
 **Roots.** `scan` and `store-resum` take `roots = [...]` or, when omitted, every root that agent
 covers: the catalog's roots for which `config.agent_for` picks that agent, plus the shares of the
@@ -251,7 +263,7 @@ serve               = "127.0.0.1:8765"   # optional: same as --serve
 
 [[server.jobs]]
 name      = "nas3-topology"     # unique; shown in history and the viewer
-kind      = "storage-collect"   # storage-collect | scan | store-resum
+kind      = "storage-collect"   # storage-collect | scan | store-resum | summaries
 agent     = "nas3"              # an [[agents]] name, or "*" for one job per agent
 every     = "24h"               # or: at = "02:30"  (or at = ["02:30", "14:30"])
 # run_on_start = true           # a never-run job runs at server start, not at its first slot
@@ -273,12 +285,17 @@ kind      = "store-resum"
 agent     = "*"
 every     = "24h"
 min_age   = "28d"               # default: [rollups] store_resum minus one day
+
+[[server.jobs]]
+name      = "summaries"
+kind      = "summaries"         # no agent: it reads the catalog
+every     = "6h"
 ```
 
 Validation (all errors name the table and key): unknown keys; a `name` used twice; `agent` not in
 `[[agents]]`; neither or both of `every` and `at`; `every` below 1 minute; `at` not `HH:MM`;
 `options` not a list of strings or containing a forbidden option; `roots` on `storage-collect`;
-`min_age` on a kind other than `store-resum`. With `agent = "*"` a job expands to one job per agent
+`min_age` on a kind other than `store-resum`; `agent` on `summaries`. With `agent = "*"` a job expands to one job per agent
 named `NAME@agent`.
 
 ## 6. Where the state lives
@@ -300,7 +317,8 @@ here.
   roots, counts, error, server}`. `outcome` is `running`, `ok`, `errors` (the run completed, some
   records carry errors: the exit code 1 of `scan`), `failed`, `cancelled`, `skipped` (with `error`
   holding the reason) or `lost`. `counts`: scan, files/dirs/bytes/errors summed from the root index
-  after the run and `roots`; storage-collect, `nodes`, `changed`; store-resum, `stale_roots`. The row is
+  after the run and `roots`; storage-collect, `nodes`, `changed`; store-resum, `stale_roots`; summaries,
+  `roots`, `refreshed`, `skipped`, `failed`. The row is
   written when the run starts (`running`) and replaced when it ends. Pruned to `history_keep` rows and
   `history_days` days at start and once a day.
 * `server_state`: key `lease` (section 4) and key `agents`, the last agent states, saved when one
@@ -409,12 +427,63 @@ with the reason, or absent.
   elsewhere (root index state `in_progress`). Then it deletes the root's index entry
   (`Backend.delete_root_info`), its stored aggregates and treemap snapshots (pins too), its dropped
   and sticky-redaction entries, and its entry in the resume files beside the catalog. The web never
-  deletes records. The page offers the button only where `removable` is true (the row's totals say
-  nothing is there and one record lookup found none) and asks with a `confirm()` dialog naming the
+  deletes records. The page offers the button only where `removable` is true (the row's totals and
+  last scan say nothing is there; no query is made, and the request checks the records again) and asks with a `confirm()` dialog naming the
   root. Shell equivalent: `filecat roots remove ROOT [--force [--yes]] [--dry-run]`; `--force` also
   deletes the records (after typing the root to confirm, unless `--yes`; without a terminal `--yes`
   is required), never while a scan runs. Samples and member sets that only those records named stay
   until `filecat samples prune` / `member-sets prune`.
+
+### Stored summaries (the Roots, Summary and Graph pages)
+
+On a catalog of tens of millions of records the pages the viewer is opened for most must not read
+the records. Each root therefore has one **stored summary**, built by `summaries.refresh` in a
+single pass over its records (`Backend.summary_docs`: only the fields a summary reads, and for
+MongoDB no directory or rollup records): the aggregates behind the Summary page
+(`aggregate.Aggregator`: totals, by extension, by type, by folder) and the treemap behind the Graph
+page (`treemap.build` over the root's top, rollups included), both at **depth 2**, stored with the
+same `built_at`, taken before the first record is read.
+
+* **Fresh by change, not by age.** The summary is current while it was built after the root's
+  *change stamp*: `changed_at` in the root-index document (`rootinfo.touch`), which every writer of a
+  root's records sets. `--graph-max-age` does not apply to it; it only decides how long a treemap of a
+  folder or of another depth, built on demand, is reused. States: `fresh`, `stale` (the root changed
+  after the build), `scanning` (a scan is walking the root: what is stored is served marked stale and
+  is rebuilt when the scan ends, not while it writes) and `missing`.
+* **Who stamps.** A scan, in `rootinfo.finish`, when it wrote or removed a file or a rollup
+  (`ScanTracker.changed`; folder records are rewritten by every scan and no summary reads them, so a
+  scan that found nothing leaves the stamp, and the summary, as they were; this includes the
+  `store-resum` job, which is a scan); `roots case-merge`; `rollups migrate`; the purge of a
+  redacted folder (`redaction.cleanup`); `enrich`; `import` and `migrate` (the roots they wrote).
+  `roots remove` needs none: it deletes the summary with the root. Releasing or approving a
+  redaction changes no record (the next scan does). A root-index entry from before the stamp uses its
+  last scan's end; a "running" attempt counts from its last heartbeat, so a scan that was killed
+  after writing is stale too.
+* **Who builds.** The end of a scan (`summaries.after_scan`, only roots that need it, replacing the
+  aggregates rebuild it did), the `summaries` job above, `filecat summaries [refresh] [--root R]
+  [--all | --stale]` and `filecat summaries status [--json]`, and the viewer: opening the Summary or
+  the Graph of a stale or missing root queues **one** rebuild per root on a single background thread
+  with a backend connection of its own (a JSONL catalog, one file, rebuilds on the backend thread
+  instead), so several stale roots queue instead of all reading the catalog at once, and a page load
+  never waits for a pass.
+* **What a page gets.** `GET /api/summary?root=` at depth 2 and `GET /api/treemap?root=` (no
+  prefix, depth 2) answer from what is stored at once, with `stale`, `state`, `refreshing` and
+  `refresh_error`; with nothing stored they answer `building: true` and the page asks again every
+  few seconds. `?rebuild=1` / `?refresh=1` queue a rebuild and still serve what is stored. Any other
+  depth or folder is built on demand as before. With `--no-save`, or a backend that cannot store
+  treemaps, the old in-memory path is used for every view.
+* **The Roots page** reads the root index, `Backend.stored_totals` (the aggregate totals without
+  their tables) and nothing per root: no `DISTINCT` over the records, no record lookup for
+  `removable` (judged from the totals and the last scan; the remove action checks the records
+  itself and answers 409 if any remain). A root that has records but neither an index entry nor
+  stored totals, which only a hand-made catalog can have (`import` and `migrate` build totals), is
+  found by the distinct roots of the records, listed once in the background, trusted for ten
+  minutes, and waited for at most two seconds the first time. Each row carries `summary_state`,
+  `refreshing` and the age of the summary; **Refresh** (`POST /api/summaries/refresh {"root"}`, 202
+  queued) has the guards of Scan now: only inside `filecat server --serve`, the login, the CSRF checks.
+* **Responses** carry `Server-Timing: app;dur=` and `X-Filecat-Time`, the access log line ends with
+  the time, JSON over 8 KiB is gzipped when the client accepts it, and a stored summary has a weak
+  `ETag` (its build and state) with 304 on `If-None-Match`.
 
 Residual risk: over plain HTTP the password and the cookie travel in clear text. Bind to loopback
 (the default), or turn on the viewer's own TLS (next subsection), before using this over a network.

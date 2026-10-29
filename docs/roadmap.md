@@ -266,6 +266,14 @@ server keeps store detection, manifest verification, probing and Ollama.
   - [ ] Then: the Rust agent with `read_file`, `statfs`, `run`, `capabilities`;
     derived share entries merged into `ShareMap` (config wins); Proxmox and
     TrueNAS collectors.
+  - [x] Fast Roots and Graph pages on a catalog of tens of millions of records: one stored summary per
+    root (aggregates and the depth-2 treemap from one pass over its records, `filecat summaries`), fresh
+    until the root changes (a change stamp in the root index, not an age), rebuilt in the background by
+    the viewer, at the end of a scan that changed something, and by the `summaries` server job; the
+    Roots page reads only the root index and the stored totals; Server-Timing, gzip and ETag
+    ([web viewer](../README.md#web-viewer), [agent-server.md](agent-server.md#stored-summaries-the-roots-summary-and-graph-pages)).
+    Not done: a SQL/pipeline version of the single pass for the server backends (it reads the
+    projected records once, in Python), and a per-folder stamp so a deeper view could be kept too.
   - [x] The viewer drill-down: the **Topology** page (`GET /api/topology`):
     per host a collapsible tree from the disks to shares, LUNs and VM disks
     with capacity bars, shares joined to their catalog roots, links between

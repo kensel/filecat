@@ -289,16 +289,17 @@ function duration(sec) {
 }
 let rootsTimer = null;
 let rootsNote = "";         // the answer to the last Scan / Remove, kept across the page's refreshes
-// Scan now / Remove: the same login as "Run now". No session: the password form opens in the note, then
-// the action is repeated; the session is an HttpOnly cookie, nothing is kept in the page.
+// Scan now / Remove / Refresh: the same login as "Run now". No session: the password form opens in the note,
+// then the action is repeated; the session is an HttpOnly cookie, nothing is kept in the page.
+const ROOT_PATHS = {scan: "/api/roots/scan", remove: "/api/roots/remove", refresh: "/api/summaries/refresh"};
 async function rootAction(kind, root, confirmed) {
   const msg = document.getElementById("roots-msg");
   if (kind === "remove" && !confirmed && !confirm(`Remove the root ${root} from the catalog?\n\n`
       + "It has no records. Its scan history, summary and treemap snapshots are forgotten."
       + " Scanning it again brings it back.")) return;
   try {
-    const res = await post("/api/roots/" + kind, kind === "remove" ? {root, confirm: root} : {root});
-    rootsNote = kind === "scan" ? (res.message || `scan of ${root} queued`) : `${root} was removed.`;
+    const res = await post(ROOT_PATHS[kind], kind === "remove" ? {root, confirm: root} : {root});
+    rootsNote = kind === "remove" ? `${root} was removed.` : (res.message || `${kind} of ${root} queued`);
     viewRoots();
   } catch (e) {
     if (e.status === 401 && e.login) {
@@ -316,8 +317,11 @@ async function viewRoots() {
   if (parseHash().view !== "roots") return;
   const now = data.now;
   const live = data.roots.some(r => r.state === "in_progress" || r.busy);
+  const building = data.roots.some(r => r.refreshing);
   const control = data.control || {available: false, reason: ""};
-  fill(card, h("h2", {}, "Roots", h("small", {}, `${num(data.roots.length)} in this catalog` + (live ? " · refreshing every 30s while a scan runs" : ""))),
+  control.stores = data.stores;
+  fill(card, h("h2", {}, "Roots", h("small", {}, `${num(data.roots.length)} in this catalog`
+      + (building ? " · summaries are being rebuilt, refreshing every 8s" : live ? " · refreshing every 30s while a scan runs" : ""))),
     h("div", {class: "scroll"}, h("table", {},
       h("thead", {}, h("tr", {}, h("th", {}, "root"), h("th", {}, "scan"), h("th", {class: "num"}, "files"),
         h("th", {class: "num"}, "size"), h("th", {}, "newest file"), h("th", {}, "last error"), h("th", {}, ""))),
@@ -328,7 +332,7 @@ async function viewRoots() {
   fill($main, card);
   window.scrollTo(0, y);
   // not while the login form is open: a refresh would wipe what is being typed
-  if (live) rootsTimer = setTimeout(() => { if (parseHash().view === "roots" && !document.querySelector("#roots-msg input")) viewRoots(); }, 30000);
+  if (live || building) rootsTimer = setTimeout(() => { if (parseHash().view === "roots" && !document.querySelector("#roots-msg input")) viewRoots(); }, building ? 8000 : 30000);
 }
 function rootRow(r, now, control) {
   const root = r.root, info = r.info || {}, a = info.last_attempt || {}, last = info.last_scan;
@@ -371,8 +375,18 @@ function rootRow(r, now, control) {
         h("a", {href: route("records", {root})}, "records"))),
     h("td", {class: "wide"}, scan),
     h("td", {class: "num"}, s ? num(s.total_files) : ""),
-    h("td", {class: "num", title: s ? num(s.total_bytes) + " bytes" : ""}, s ? bytes(s.total_bytes) : ""),
+    h("td", {class: "num", title: s ? num(s.total_bytes) + " bytes" : ""}, s ? bytes(s.total_bytes) : "", summaryNote(r, now)),
     newest, errCell, rootButtons(r, control));
+}
+// How current the stored summary of a root is: built when, and a badge when the root changed after it.
+function summaryNote(r, now) {
+  const s = r.summary;
+  if (!s) return r.refreshing ? h("span", {class: "sub"}, h("span", {class: "badge live"}, "summarising…")) : null;
+  const badge = r.refreshing ? h("span", {class: "badge live"}, "stale, refreshing…")
+    : r.summary_state === "stale" ? h("span", {class: "badge warn"}, "stale")
+    : r.summary_state === "scanning" ? h("span", {class: "badge live"}, "scanning") : null;
+  return h("span", {class: "sub", title: "the totals come from the summary built " + stamp(s.built_at)},
+    s.built_at ? `built ${ago(s.built_at, now)}` : "", badge ? " " : null, badge);
 }
 function rootButtons(r, control) {
   const ok = control && control.available;
@@ -381,6 +395,9 @@ function rootButtons(r, control) {
     h("button", {disabled: !ok || scanning,
       title: !ok ? (control && control.reason) : r.busy ? r.busy : scanning ? "a scan is running" : "scan exactly this root now",
       onclick: () => rootAction("scan", r.root)}, r.busy && r.busy.includes("queued") ? "Queued" : "Scan"),
+    control && control.stores ? h("button", {disabled: !ok || !!r.refreshing,
+      title: !ok ? (control && control.reason) : r.refreshing ? "being rebuilt" : "rebuild this root's summary and treemap now",
+      onclick: () => rootAction("refresh", r.root)}, r.refreshing ? "Refreshing" : "Refresh") : null,
     r.removable ? h("button", {class: "danger", disabled: !ok, title: ok ? "forget this root: it has no records" : control && control.reason,
       onclick: () => rootAction("remove", r.root)}, "Remove") : null);
 }
@@ -464,13 +481,16 @@ const TABLES = [
   {key: "mime", title: "Types", label: "type"},
   {key: "dir", title: "Directories", label: "directory"},
 ];
-async function viewSummary(params, rebuild) {
+async function viewSummary(params, rebuild, quiet) {
   const root = curRoot(params), depth = params.depth || "2";
-  show(h("div", {class: "loading"}, rebuild ? "Rebuilding the summary…"
-    : "Loading summary… (a root with no saved summary is computed from its records and saved, which can take a while)"));
+  if (!quiet) show(h("div", {class: "loading"}, rebuild ? "Rebuilding the summary…"
+    : "Loading summary… (a depth other than 2 is computed from the records, which can take a while)"));
   let s;
   try { s = await api("/api/summary", {root, depth, rebuild: rebuild ? 1 : ""}); }
   catch (e) { return show(failed(e)); }
+  // the stored summary is built in the background: nothing stored yet, or one being rebuilt, asks again
+  const again = () => setTimeout(() => { const at = parseHash(); if (at.view === "summary" && curRoot(at.params) === root) viewSummary(params, false, true); }, 3000);
+  if (s.building) { show(h("div", {class: "loading"}, "This root has no summary yet; the server is building it from the records (one pass, which can take minutes on a big root)…")); return again(); }
   const depthSel = h("select", {onchange: e => go("summary", {root, depth: e.target.value})},
     [1, 2, 3, 4, 5, 6].map(d => h("option", {value: d, selected: String(d) === String(depth)}, d)));
   const kpis = h("div", {class: "kpis"},
@@ -481,21 +501,27 @@ async function viewSummary(params, rebuild) {
   );
   const builtAt = s.built_at ? new Date(s.built_at).toLocaleString() : "";
   const note = h("span", {class: "note"}, {
-    stored: `Saved summary from ${builtAt}.`,
+    stored: `Saved summary from ${builtAt} (${ago(s.built_at)}).`,
     saved: `Computed from the records and saved just now (${builtAt}).`,
     computed: s.stored_depth != null
       ? `Computed from the records; the saved summary is at depth ${s.stored_depth}.`
       : "Computed from the records (not saved: --no-save).",
   }[s.source] || "");
   const button = s.can_save
-    ? h("button", {title: "recompute from the records and save it in the catalog", onclick: () => viewSummary(params, true)},
-        s.source === "computed" ? `Save at depth ${depth}` : "Rebuild & save")
+    ? h("button", {title: "recompute from the records and save it in the catalog", disabled: !!s.refreshing,
+        onclick: () => viewSummary(params, true)}, s.refreshing ? "Rebuilding…" : s.source === "computed" ? `Save at depth ${depth}` : "Rebuild & save")
     : h("button", {onclick: () => viewSummary(params, true)}, "Recompute");
   const tools = h("div", {class: "toolbar"}, h("label", {}, "Directory depth ", depthSel), button, note);
   const cards = TABLES.map(t => summaryCard(t, s[t.key] || [], root, depth));
   show(h("div", {}, tools, kpis, h("div", {class: "grid"}, cards)));
-  if (s.source === "stored") {
-    // A saved summary goes stale as scans add or change records: compare with the records now.
+  if (s.state) {      // the server judges a depth-2 summary by the root's change stamp, so there is nothing to compare
+    if (s.stale) note.append(" ", h("span", {class: "badge " + (s.refreshing ? "live" : "warn")}, s.refreshing ? "stale, refreshing…" : "stale"),
+      s.state === "scanning" ? " A scan is running; the summary is rebuilt when it ends."
+        : " The root changed after this was built." + (s.refresh_error ? ` The last rebuild failed: ${s.refresh_error}.` : ""));
+    else note.append(" Current: the root has not changed since.");
+    if (s.refreshing || s.state === "scanning") again();
+  } else if (s.source === "stored") {
+    // A saved summary at another depth: compare with the records now.
     api("/api/records", {root, files_only: 1, limit: 1}).then(now => {
       const files = s.total_files - s.unreadable;
       if (now.total === files && now.bytes === s.total_bytes) return note.append(" Up to date with the records.");
@@ -600,11 +626,17 @@ function ageText(seconds) {
   return seconds >= 5400 ? `${+(seconds / 3600).toFixed(1)} h` : `${Math.round(seconds / 60)} min`;
 }
 
-async function getTreemap(root, prefix, depth, refresh) {
+async function getTreemap(root, prefix, depth, refresh, alive) {
   const key = `${root}|${prefix}|${depth}`;
   const hit = TREEMAPS.get(key);
-  if (!refresh && hit && Date.now() - hit.at < CLIENT_CACHE_MS) return hit.data;
-  const t = await api("/api/treemap", {root, prefix, depth, refresh: refresh ? 1 : ""});
+  if (!refresh && hit && Date.now() - hit.at < CLIENT_CACHE_MS && !hit.data.stale) return hit.data;
+  let t = await api("/api/treemap", {root, prefix, depth, refresh: refresh ? 1 : ""});
+  // a root with no stored summary is being summarised on the server: ask again until it is there
+  for (let tries = 0; t.building && tries < 900 && (!alive || alive()); tries++) {
+    await new Promise(r => setTimeout(r, 2000));
+    t = await api("/api/treemap", {root, prefix, depth});
+  }
+  if (t.building) throw new Error("still being summarised on the server; try again in a while");
   TREEMAPS.set(key, {at: Date.now(), data: t});
   return t;
 }
@@ -824,7 +856,7 @@ async function viewGraph(params, force) {
   const depthSel = h("select", {onchange: e => go("graph", {...p, depth: e.target.value, at: null, vs: null,
                                                             color: mode === "change" ? "suffix" : mode})},
     [1, 2, 3, 4].map(d => h("option", {value: d, selected: String(d) === String(depth)}, d)));
-  const refresh = h("button", {title: "summarise again from the records now, instead of the saved snapshot"}, "Refresh");
+  const refresh = h("button", {title: "summarise again from the records now, instead of the saved snapshot; the old one is shown until the new one is ready"}, "Refresh");
   const snapSel = h("select", {disabled: true, onchange: e => go("graph", {...p, at: e.target.value || null})},
     h("option", {value: ""}, "Latest"));
   const vsSel = h("select", {disabled: true, onchange: e => go("graph", {...p, vs: e.target.value || null,
@@ -961,6 +993,15 @@ async function viewGraph(params, force) {
   ro.observe(box);
   const stopWatch = () => { if (gen !== graphGen) { ro.disconnect(); return true; } return false; };
 
+  // A stored summary of a root that changed since: say so, and look again while the server rebuilds it.
+  function staleNote(tms) {
+    const stale = tms.filter(t => t.stale);
+    if (!stale.length || viewPin) return;
+    const busy = stale.some(t => t.refreshing || t.state === "scanning");
+    status.append(" ", h("span", {class: "badge " + (busy ? "live" : "warn")},
+      stale.length > 1 ? `${num(stale.length)} stale, refreshing…` : busy ? "stale, refreshing…" : "stale"));
+    if (busy) setTimeout(() => { if (gen === graphGen) viewGraph(params); }, tms.length > 1 ? 10000 : 6000);
+  }
   function kpi(value, label, title) { return h("div", {class: "kpi", title: title || ""}, h("b", {}, value), h("span", {}, label)); }
   function waiting(text) {
     const t0 = Date.now();
@@ -1042,6 +1083,7 @@ async function viewGraph(params, force) {
     return {grew, shrank, net: grew + shrank, count: rows.length};
   }
   const describe = t => t.source === "pinned" || viewPin ? `pinned snapshot built ${stamp(t.built_at)}`
+    : t.source === "stored" && t.state ? `saved summary built ${stamp(t.built_at)} (${ago(t.built_at)}), current until the root changes`
     : t.source === "stored" ? `saved snapshot built ${stamp(t.built_at)} (${ago(t.built_at)}), reused until ${ageText(t.max_age)} old`
     : t.source === "saved" ? "summarised just now and saved"
     : t.source === "memory" ? `summarised ${ago(t.built_at)}, kept in memory (not saved)` : "summarised just now (not saved)";
@@ -1054,7 +1096,7 @@ async function viewGraph(params, force) {
       if (viewPin) tm = await getSnapshot(viewPin.snapshots.find(s => s.root === root).id);
       else {
         waiting(`Summarising ${prefix ? root + "\\" + prefix.replaceAll("/", "\\") : root} on the server, unless a saved snapshot is recent enough: it reads every file record beneath it, so a big share takes a while…`);
-        tm = await getTreemap(root, prefix, depth, force);
+        tm = await getTreemap(root, prefix, depth, force, () => gen === graphGen);
       }
       await loadBaseline(root);
     } catch (e) { if (gen === graphGen) fill(status, failed(e)); return; }
@@ -1064,6 +1106,7 @@ async function viewGraph(params, force) {
     enablePin();
     status.textContent = (viewPin ? `Viewing ${pinName(viewPin)}: ` : "Latest: ") + describe(tm) + "."
       + (vsPin ? ` Compared with ${pinName(vsPin)}.` : "") + (viewPin ? "" : " Refresh re-reads the records now.");
+    staleNote([tm]);
     tree = folderTree(tm, root, prefix ? prefix.split("/").pop() : root, "folder");
     const sub = tree.kids.filter(k => k.kind !== "files");
     const cards = [kpi(num(tm.files), "files"), kpi(bytes(tm.bytes), num(tm.bytes) + " bytes"), kpi(num(sub.length), "folders directly here")];
@@ -1153,7 +1196,7 @@ async function viewGraph(params, force) {
     if (!viewPin) waiting(`Loading ${node.root} (${done + 1} of ${order.length}): a saved snapshot if it is recent enough, or the server reads its records…`);
     try {
       const tm = viewPin ? await getSnapshot(viewPin.snapshots.find(s => s.root === node.root).id)
-                         : await getTreemap(node.root, "", depth, force);
+                         : await getTreemap(node.root, "", depth, force, () => gen === graphGen);
       await loadBaseline(node.root);
       if (stopWatch()) return;
       shown.push(tm);
@@ -1188,6 +1231,7 @@ async function viewGraph(params, force) {
   if (vsPin) text += ` Compared with ${pinName(vsPin)}` + (baselineRoots.size < loaded.length ? ` (${num(loaded.length - baselineRoots.size)} roots not in it).` : ".");
   if (failedRoots.length) text += ` ${failedRoots.length} failed: ${failedRoots.map(n => n.root).join(", ")}.`;
   status.textContent = text;
+  staleNote(loaded);
 }
 
 // --- records ---------------------------------------------------------

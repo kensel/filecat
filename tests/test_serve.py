@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import json
 import threading
+import time
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -57,6 +58,17 @@ def base_url(served):
 def get(base, path, **params):
     with urllib.request.urlopen(f"{base}{path}?{urllib.parse.urlencode(params)}") as r:
         return json.load(r)
+
+
+def settled(base, path, until=None, **params):
+    """GET until the stored summary is neither being built nor rebuilt (and `until(data)`, if given)."""
+    deadline = time.monotonic() + 20
+    while True:
+        data = get(base, path, **params)
+        if not data.get("building") and not data.get("refreshing") and (until is None or until(data)):
+            return data
+        assert time.monotonic() < deadline, data
+        time.sleep(0.05)
 
 
 def test_page_and_info(base_url):
@@ -116,7 +128,9 @@ def test_summary_is_saved_once_and_rebuilt_on_request(served, catalog_path):
         assert first["source"] == "computed" and first["can_save"] is False
         assert _stored(catalog_path) is None
         return
-    assert first["source"] == "saved" and first["total_bytes"] == 100
+    assert first["building"] is True and first["source"] == "building" and first["stale"] is True
+    first = settled(base, "/api/summary", root=ROOT, depth=2)      # built in the background, then stored
+    assert first["source"] == "stored" and first["total_bytes"] == 100 and first["stale"] is False
     saved = _stored(catalog_path)
     assert saved["depth"] == 2 and saved["built_at"] == first["built_at"]
 
@@ -135,7 +149,10 @@ def test_summary_is_saved_once_and_rebuilt_on_request(served, catalog_path):
 def test_treemap_is_reused_until_refresh(served, catalog_path):
     base, no_save = served
     t = get(base, "/api/treemap", root=ROOT)
-    assert t["source"] == ("computed" if no_save else "saved")
+    if not no_save:
+        assert t["building"] is True and t["source"] == "building"
+        t = settled(base, "/api/treemap", root=ROOT)
+    assert t["source"] == ("computed" if no_save else "stored")
     assert (t["files"], t["bytes"], t["depth"]) == (3, 100, 2)
     assert {f["path"]: f["bytes"] for f in t["folders"]} == {"": 0, "docs": 10, "docs/deep": 90}
     with SqliteBackend(catalog_path) as b:
@@ -143,8 +160,11 @@ def test_treemap_is_reused_until_refresh(served, catalog_path):
         assert len(b.list_treemaps(ROOT)) == (0 if no_save else 1)
     again = get(base, "/api/treemap", root=ROOT)
     assert again["source"] == ("memory" if no_save else "stored") and again["bytes"] == 100
-    fresh = get(base, "/api/treemap", root=ROOT, refresh=1)
-    assert fresh["source"] in ("computed", "saved") and fresh["bytes"] == 105
+    fresh = get(base, "/api/treemap", root=ROOT, refresh=1)     # saved: queued, the stored one is served meanwhile
+    if not no_save:
+        assert fresh["source"] == "stored"
+        fresh = settled(base, "/api/treemap", until=lambda d: d["bytes"] == 105, root=ROOT)
+    assert fresh["source"] in ("computed", "stored") and fresh["bytes"] == 105
     with SqliteBackend(catalog_path) as b:  # the older unpinned snapshot is gone
         assert [m["bytes"] for m in b.list_treemaps(ROOT)] == ([] if no_save else [105])
     sub = get(base, "/api/treemap", root=ROOT, prefix="docs", depth=1)
@@ -155,7 +175,7 @@ def test_snapshots_outlive_the_server_and_expire(catalog_path):
     catalog, server = _start(catalog_path)
     base = f"http://127.0.0.1:{server.server_address[1]}"
     try:
-        first = get(base, "/api/treemap", root=ROOT)
+        first = settled(base, "/api/treemap", root=ROOT)
     finally:
         server.shutdown(), server.server_close(), catalog.close()
     catalog, server = _start(catalog_path)
@@ -164,7 +184,12 @@ def test_snapshots_outlive_the_server_and_expire(catalog_path):
         again = get(base, "/api/treemap", root=ROOT)
         assert again["source"] == "stored" and again["id"] == first["id"]
         catalog.max_age = serve.timedelta(0)  # as if two hours had passed
-        assert get(base, "/api/treemap", root=ROOT)["source"] == "saved"
+        # the root's top at depth 2 is judged by the root, not by age ...
+        kept = get(base, "/api/treemap", root=ROOT)
+        assert kept["source"] == "stored" and kept["id"] == first["id"] and kept["stale"] is False
+        # ... any other view is built on demand and reused for --graph-max-age only
+        assert get(base, "/api/treemap", root=ROOT, depth=3)["source"] == "saved"
+        assert get(base, "/api/treemap", root=ROOT, depth=3)["source"] == "saved"
     finally:
         server.shutdown(), server.server_close(), catalog.close()
 
@@ -172,6 +197,8 @@ def test_snapshots_outlive_the_server_and_expire(catalog_path):
 def test_pin_view_and_unpin(served, catalog_path):
     base, no_save = served
     t = get(base, "/api/treemap", root=ROOT)
+    if not no_save:
+        t = settled(base, "/api/treemap", root=ROOT)
     if no_save:
         assert t["can_pin"] is False and t["id"] is None
         with pytest.raises(urllib.error.HTTPError) as exc:
@@ -184,8 +211,9 @@ def test_pin_view_and_unpin(served, catalog_path):
     assert pinned["pin"]["label"] == "before cleanup"
     with SqliteBackend(catalog_path) as b:
         b.put(new_document(ROOT, "docs/more.bin", kind="data", size=5))
-    fresh = get(base, "/api/treemap", root=ROOT, refresh=1)
-    assert fresh["id"] != t["id"] and fresh["bytes"] == 105
+    get(base, "/api/treemap", root=ROOT, refresh=1)
+    fresh = settled(base, "/api/treemap", until=lambda d: d["id"] != t["id"], root=ROOT)
+    assert fresh["bytes"] == 105
     [group] = get(base, "/api/pins")["pins"]
     assert group["at"] == at and [s["id"] for s in group["snapshots"]] == [t["id"]]
     old = get(base, "/api/treemap", id=t["id"])

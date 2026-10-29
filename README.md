@@ -91,6 +91,8 @@ filecat scan D:\Games --ollama --model gemma4:31b-cloud
 filecat scan \\192.0.2.13\home --alias \\192.0.2.13=\\nas-main   # read by IP, record as \\nas-main\home
 filecat summary --out catalog.sqlite [--by extension|mime|dir] [--depth 2] [--root R] [--top 50]
 filecat summary --disagree                                # name says one type, bytes another
+filecat summaries [--root R] [--all | --stale]             # rebuild the stored summaries the viewer shows (default: roots changed since)
+filecat summaries status [--json]                         # what is stored, when built, when the root last changed
 filecat show "sub/dir/file.txt" --root D:\Games
 filecat roots                                             # last scan, in progress, newest file, last error
 filecat roots case-check                                  # one share recorded as two roots (server\share case)?
@@ -434,7 +436,8 @@ filecat roots remove ROOT [--force [--yes]] [--dry-run]
 ```
 
 The web viewer's Roots page shows the same table, refreshing while a scan
-runs. Roots scanned before the index existed, or added by `import`, show
+runs, from the root index and the stored summaries alone (how old each is,
+and whether the root changed since: `filecat summaries status`). Roots scanned before the index existed, or added by `import`, show
 "not scanned". Their newest file is read from the records.
 
 `roots remove ROOT` forgets a root that should not be there, such as a typo
@@ -513,9 +516,16 @@ has these views:
   seconds for a large share. Roots without a summary yet are sized from the
   root index until theirs arrives.
 
-  Each treemap is saved in the catalog as a snapshot and reused until it is
-  `--graph-max-age` minutes old (default 120). After that, the next viewer
-  gets a fresh one. **Refresh** re-reads the records now. **📌 Pin** keeps
+  Each root's top, two folders deep, is its stored summary: the Summary tables
+  and this treemap come from one pass over its records, saved in the catalog
+  and served at once for as long as the root has not changed (no age limit;
+  a scan that wrote or removed files, or any other tool that changed the
+  root, makes it stale). A stale one is shown marked "stale, refreshing…"
+  while the server rebuilds it in the background, and a root with none is
+  built on first use (`filecat summaries` and the scan's end build them
+  too). A folder or another depth is summarised on demand, saved as a
+  snapshot and reused until it is `--graph-max-age` minutes old (default
+  120). **Refresh** rebuilds now, keeping what is shown until it is ready. **📌 Pin** keeps
   the snapshots on screen indefinitely, with the time and an optional label.
   On the overview one pin covers every root. **Snapshot** switches the page
   between the latest and any pin. **Compare with** picks a pin to measure

@@ -3,11 +3,15 @@
 Read-only. Serves one page (filecat/web/index.html) and a JSON API:
 
     GET /api/info                      backend, location, roots
-    GET /api/roots                     the root index (rootinfo.index): scans, state, totals
-    GET /api/summary?root=&depth=&rebuild=   stored aggregates for one root
+    GET /api/roots                     the root index (rootinfo.index): scans, state, stored totals and how
+                                       current each root's summary is; no query per root
+    GET /api/summary?root=&depth=&rebuild=   stored aggregates for one root; at depth 2 the stored summary
+                                       (summaries.py), stale or "building" while one is rebuilt
     GET /api/records?<browse query>    Backend.query(), rows trimmed for a table
     GET /api/subtree?root=&parent=     Backend.subtree(): child folders with totals
-    GET /api/treemap?root=&prefix=&depth=&refresh=   folders beneath prefix split by extension/type
+    GET /api/treemap?root=&prefix=&depth=&refresh=   folders beneath prefix split by extension/type; the
+                                       root's top at depth 2 is the stored summary, any other view is built
+                                       on demand and reused for --graph-max-age
     GET /api/treemap?id=               one stored snapshot (a pinned one, say)
     GET /api/pins?root=&prefix=&depth= the pinned snapshots of that view, grouped by pin
     GET /api/search?q=&root=&host=&ext=&min_size=&max_size=&after=&before=&kind=&sort=&limit=&offset=
@@ -33,6 +37,8 @@ Read-only. Serves one page (filecat/web/index.html) and a JSON API:
     POST /api/roots/scan {"root": ...} queue an ad-hoc scan of exactly that root (same guards as run now)
     POST /api/roots/remove {"root": ..., "confirm": <root>}
                                        remove a root that has no records (same guards; 409 otherwise)
+    POST /api/summaries/refresh {"root": ...}
+                                       queue a rebuild of that root's stored summary (same guards)
 
 The HTTP side is threaded, but every backend call runs on one worker
 thread that owns the connection: sqlite3 connections (and some drivers)
@@ -41,10 +47,17 @@ little from parallel queries. Switching backends is one more job on that
 thread, under a lock that also guards the settings it changes. Summaries
 are read from the backend's stored aggregates; see Catalog.summary for
 when they are computed and saved. Treemaps (treemap.py) read every file
-beneath the folder, so each is saved in the catalog as a snapshot and
-reused until it is --graph-max-age old; see treemap.py for pins. Apart
-from saving aggregates and snapshots, and pinning (all off with
---no-save, which keeps treemaps in memory instead), the server never writes.
+beneath the folder, so each is saved in the catalog as a snapshot; see
+treemap.py for pins. Apart from saving aggregates and snapshots, and
+pinning (all off with --no-save, which keeps treemaps in memory instead),
+the server never writes.
+
+The default views, a root's summary and its treemap at depth 2 from the top, are the stored
+summary of summaries.py: served at once while the root has not changed since it was built (however
+old), served marked stale while one background thread, on a backend connection of its own,
+rebuilds it, and answered `building` when nothing is stored yet. Only the narrower or deeper
+treemaps, built on demand, are reused until --graph-max-age old. Responses carry Server-Timing,
+JSON over 8 KiB is gzipped when the client accepts it, and a stored summary has an ETag.
 
 Plain HTTP unless TLS is asked for: `--tls self-signed|acme`, `--tls-cert/--tls-key`, or a
 [server.tls] table in filecat.toml make the viewer serve HTTPS itself (tls.py; docs/agent-server.md
@@ -55,9 +68,12 @@ anything else prints a warning.
 from __future__ import annotations
 
 import copy
+import gzip
 import itertools
 import json
+import logging
 import os
+import queue
 import re
 import ssl
 import sys
@@ -74,7 +90,7 @@ from pathlib import Path, PureWindowsPath
 from typing import Any, Callable
 from urllib.parse import parse_qs, urlsplit
 
-from . import browse, config, control_auth, tls, treemap
+from . import browse, config, control_auth, rootinfo, summaries, tls, treemap
 from .backends import open_backend
 
 _EMPTY = {"suffix": [], "mime": [], "dir": [], "total_files": 0, "total_bytes": 0, "unreadable": 0}
@@ -83,6 +99,10 @@ ROLLUP_FIELDS = ("tag", "total_files", "total_dirs", "matched", "partial", "erro
 MEMBER_LIMIT = 500
 TREEMAP_CACHE = 256
 MAX_DEPTH = 6
+GZIP_MIN = 8 * 1024         # JSON bodies smaller than this go out as they are
+ROOTS_TTL = timedelta(minutes=10)   # how long the distinct roots of the records are trusted
+COLD_WAIT = 2.0             # seconds the first look waits for them; a big catalog answers without
+log = logging.getLogger("filecat.serve")
 
 
 def _row(doc: dict[str, Any]) -> dict[str, Any]:
@@ -124,6 +144,70 @@ def _short(backend: str, location: str) -> str:
     return location
 
 
+class Refresher:
+    """One daemon thread that runs the background jobs the viewer asks for (rebuilding a root's stored
+    summary, listing the distinct roots), one at a time, so several stale roots queue behind each
+    other instead of all reading the catalog at once. A job is named by a key and is queued once
+    while it is waiting or running. The jobs open their own backend connection; this class does not."""
+
+    def __init__(self, say: Callable[[str], None]) -> None:
+        self._say = say
+        self._queue: queue.Queue[Any] = queue.Queue()
+        self._lock = threading.Lock()
+        self._changed = threading.Condition(self._lock)
+        self._pending: dict[Any, str] = {}      # key -> "queued" | "running"
+        self.errors: dict[Any, str] = {}        # key -> why its last run failed
+        self._thread: threading.Thread | None = None
+
+    def request(self, key: Any, work: Callable[[], None]) -> bool:
+        """Queue `work` unless `key` is already queued or running; True when it was queued."""
+        with self._lock:
+            if key in self._pending:
+                return False
+            self._pending[key] = "queued"
+            if self._thread is None:
+                self._thread = threading.Thread(target=self._loop, name="filecat-refresh", daemon=True)
+                self._thread.start()
+        self._queue.put((key, work))
+        return True
+
+    def state(self, key: Any) -> str | None:
+        with self._lock:
+            return self._pending.get(key)
+
+    def wait_idle(self, timeout: float = 30.0) -> bool:
+        """Block until nothing is queued or running (for tests and shutdown)."""
+        with self._changed:
+            return self._changed.wait_for(lambda: not self._pending, timeout)
+
+    def wait_key(self, key: Any, timeout: float) -> bool:
+        """Block until `key` is neither queued nor running, for at most `timeout` seconds."""
+        with self._changed:
+            return self._changed.wait_for(lambda: key not in self._pending, timeout)
+
+    def stop(self) -> None:
+        self._queue.put(None)
+
+    def _loop(self) -> None:
+        while True:
+            item = self._queue.get()
+            if item is None:
+                return
+            key, work = item
+            with self._lock:
+                self._pending[key] = "running"
+            try:
+                work()
+                self.errors.pop(key, None)
+            except Exception as exc:        # keep serving; the page shows why the rebuild failed
+                self.errors[key] = f"{type(exc).__name__}: {exc}"
+                self._say(f"background {key[-2:]} failed: {self.errors[key]}")
+            finally:
+                with self._changed:
+                    self._pending.pop(key, None)
+                    self._changed.notify_all()
+
+
 class Catalog:
     """The backend plus the single thread allowed to touch it."""
 
@@ -134,6 +218,10 @@ class Catalog:
         self._backend = None
         self._summaries: dict[tuple[str, int], dict[str, Any]] = {}
         self._treemaps: dict[tuple[str, str, int], dict[str, Any]] = {}
+        self._stores: bool | None = None            # whether the backend stores snapshots (_stores_treemaps)
+        self._distinct: set[str] | None = None      # the distinct roots of the records, refreshed in the background
+        self._distinct_at: datetime | None = None
+        self.refresher = Refresher(lambda m: None if self.args.quiet else sys.stderr.write(f"filecat serve: {m}\n"))
         self._started = (self.args.backend, self.args.out, self.args.dsn)
         self.coordinator: Any = None    # set by `filecat server --serve`: the live agents and jobs
         self.auth: Any = getattr(self.args, "control_auth", None)   # control_auth.ControlAuth or None
@@ -141,6 +229,7 @@ class Catalog:
         minutes = getattr(self.args, "graph_max_age", None)
         self.max_age = timedelta(minutes=minutes) if minutes is not None else treemap.MAX_AGE
         self.call(lambda b: None)  # open now, so a bad DSN fails at startup
+        self._request_roots()
 
     def call(self, fn: Callable[[Any], Any]) -> Any:
         def run() -> Any:
@@ -150,15 +239,73 @@ class Catalog:
         return self._pool.submit(run).result()
 
     def close(self) -> None:
+        self.refresher.stop()
         if self._backend is not None:
             self._pool.submit(self._backend.close).result()
         self._pool.shutdown()
+
+    # --- background work: the stored summaries and the distinct roots --------------------------
+    def _where(self) -> tuple[Any, ...]:
+        """Which catalog this is (backend, out, dsn): a job names the one it was asked for."""
+        with self._lock:
+            return (self.args.backend, self.args.out, self.args.dsn)
+
+    def _on_own_connection(self, where: tuple[Any, ...], work: Callable[[Any], None]) -> None:
+        """Run work(backend) on a backend opened for it, closed after. A jsonl catalog is one file
+        a second instance must not write while this one may, so it runs on the worker thread."""
+        if where[0] == "jsonl":
+            if self._where() == where:
+                self.call(work)
+            return
+        b = open_backend(*where)
+        try:
+            work(b)
+        finally:
+            b.close()
+
+    def _queue_refresh(self, root: str) -> bool:
+        """Rebuild the stored summary of `root` in the background; False when one is already queued."""
+        where = self._where()
+        return self.refresher.request((where, "summary", root),
+                                      lambda: self._on_own_connection(where, lambda b: summaries.refresh(b, root)))
+
+    def _refreshing(self, root: str) -> str | None:
+        return self.refresher.state((self._where(), "summary", root))
+
+    def _request_roots(self) -> None:
+        """List the distinct roots of the records in the background: a query over every record, so
+        never on a page load. Until it answers the roots are those of the index and stored summaries."""
+        where = self._where()
+        if where[0] == "jsonl":     # in memory: _known_roots lists it itself, on the backend thread
+            return
+
+        def got(b: Any) -> None:
+            roots = set(b.roots())
+            if self._where() == where:
+                self._distinct, self._distinct_at = roots, datetime.now(timezone.utc)
+        self.refresher.request((where, "roots"), lambda: self._on_own_connection(where, got))
+
+    def _known_roots(self, b: Any) -> set[str]:
+        """The distinct roots seen so far (on the backend thread). A jsonl catalog is in memory:
+        listed at once, and again after ROOTS_TTL."""
+        now = datetime.now(timezone.utc)
+        stale = self._distinct_at is None or now - self._distinct_at > ROOTS_TTL
+        if self.args.backend == "jsonl":
+            if stale:
+                self._distinct, self._distinct_at = set(b.roots()), now
+            return set(self._distinct or ())
+        if stale:
+            self._request_roots()
+        if self._distinct is None:      # the first look since start-up or a switch: give a small catalog its moment
+            self.refresher.wait_key((self._where(), "roots"), COLD_WAIT)
+        return set(self._distinct or ())
 
     # --- API ------------------------------------------------------------
     def info(self, p: dict[str, str]) -> dict[str, Any]:
         with self._lock:
             backend, location = self.args.backend, _location(self.args)
-        return {"backend": backend, "location": location, "roots": self.call(lambda b: b.roots())}
+        return {"backend": backend, "location": location,
+                "roots": self.call(lambda b: rootinfo.names(b, self._known_roots(b)))}
 
     def _options(self) -> list[dict[str, Any]]:
         """Every backend the viewer can switch to: the sections of filecat.toml
@@ -254,6 +401,8 @@ class Catalog:
             self.args.backend, self.args.out, self.args.dsn = option["backend"], option["out"], option["dsn"]
             self._summaries = {}  # computed summaries belong to the old catalog
             self._treemaps = {}
+            self._stores, self._distinct, self._distinct_at = None, None, None
+        self._request_roots()
         return self.info({})
 
     def _server_state(self, read: Callable[[Any], Any]) -> Any:
@@ -294,41 +443,42 @@ class Catalog:
         return {"available": True, "reason": None}
 
     def roots(self, p: dict[str, str]) -> dict[str, Any]:
-        """The root index. Each row also says whether the viewer may remove it (`removable`: no
-        records at all and no scan running) and, with a coordinator, why a scan of it is already
-        running or queued here (`busy`); `control` is what jobs() reports."""
-        from . import rootinfo, root_remove
-
-        def build(b: Any) -> list[dict[str, Any]]:
-            rows = rootinfo.index(b)
-            for r in rows:
-                r["removable"] = self._removable(b, r, root_remove)
-            return rows
-        rows = self.call(build)
+        """The root index, from the root-index documents and the stored summary totals alone: no
+        query per root, no pass over the records. Each row also says how current its stored summary
+        is (`summary_state`: fresh, stale, scanning or missing; `refreshing` while one is being
+        rebuilt), whether the viewer may remove it (`removable`, judged from the counts the row
+        already has; remove_root checks the records itself) and, with a coordinator, why a scan of it
+        is already running or queued here (`busy`); `control` is what jobs() reports."""
+        rows = self.call(lambda b: rootinfo.index(b, extra_roots=self._known_roots(b)))
         for r in rows:
             r["busy"] = self.coordinator.scanning(r["root"]) if self.coordinator is not None else None
-            r["removable"] = r["removable"] and not r["busy"]
-        return {"now": rootinfo.now(), "roots": rows, "control": self.control()}
+            r["removable"] = self._removable(r) and not r["busy"]
+            totals = r["summary"]
+            built = totals.get("built_at") if totals and totals.get("depth") == summaries.DEPTH else None
+            r["summary_state"] = summaries.state_of(r["info"], built)
+            r["refreshing"] = self._refreshing(r["root"])
+        return {"now": rootinfo.now(), "roots": rows, "control": self.control(), "stores": self.call(self._stores_treemaps)}
 
     @staticmethod
-    def _removable(b: Any, row: dict[str, Any], root_remove: Any) -> bool:
-        """A cheap look at the row's totals first, then one record lookup: the Remove button is
-        offered for a root with nothing in it (the server checks again when it is asked)."""
+    def _removable(row: dict[str, Any]) -> bool:
+        """Offered for a root with nothing in it, judged from the row's stored totals and last scan
+        (no query); `remove_root` looks at the records again when it is asked."""
         if row["state"] == "in_progress":
             return False
+        if row["summary"] is None and row["info"] is None:
+            return False        # records and no history: imported, not a typo
         if (row["summary"] or {}).get("total_files"):
             return False
         last = (row["info"] or {}).get("last_scan") or {}
-        if any(last.get(k) for k in ("files", "dirs", "rollups")):
-            return False
-        return not root_remove.has_records(b, row["root"])
+        return not any(last.get(k) for k in ("files", "dirs", "rollups"))
 
     # --- the Roots page actions (docs/agent-server.md section 7): behind the same guards as run now ---
     def _root_row(self, root: Any) -> dict[str, Any] | None:
         from . import rootinfo
         if not isinstance(root, str) or not root:
             raise ValueError("root must be a root path")
-        return next((r for r in self.call(rootinfo.index) if r["root"] == root), None)
+        return next((r for r in self.call(lambda b: rootinfo.index(b, extra_roots=self._known_roots(b)))
+                     if r["root"] == root), None)
 
     def scan_root(self, root: Any, remote: str) -> tuple[int, dict[str, Any]]:
         """POST /api/roots/scan: queue an ad-hoc scan of exactly this root (Coordinator.request_scan)."""
@@ -353,11 +503,51 @@ class Catalog:
             return exc.status, {"error": str(exc)}
         self._summaries = {k: v for k, v in self._summaries.items() if k[0] != root}
         self._treemaps = {k: v for k, v in self._treemaps.items() if k[0] != root}
+        self._distinct = (self._distinct or set()) - {root}
         self.coordinator.log(f"root {root} removed from the catalog (requested from {remote})")
         return 200, {"removed": removed}
 
+    def refresh_summary(self, root: Any, remote: str) -> tuple[int, dict[str, Any]]:
+        """POST /api/summaries/refresh: queue a rebuild of the stored summary of this root."""
+        if self._root_row(root) is None:
+            return 404, {"error": f"no such root {root!r}"}
+        if not self.call(self._stores_treemaps):
+            return 409, {"error": "summaries are not stored (--no-save, or the backend cannot store them)"}
+        queued = self._queue_refresh(root)
+        if self.coordinator is not None:
+            self.coordinator.log(f"summary of {root}: refresh requested from {remote}" if queued
+                                 else f"summary of {root}: refresh requested from {remote}, one is already queued")
+        return 202, {"root": root, "queued": queued, "message": f"the summary of {root} is being rebuilt in "
+                     "the background" if queued else f"the summary of {root} is already being rebuilt"}
+
+    def _stored_summary(self, root: str, force: bool) -> dict[str, Any]:
+        """The Summary page at the default depth: what is stored, served at once (summaries.py)."""
+        def read(b: Any) -> tuple[Any, Any]:
+            try:
+                info = b.get_root_info(root)
+            except NotImplementedError:
+                info = None
+            return info, b.stored_aggregates(root).get(root)
+        info, entry = self.call(read)
+        built_at = entry.get("built_at") if entry and entry.get("depth") == summaries.DEPTH else None
+        state = summaries.state_of(info, built_at)
+        if force or summaries.needs_refresh(state):
+            self._queue_refresh(root)
+        refreshing = self._refreshing(root) is not None
+        flags = {"root": root, "depth": summaries.DEPTH, "can_save": True, "state": state, "refreshing": refreshing,
+                 "refresh_error": self.refresher.errors.get((self._where(), "summary", root))}
+        if built_at is None:
+            return {**_EMPTY, **flags, "source": "building", "building": True, "stale": True}
+        return {**entry, **flags, "source": "stored", "building": False, "stale": state != "fresh",
+                "_etag": f"{built_at}|{state}|{int(refreshing)}"}
+
     def summary(self, p: dict[str, str]) -> dict[str, Any]:
         """The stored aggregates for (root, depth) when there are some.
+
+        The default depth (summaries.DEPTH) is the stored summary of summaries.py: served at once,
+        `stale` while the root has changed since, `building` when nothing is stored yet, a rebuild
+        queued in the background (?rebuild=1 queues one too). Any other depth, and every depth
+        with --no-save, is as follows.
 
         A root with nothing stored is computed and saved, so the next viewer
         (and `filecat summary`) gets it instantly; ?rebuild=1 recomputes and
@@ -369,6 +559,8 @@ class Catalog:
         root, depth = p.get("root") or "", int(p.get("depth") or 2)
         rebuild = bool(p.get("rebuild"))
         save = not self.args.no_save
+        if depth == summaries.DEPTH and self.call(self._stores_treemaps):
+            return self._stored_summary(root, rebuild)
 
         def build(b: Any) -> dict[str, Any]:
             stored = b.stored_aggregates(root).get(root)
@@ -384,13 +576,13 @@ class Catalog:
                     "stored_depth": stored.get("depth") if stored else None}
 
         key = (root, depth)
-        summaries = self._summaries  # a switch replaces the dict; do not write into the new one
-        cached = summaries.get(key)
+        memo = self._summaries  # a switch replaces the dict; do not write into the new one
+        cached = memo.get(key)
         if cached is None or rebuild:
             result = {"root": root, "depth": depth, "can_save": save, **self.call(build)}
             if result["source"] != "computed":
                 return result  # reading it back from storage next time is cheap
-            summaries[key] = cached = result
+            memo[key] = cached = result
         return cached
 
     def records(self, p: dict[str, str]) -> dict[str, Any]:
@@ -407,18 +599,49 @@ class Catalog:
         return {"root": root, "parent": parent, "folders": self.call(run)}
 
     def _stores_treemaps(self, b: Any) -> bool:
-        """Snapshots go in the catalog unless --no-save or the backend has no store for them."""
+        """Snapshots (and with them the stored summaries) go in the catalog unless --no-save or the
+        backend has no store for them."""
         if self.args.no_save:
             return False
-        try:
-            b.list_treemaps("")
-        except NotImplementedError:
-            return False
-        return True
+        if self._stores is None:
+            try:
+                b.list_treemaps("")
+                self._stores = True
+            except NotImplementedError:
+                self._stores = False
+        return self._stores
+
+    def _stored_treemap(self, root: str, refresh: bool) -> dict[str, Any]:
+        """The Graph page at a root's top at the default depth: the stored summary's treemap, served
+        at once whatever its age; stale or missing queues one rebuild (summaries.py)."""
+        def read(b: Any) -> tuple[Any, Any]:
+            try:
+                info = b.get_root_info(root)
+            except NotImplementedError:
+                info = None
+            meta = treemap.newest(b.list_treemaps(root), "", summaries.DEPTH)
+            return info, (b.get_treemap(meta["id"]) if meta else None)
+        info, found = self.call(read)
+        built_at = found[0]["built_at"] if found else None
+        state = summaries.state_of(info, built_at)
+        if refresh or summaries.needs_refresh(state):
+            self._queue_refresh(root)
+        refreshing = self._refreshing(root) is not None
+        flags = {"state": state, "refreshing": refreshing, "max_age": self.max_age.total_seconds(),
+                 "refresh_error": self.refresher.errors.get((self._where(), "summary", root))}
+        if found is None:
+            return {"root": root, "prefix": "", "depth": summaries.DEPTH, "files": 0, "bytes": 0,
+                    "keys": {"suffix": [], "mime": []}, "folders": [], "id": None, "pin": None, "built_at": None,
+                    "source": "building", "building": True, "stale": True, "can_pin": False, **flags}
+        meta, data = found
+        return {**data, **meta, "source": "stored", "building": False, "stale": state != "fresh", "can_pin": True,
+                **flags, "_etag": f"{meta['id']}|{state}|{int(refreshing)}"}
 
     def treemap(self, p: dict[str, str]) -> dict[str, Any]:
         """treemap.build() for the files beneath `prefix` of `root`, or the
-        stored snapshot with ?id=. The newest stored snapshot of the view is
+        stored snapshot with ?id=. A root's top at depth 2 is the stored
+        summary (_stored_treemap), whatever its age. For any other view the
+        newest stored snapshot is
         served while it is younger than --graph-max-age ("source": "stored");
         otherwise, or with ?refresh=1, it is built and saved ("saved"). With
         nothing to save it in, results are kept in memory for the same time
@@ -439,6 +662,8 @@ class Catalog:
         depth = min(MAX_DEPTH, max(1, int(p.get("depth") or 2)))
         refresh = bool(p.get("refresh"))
         now = datetime.now(timezone.utc)
+        if not prefix and depth == summaries.DEPTH and self.call(self._stores_treemaps):
+            return self._stored_treemap(root, refresh)
 
         def build(b: Any) -> dict[str, Any]:
             if not self._stores_treemaps(b):
@@ -589,7 +814,8 @@ ROUTES = {"/api/info": "info", "/api/roots": "roots", "/api/summary": "summary",
           "/api/search": "search"}
 ROUTES.update({"/api/topology": "topology", "/api/rollups": "rollups"})
 POST_ROUTES = {"/api/backend": "select", "/api/pin": "pin", "/api/unpin": "unpin"}
-ROOT_ACTIONS = {"/api/roots/scan": "scan_root", "/api/roots/remove": "remove_root"}   # POST only, like run now
+ROOT_ACTIONS = {"/api/roots/scan": "scan_root", "/api/roots/remove": "remove_root",
+                "/api/summaries/refresh": "refresh_summary"}   # POST only, like run now
 RUN_PATH = re.compile(r"^/api/jobs/([A-Za-z0-9._@-]{1,128})/run$")      # POST only: "run now"
 CONTROL_HEADER = "X-Filecat-Control"
 LOOPBACK_HOSTS = ("127.0.0.1", "localhost", "::1", "[::1]")
@@ -600,23 +826,36 @@ def make_handler(catalog: Catalog, page: bytes) -> type[BaseHTTPRequestHandler]:
     class Handler(BaseHTTPRequestHandler):
         server_version = "filecat"
 
+        _elapsed: float | None = None       # ms the API call took, for the access log
+
         def log_message(self, fmt: str, *a: Any) -> None:
             if not catalog.args.quiet:
-                sys.stderr.write(f"{self.address_string()} {fmt % a}\n")
+                took = f" {self._elapsed:.1f}ms" if self._elapsed is not None else ""
+                sys.stderr.write(f"{self.address_string()} {fmt % a}{took}\n")
 
-        def _send(self, status: int, body: bytes, ctype: str, headers: dict[str, str] | None = None) -> None:
+        def _send(self, status: int, body: bytes, ctype: str, headers: dict[str, str] | None = None,
+                  compress: bool = False) -> None:
+            if compress and len(body) > GZIP_MIN and "gzip" in (self.headers.get("Accept-Encoding") or ""):
+                body = gzip.compress(body, 5)
+                headers = {**(headers or {}), "Content-Encoding": "gzip"}
             self.send_response(status)
             for name, value in (headers or {}).items():
                 self.send_header(name, value)
             self.send_header("Content-Type", ctype)
             self.send_header("Content-Length", str(len(body)))
-            self.send_header("Cache-Control", "no-store")
+            if compress:
+                self.send_header("Vary", "Accept-Encoding")
+            if not (headers or {}).get("ETag"):
+                self.send_header("Cache-Control", "no-store")
+            else:
+                self.send_header("Cache-Control", "no-cache")      # keep it, but ask whether it is still current
             self.end_headers()
-            self.wfile.write(body)
+            if status != HTTPStatus.NOT_MODIFIED:
+                self.wfile.write(body)
 
         def _json(self, status: int, data: Any, headers: dict[str, str] | None = None) -> None:
             body = json.dumps(data, ensure_ascii=False, default=str).encode("utf-8")
-            self._send(status, body, "application/json; charset=utf-8", headers)
+            self._send(status, body, "application/json; charset=utf-8", headers, compress=True)
 
         def do_GET(self) -> None:
             url = urlsplit(self.path)
@@ -752,6 +991,8 @@ def make_handler(catalog: Catalog, page: bytes) -> type[BaseHTTPRequestHandler]:
             try:
                 if action == "scan_root":
                     status, data = catalog.scan_root(body.get("root"), self.client_address[0])
+                elif action == "refresh_summary":
+                    status, data = catalog.refresh_summary(body.get("root"), self.client_address[0])
                 else:
                     status, data = catalog.remove_root(body.get("root"), body.get("confirm"),
                                                        self.client_address[0])
@@ -792,16 +1033,29 @@ def make_handler(catalog: Catalog, page: bytes) -> type[BaseHTTPRequestHandler]:
             self._respond(method, params)
 
         def _respond(self, method: str, params: dict[str, Any]) -> None:
+            started = time.perf_counter()
+
+            def timed() -> dict[str, str]:
+                self._elapsed = (time.perf_counter() - started) * 1000
+                log.debug("%s %s %.1fms", self.command, self.path, self._elapsed)
+                return {"Server-Timing": f"app;dur={self._elapsed:.1f}", "X-Filecat-Time": f"{self._elapsed:.1f}ms"}
             try:
                 data = getattr(catalog, method)(params)
             except (KeyError, ValueError) as exc:
-                return self._json(HTTPStatus.BAD_REQUEST, {"error": f"{type(exc).__name__}: {exc}"})
+                return self._json(HTTPStatus.BAD_REQUEST, {"error": f"{type(exc).__name__}: {exc}"}, timed())
             except Exception as exc:  # backend failure: report it, keep serving
                 return self._json(HTTPStatus.INTERNAL_SERVER_ERROR,
-                                  {"error": f"{type(exc).__name__}: {exc}"})
+                                  {"error": f"{type(exc).__name__}: {exc}"}, timed())
             if data is None:
-                return self._json(HTTPStatus.NOT_FOUND, {"error": "no such record"})
-            self._json(HTTPStatus.OK, data)
+                return self._json(HTTPStatus.NOT_FOUND, {"error": "no such record"}, timed())
+            etag = data.pop("_etag", None) if isinstance(data, dict) else None
+            headers = timed()
+            if etag is not None:        # a stored summary: its built_at and state say whether it changed
+                headers["ETag"] = tag = f'W/"{etag}"'
+                wanted = [t.strip() for t in (self.headers.get("If-None-Match") or "").split(",")]
+                if tag in wanted or "*" in wanted:
+                    return self._send(HTTPStatus.NOT_MODIFIED, b"", "application/json; charset=utf-8", headers)
+            self._json(HTTPStatus.OK, data, headers)
 
     return Handler
 
