@@ -249,11 +249,11 @@ real binary. `cargo fmt
 --check` is not in CI: the sources are not rustfmt-formatted yet.
 
 **Releases.** `.github/workflows/release.yml` runs on a tag `vX.Y.Z`: it fails unless the tag
-matches the version in `agent/Cargo.toml`, runs `cargo test`, builds the three static agents with
+matches the version everywhere (`scripts/version.py --check`), runs `cargo test`, builds the three static agents with
 `./build.sh all`, checks each is statically linked, and publishes a GitHub release with
 `filecat-agent-X.Y.Z-linux-{x86_64,armv7,aarch64}` and `SHA256SUMS` (the tag message is the
-release notes). To release: set the version in `agent/Cargo.toml`, `pyproject.toml` and
-`src/filecat/__init__.py`, commit, then `git tag -a vX.Y.Z -m "..." && git push origin vX.Y.Z`.
+release notes). The steps, and every file that carries the version, are in
+[releasing.md](releasing.md).
 
 ## Notes for DSM
 

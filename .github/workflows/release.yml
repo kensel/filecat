@@ -1,7 +1,7 @@
 name: Release
 
 # A tag vX.Y.Z builds the static filecat-agent binaries and publishes them as a GitHub release.
-# The tag must match the agent's version in agent/Cargo.toml.
+# The tag must match the version in every file scripts/version.py knows (docs/releasing.md).
 
 on:
   push:
@@ -21,12 +21,8 @@ jobs:
         working-directory: agent
     steps:
       - uses: actions/checkout@v5
-      - name: Tag matches agent/Cargo.toml
-        run: |
-          tag="${GITHUB_REF_NAME#v}"
-          crate=$(sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | head -n1)
-          echo "tag $tag, agent $crate"
-          [ "$tag" = "$crate" ] || { echo "::error::tag v$tag does not match agent/Cargo.toml version $crate"; exit 1; }
+      - name: Tag matches the version everywhere (scripts/version.py, docs/releasing.md)
+        run: python3 ../scripts/version.py --check "$GITHUB_REF_NAME"
       - uses: dtolnay/rust-toolchain@master
         with:
           toolchain: ${{ env.RUST_TOOLCHAIN }}

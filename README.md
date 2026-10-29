@@ -17,6 +17,20 @@ uv sync --extra dev            # plus pytest
 uv sync --all-extras           # every backend driver, Magika and pytest
 ```
 
+From GitHub at a release tag, without a checkout (pick the extras you need):
+
+```
+# as a command-line tool (its own environment, `filecat` on PATH)
+uv tool install "filecat[mongo,tls] @ git+https://github.com/kensel/filecat@v0.2.1"
+
+# into the active virtual environment
+uv pip install -U "filecat[mongo,tls] @ git+https://github.com/kensel/filecat@v0.2.1"
+```
+
+The static Linux agents for each tag are on the
+[releases page](https://github.com/kensel/filecat/releases). Cutting a release:
+[docs/releasing.md](docs/releasing.md).
+
 Database extras (each adds one backend's driver):
 
 | extra | backend | driver |
@@ -26,6 +40,7 @@ Database extras (each adds one backend's driver):
 | `filecat[mssql]` | `--backend mssql` | pyodbc (needs an ODBC driver for SQL Server) |
 | `filecat[mongo]` | `--backend mongodb` | PyMongo |
 | `filecat[magika]` | `--magika` identifier | Magika |
+| `filecat[tls]` | `filecat server --serve` certificates | cryptography |
 
 Server backends take `--dsn` or `FILECAT_DSN`. filecat creates its tables or
 collections but not the database or the login.
