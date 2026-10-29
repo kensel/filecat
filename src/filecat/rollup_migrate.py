@@ -43,7 +43,7 @@ import time
 from dataclasses import dataclass, field
 from typing import Any, Callable
 
-from . import backup, browse, dbfiles, record, redaction, rollup, rootinfo
+from . import backup, browse, dbfiles, record, redaction, rollup, rootinfo, summaries
 from .backends.base import Backend, Document
 from .fsutil import replace as _replace
 from .options import ScanOptions
@@ -328,8 +328,9 @@ def migrate(backend: Backend, options: ScanOptions, checkpoint: str, *, tag: str
     if not dry_run:
         _cleanup(backend, purged_redacted, purged_any, resume_path)
         for root in dict.fromkeys(chosen):
+            rootinfo.touch(backend, root)       # rows became rollups: the stored summaries are stale
             try:
-                backend.rebuild_aggregates(root=root)
+                summaries.after_scan(backend, root)
             except (NotImplementedError, ImportError):
                 pass
         if purged_redacted:

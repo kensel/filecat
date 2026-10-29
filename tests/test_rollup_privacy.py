@@ -457,7 +457,10 @@ def test_the_unpinned_treemap_snapshots_of_a_root_go_when_a_folder_is_redacted(f
     write(root / "vault" / ".filecat-redacted")
     scan.scan_roots([str(root)], backend, options(), resume_path=str(FIXTURE_ROOT / f"r-{uuid.uuid4().hex}"))
     assert backend.get_treemap(meta["id"]) is None
-    assert backend.list_treemaps(str(root)) == []
+    # the scan ends by summarising the root again: the one snapshot left is that new one, and it
+    # holds the rollup instead of the folder
+    [fresh] = backend.list_treemaps(str(root))
+    assert "vault" not in json.dumps(backend.get_treemap(fresh["id"])[1])
 
 
 # --- store rollups and `rollups migrate` ---------------------------------------------------

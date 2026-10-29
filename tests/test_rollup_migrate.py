@@ -174,15 +174,15 @@ def test_killed_before_phase_one_ends_nothing_changed_and_a_rerun_recomputes(old
 def test_killed_before_cleanup_a_rerun_cleans_up(old, monkeypatch):
     root, backend = old
     cfg = config({"backup": "automatic"})
-    real = backend.rebuild_aggregates
+    real = backend.replace_aggregates
 
-    def stop(**kw):
+    def stop(*a, **kw):
         raise Boom
 
-    monkeypatch.setattr(backend, "rebuild_aggregates", stop)
+    monkeypatch.setattr(backend, "replace_aggregates", stop)
     with pytest.raises(Boom):
         migrate(backend, root, cfg)
-    monkeypatch.setattr(backend, "rebuild_aggregates", real)
+    monkeypatch.setattr(backend, "replace_aggregates", real)
     result, _ = migrate(backend, root, cfg)
     assert result.done
     assert backend.summary(root=str(root))["roots"][str(root)]["total_files"] == \

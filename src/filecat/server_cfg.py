@@ -16,7 +16,8 @@ from typing import Any, Iterator
 from . import control_auth, tls
 from .config import AgentConfig, ConfigError, expand
 
-KINDS = ("storage-collect", "scan", "store-resum")
+KINDS = ("storage-collect", "scan", "store-resum", "summaries")
+LOCAL_AGENT = "(local)"     # the "agent" of work that reads the catalog or the local disk, not through an agent
 SERVER_KEYS = ("health_interval", "health_timeout", "health_backoff_max", "max_concurrent", "lease_ttl",
                "shutdown_grace", "history_keep", "history_days", "serve", "control_password_hash", "login_max_failures", "login_window", "login_block",
                "login_global_max_failures", "login_required_for_view", "tls", "jobs")
@@ -148,9 +149,13 @@ def _job(table: Any, index: int, agents: dict[str, AgentConfig]) -> list[JobSpec
     if kind not in KINDS:
         raise bad(f"kind = {kind!r}; choose from {', '.join(KINDS)}")
     agent = table.get("agent")
-    if not isinstance(agent, str) or not agent:
+    if kind == "summaries":
+        if agent is not None:
+            raise bad("agent does not apply to summaries: it reads the catalog, not an agent")
+        agent = LOCAL_AGENT
+    elif not isinstance(agent, str) or not agent:
         raise bad('agent is required: an [[agents]] name, or "*" for every agent')
-    if agent != "*" and agent not in agents:
+    if agent not in ("*", LOCAL_AGENT) and agent not in agents:
         raise bad(f"agent = {agent!r}: no such [[agents]] in filecat.toml ({', '.join(agents) or 'none configured'})")
     if "every" in table and "at" in table or "every" not in table and "at" not in table:
         raise bad('give exactly one of every = "24h" or at = "02:30"')
@@ -185,7 +190,7 @@ def _job(table: Any, index: int, agents: dict[str, AgentConfig]) -> list[JobSpec
     run_on_start = table.get("run_on_start", False)
     if not isinstance(run_on_start, bool):
         raise bad("run_on_start wants true or false")
-    names = list(agents) if agent == "*" else [agent]
+    names = list(agents) if agent == "*" else [agent]      # summaries: the one local slot
     specs = []
     for target in names:
         spec = JobSpec(
@@ -203,7 +208,7 @@ def _job(table: Any, index: int, agents: dict[str, AgentConfig]) -> list[JobSpec
 def _check_options(spec: JobSpec, label: str) -> None:
     """Run the options through the real parser now, so a typo is a config error at start-up."""
     try:
-        argv = (["storage", "collect"] if spec.kind == "storage-collect" else ["scan", "ROOT"])
+        argv = {"storage-collect": ["storage", "collect"], "summaries": ["summaries"]}.get(spec.kind, ["scan", "ROOT"])
         parse_cli([*argv, *spec.options])
     except ConfigError as exc:
         raise ConfigError(f"{label}: options: {exc}") from None

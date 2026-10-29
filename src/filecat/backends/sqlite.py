@@ -465,6 +465,14 @@ class SqliteBackend(Backend):
             }
         return roots_out
 
+    def stored_totals(self, root: str | None = None) -> dict[str, Any]:
+        self._flush_buffer()
+        where = " WHERE root = ?" if root is not None else ""
+        params = (root,) if root is not None else ()
+        return {rname: {"total_files": f, "total_bytes": b, "unreadable": u, "depth": d, "built_at": at}
+                for rname, f, b, u, d, at in self.conn.execute(
+                    f"SELECT root, total_files, total_bytes, unreadable, depth, built_at FROM agg_meta{where}", params)}
+
     def _clear_aggregates(self, cur: sqlite3.Cursor, root: str | None) -> None:
         where = " WHERE root_id = ?" if root is not None else ""
         params = (root_id(root),) if root is not None else ()

@@ -53,7 +53,7 @@ from dataclasses import asdict, dataclass, field
 from datetime import datetime
 from typing import Any
 
-from . import rootinfo
+from . import rootinfo, summaries
 from .backends.base import Backend, Document
 from .record import root_id
 
@@ -400,13 +400,14 @@ def merge(backend: Backend, old: str, new: str, *, resume_path: str | None = Non
                 final[k] = old_info[k]
     final.pop("case_merge", None)
     final["root_id"], final["root"] = root_id(new), new
+    final["changed_at"] = rootinfo.now_precise()    # the records of `new` changed: its stored summaries are stale
     backend.put_root_info(final)
     backend.delete_root_info(old)
     if resume_path:
         from .resume import ResumeState
         ResumeState(resume_path).forget_root(old)
     try:
-        backend.rebuild_aggregates(root=new)
+        summaries.after_scan(backend, new)
     except (NotImplementedError, ImportError):
         pass
     return stats

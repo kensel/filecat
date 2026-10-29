@@ -7,6 +7,7 @@
      "last_scan":    {"started_at", "finished_at", "seconds", "status", "host", "account",
                       "agent", "files", "dirs", "bytes", "errors", "rollups", "rollup_bytes"},
      "last_error":   {"at", "rel_path", "stage", "message"},
+     "changed_at":   when the root's records last changed (microseconds, UTC; see touch())
      "newest_file":  {"rel_path", "mtime_ns"},
      "suggestions":  {"items": [{"tag", "parent", "matched"}], "more", "at"},
      "rollup_unresolved": ["[[rollups.rule]] #3 ([CACHE])"]}
@@ -34,6 +35,12 @@ rescan skipped as unchanged are not counted. `last_error` is the last
 error any scan recorded and is kept by later clean scans, with its time.
 `newest_file` is the most recently modified file in the catalog for the
 root, looked up after the walk, so unchanged files count too.
+
+`changed_at` is the root's change stamp: every writer of a root's records sets
+it (a scan that wrote or removed a file, rollup migrate, case-merge, redaction
+release / approve, enrich; touch()), and the stored summaries (summaries.py)
+are fresh while they are built after it. A scan that found nothing to write
+leaves it alone, so an unchanged root keeps its summary however old.
 """
 from __future__ import annotations
 
@@ -41,7 +48,7 @@ import os
 import socket
 import time
 from datetime import datetime, timedelta, timezone
-from typing import Any
+from typing import Any, Iterable
 
 from . import browse
 from .backends.base import Backend, Document
@@ -55,6 +62,45 @@ STALE_AFTER = timedelta(seconds=HEARTBEAT_SECONDS * 4)
 
 def now() -> str:
     return datetime.now(timezone.utc).isoformat(timespec="seconds")
+
+
+def now_precise() -> str:
+    """For change stamps: a summary built in the same second as a change must not look newer."""
+    return datetime.now(timezone.utc).isoformat()
+
+
+def parse(text: Any) -> datetime | None:
+    try:
+        at = datetime.fromisoformat(text)
+    except (TypeError, ValueError):
+        return None
+    return at if at.tzinfo else at.replace(tzinfo=timezone.utc)
+
+
+def changed_stamp(info: Document | None) -> datetime | None:
+    """When the root's records last changed, as far as its index entry says: `changed_at`; for an
+    entry written before that existed, the end of its last scan. A "running" attempt (a scan in
+    progress, or one that was killed) counts from its last heartbeat, since it writes as it goes."""
+    info = info or {}
+    stamps = [parse(info.get("changed_at"))]
+    if info.get("changed_at") is None:
+        stamps.append(parse((info.get("last_scan") or {}).get("finished_at")))
+    attempt = info.get("last_attempt") or {}
+    if attempt.get("status") == "running":
+        stamps.append(parse(attempt.get("heartbeat_at") or attempt.get("started_at")))
+    return max((s for s in stamps if s is not None), default=None)
+
+
+def touch(backend: Backend, root: str, at: str | None = None) -> None:
+    """Record that `root`'s records changed (the change stamp the stored summaries are judged by).
+    For writers other than a scan, which stamps it in finish(). A catalog with no root index
+    keeps no stamp; summaries then go by their age alone, so this never fails the caller."""
+    try:
+        info = _load(backend, root)
+        info["changed_at"] = at or now_precise()
+        backend.put_root_info(info)
+    except NotImplementedError:
+        pass
 
 
 def state(info: Document | None, at: datetime | None = None) -> str:
@@ -91,6 +137,7 @@ class ScanTracker:
         self.root = root
         self.files = self.dirs = self.bytes = self.errors = 0
         self.rollups = self.rollup_bytes = 0    # rollup records are not files (record.NON_FILE_KINDS)
+        self.removed = 0    # records deleted or dropped (a vanished file changes the summary too)
         self.last_error: dict[str, Any] | None = None
         self._links = HardLinks()   # a hard-linked file's bytes are counted once
         self.last_path = ""
@@ -122,6 +169,26 @@ class ScanTracker:
 
     def __getattr__(self, name: str) -> Any:
         return getattr(self._backend, name)
+
+    @property
+    def changed(self) -> bool:
+        """The scan wrote or removed something a summary counts. Directory records do not count:
+        every scan rewrites them, and no summary reads them."""
+        return bool(self.files or self.rollups or self.removed)
+
+    def delete(self, root: str, rel_path: str) -> None:
+        self._backend.delete(root, rel_path)
+        self.removed += 1
+
+    def delete_many(self, root: str, rel_paths: Any) -> int:
+        n = self._backend.delete_many(root, rel_paths)
+        self.removed += n
+        return n
+
+    def drop_many(self, root: str, rel_paths: Any, reason: str = "vanished") -> int:
+        n = self._backend.drop_many(root, rel_paths, reason)
+        self.removed += n
+        return n
 
     def _observe(self, doc: Document) -> None:
         self.last_path = doc.get("rel_path", "")
@@ -210,6 +277,10 @@ def finish(backend: Backend, root: str, attempt: dict[str, Any], tracker: ScanTr
     if exc is not None:
         attempt["error"] = f"{type(exc).__name__}: {exc}".strip()
     info = _load(backend, root)
+    if tracker.changed:
+        info["changed_at"] = now_precise()
+    elif info.get("changed_at") is None:    # an entry from before the stamp: its last scan is the stamp
+        info["changed_at"] = (info.get("last_scan") or {}).get("finished_at") or attempt["started_at"]
     info["last_attempt"] = attempt
     info["updated_at"] = finished
     if exc is None:
@@ -246,23 +317,35 @@ def finish(backend: Backend, root: str, attempt: dict[str, Any], tracker: ScanTr
     return info
 
 
-def index(backend: Backend) -> list[dict[str, Any]]:
-    """Every root that has records or a root-index entry, with its entry
-    (None when it was never scanned since the index existed, e.g. imported)
-    and the stored summary totals when there are some."""
+def index(backend: Backend, extra_roots: Iterable[str] | None = None) -> list[dict[str, Any]]:
+    """Every root that has a root-index entry or stored summary totals, and those in `extra_roots`;
+    with its entry (None when it was never scanned since the index existed, e.g. imported) and the
+    stored summary totals when there are some. `extra_roots` defaults to the distinct roots of the
+    records (Backend.roots(), a pass over every record on a big catalog): a caller that knows the
+    roots another way, as the viewer does, hands them in instead. No query is made per root."""
     try:
         infos = {i["root"]: i for i in backend.list_root_info()}
     except NotImplementedError:
         infos = {}
     try:
-        stored = backend.stored_aggregates()
+        stored = backend.stored_totals()
     except NotImplementedError:
         stored = {}
+    known = backend.roots() if extra_roots is None else extra_roots
     out = []
-    for root in sorted(set(backend.roots()) | set(infos)):
-        agg = stored.get(root)
-        totals = None if agg is None else {k: agg.get(k) for k in
-                                           ("total_files", "total_bytes", "unreadable", "built_at")}
+    for root in sorted(set(known) | set(infos) | set(stored)):
+        totals = stored.get(root)
         info = infos.get(root)
         out.append({"root": root, "info": info, "state": state(info), "summary": totals})
     return out
+
+
+def names(backend: Backend, extra_roots: Iterable[str] | None = None) -> list[str]:
+    """The roots index() lists, by name only (the viewer's root selector)."""
+    try:
+        found = {i["root"] for i in backend.list_root_info()}
+    except NotImplementedError:
+        found = set()
+    found |= set(backend.stored_totals())
+    found |= set(backend.roots() if extra_roots is None else extra_roots)
+    return sorted(found)

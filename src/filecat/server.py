@@ -24,11 +24,10 @@ from datetime import datetime, timedelta
 from typing import Any, Callable
 
 from . import agent_status, config, control_auth, scheduler, server_cfg, server_store, tls
-from .server_cfg import JobSpec, ServerConfig
+from .server_cfg import LOCAL_AGENT, JobSpec, ServerConfig
 from .server_store import ServerStore, iso
 
 FILE_BACKENDS = ("sqlite", "jsonl")
-LOCAL_AGENT = "(local)"         # the "agent" of an ad-hoc scan no [[agents]] covers: read over SMB or from disk
 ADHOC_KIND = "scan-root"        # an ad-hoc scan of one root (the viewer's Scan button)
 ADHOC_PREFIX = "scan:"
 TICK = 1.0
@@ -193,6 +192,23 @@ def run_store_resum_job(ctx: JobContext, now: Callable[[], datetime] = local_now
         backend.close()
 
 
+def run_summaries_job(ctx: JobContext) -> JobResult:
+    """Rebuild the stored summaries (summaries.py) of the roots whose records changed since, of the
+    job's `roots` or of every root; `--all` in options rebuilds them whatever their state."""
+    from . import summaries
+    args = _argv_args(ctx, ["summaries", *ctx.spec.options])
+    backend = _open(ctx)
+    try:
+        try:
+            counts = summaries.refresh_stale(backend, list(ctx.spec.roots) if ctx.spec.roots else None,
+                                             force=args.all, cancel=ctx.cancel.is_set, log=ctx.log)
+        except NotImplementedError:
+            return JobResult("skipped", error="the catalog's backend does not store summaries")
+    finally:
+        backend.close()
+    return JobResult("errors" if counts["failed"] else "ok", 1 if counts["failed"] else 0, counts)
+
+
 def scan_cancelled() -> BaseException:
     from .scan import ScanCancelled
     return ScanCancelled()
@@ -200,7 +216,7 @@ def scan_cancelled() -> BaseException:
 
 RUNNERS: dict[str, Callable[[JobContext], JobResult]] = {
     "scan": run_scan_job, "storage-collect": run_storage_collect_job, "store-resum": run_store_resum_job,
-    ADHOC_KIND: run_scan_root_job,
+    "summaries": run_summaries_job, ADHOC_KIND: run_scan_root_job,
 }
 
 
@@ -305,7 +321,7 @@ class Coordinator:
             if name in self.runs or name in self.manual:
                 return 409, {"error": f"job {name} is already running" if name in self.runs
                              else f"job {name} is already queued to run"}
-            if self.health[spec.agent].state == "down":
+            if spec.agent in self.health and self.health[spec.agent].state == "down":
                 return 409, {"error": f"agent {spec.agent} is down"}
             self.manual[name] = remote
         self.log(f"job {name}: run requested from {remote}")
@@ -667,6 +683,8 @@ def print_plan(cfg: ServerConfig, agents: list[config.AgentConfig], anchors: dic
         else:
             when = f"first run {due:%Y-%m-%d %H:%M} (never ran; waits for its slot)"
         what = {"storage-collect": "collect the storage topology",
+                "summaries": "refresh the stored summaries of " + (", ".join(spec.roots) if spec.roots
+                                                                   else "every root changed since they were built"),
                 "scan": "scan " + (", ".join(spec.roots) if spec.roots else "every root the agent covers"),
                 "store-resum": "re-sum backup/database store rollups older than "
                                + (f"{int(spec.min_age.total_seconds() // 86400)}d" if spec.min_age else

@@ -64,7 +64,8 @@ def resume_files(backend: Backend) -> list[str]:
 
 
 def known(backend: Backend, root: str) -> bool:
-    return any(r["root"] == root for r in rootinfo.index(backend))
+    """A root-index entry, stored totals or a record: looked up for this root, not by listing every root."""
+    return any(r["root"] == root for r in rootinfo.index(backend, extra_roots=())) or has_records(backend, root)
 
 
 def remove_root(backend: Backend, root: str, *, force: bool = False,

@@ -13,7 +13,7 @@ import time
 from typing import Any
 
 from . import (aliases, cloudfiles, fsource, preflight, record, redaction, rollup, rootcase, rootinfo,
-               secretfiles)
+               secretfiles, summaries)
 from .agent_client import AgentError, Measurement
 from .backends import open_backend
 from .backends.base import Backend
@@ -316,6 +316,7 @@ def _scan(paths: list[str], roots: list[str], plans: list[tuple[fsource.AgentSou
     for i, c in enumerate(checks):      # an agent root that fell back to SMB is ruled in SMB terms
         if rollup_plans[i].agent_cfg is not None and plans[i] is None:
             rollup_plans[i] = rollup.make_plan(options, roots[i], paths[i], backend)
+    cancel_flag = options.cancel.is_set if options.cancel is not None else None
     announced: set[str] = set()
     for plan in rollup_plans:
         for message in plan.messages:
@@ -384,7 +385,8 @@ def _scan(paths: list[str], roots: list[str], plans: list[tuple[fsource.AgentSou
 
         try:
             for root in dict.fromkeys(roots):  # only what this scan touched; other roots keep theirs
-                backend.rebuild_aggregates(root=root)
+                # one pass for the aggregates and the Graph treemap, and none for a root that did not change
+                summaries.after_scan(backend, root, cancel=cancel_flag)
         except NotImplementedError:
             pass
         except ImportError:

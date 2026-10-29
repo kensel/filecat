@@ -92,25 +92,24 @@ def _new_root_state() -> dict[str, Any]:
     }
 
 
-def build_aggregates(documents: Iterable[dict[str, Any]], depth: int = 2) -> dict[str, Any]:
-    """Sum file records (kind != "dir") into per-root suffix/mime/dir tables.
+class Aggregator:
+    """build_aggregates() one record at a time, for a caller that reads the records once and feeds
+    other consumers from the same pass (summaries.refresh)."""
 
-    See module docstring for the exact shape and the rules used for
-    links, unreadable entries, and directory grouping.
-    """
-    per_root: dict[str, dict[str, Any]] = {}
+    def __init__(self, depth: int = 2) -> None:
+        self.depth = depth
+        self.per_root: dict[str, dict[str, Any]] = {}
 
-    for doc in documents:
+    def add(self, doc: dict[str, Any]) -> None:
         if doc.get("kind") in NON_FILE_KINDS:
-            continue
-        root = doc.get("root", "")
-        state = per_root.setdefault(root, _new_root_state())
+            return
+        state = self.per_root.setdefault(doc.get("root", ""), _new_root_state())
 
         has_size = "size" in doc and doc["size"] is not None
         if doc.get("errors") and not has_size:
             state["unreadable"] += 1
             state["total_files"] += 1
-            continue
+            return
 
         size = doc.get("size") or 0
         state["total_files"] += 1
@@ -126,13 +125,14 @@ def build_aggregates(documents: Iterable[dict[str, Any]], depth: int = 2) -> dic
         mime_key = doc.get("mime") or doc.get("kind") or "unknown"
         _bump(state["mime_counts"], mime_key, size)
 
-        dkey = dir_key(doc.get("rel_path", ""), depth)
+        dkey = dir_key(doc.get("rel_path", ""), self.depth)
         _bump(state["dir_counts"], dkey, size)
 
-    roots_out: dict[str, Any] = {}
-    for root, state in per_root.items():
+    def entry(self, root: str) -> dict[str, Any]:
+        """The root's entry as build_aggregates() shapes it; empty tables for a root with no files."""
+        state = self.per_root.get(root) or _new_root_state()
         total_bytes = state["total_bytes"]
-        roots_out[root] = {
+        return {
             "suffix": _rows(state["suffix_counts"], total_bytes, "suffix", state["suffix_desc"]),
             "mime": _rows(state["mime_counts"], total_bytes, "mime"),
             "dir": _rows(state["dir_counts"], total_bytes, "dir"),
@@ -140,4 +140,18 @@ def build_aggregates(documents: Iterable[dict[str, Any]], depth: int = 2) -> dic
             "total_bytes": total_bytes,
             "unreadable": state["unreadable"],
         }
-    return {"roots": roots_out}
+
+    def result(self) -> dict[str, Any]:
+        return {"roots": {root: self.entry(root) for root in self.per_root}}
+
+
+def build_aggregates(documents: Iterable[dict[str, Any]], depth: int = 2) -> dict[str, Any]:
+    """Sum file records (kind != "dir") into per-root suffix/mime/dir tables.
+
+    See module docstring for the exact shape and the rules used for
+    links, unreadable entries, and directory grouping.
+    """
+    agg = Aggregator(depth)
+    for doc in documents:
+        agg.add(doc)
+    return agg.result()

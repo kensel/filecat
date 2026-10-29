@@ -218,6 +218,19 @@ class Backend(ABC):
         (or just `root`) with stored aggregates; {} when there are none."""
         return {}
 
+    def stored_totals(self, root: str | None = None) -> dict[str, Any]:
+        """{root_string: {"total_files", "total_bytes", "unreadable", "depth", "built_at"}} of the
+        stored aggregates, without their tables: what the Roots page needs. A backend that keeps
+        the totals apart reads just those; this default reads the tables and drops them."""
+        keys = ("total_files", "total_bytes", "unreadable", "depth", "built_at")
+        return {r: {k: e.get(k) for k in keys} for r, e in self.stored_aggregates(root).items()}
+
+    def summary_docs(self, root: str) -> Iterator[Document]:
+        """The records of `root` that a summary reads (summaries.refresh): at least rel_path, kind,
+        size, suffix, mime, errors and probe.mime_glob_desc. A backend that can leave out the rest
+        of each document (a large part of a MongoDB record) does; this default lists them whole."""
+        return self.list(root=root)
+
     def rebuild_aggregates(self, depth: int = 2, root: str | None = None) -> None:
         """Recompute and store the aggregates of every root, or of `root` only
         (the other roots' stored aggregates are kept)."""

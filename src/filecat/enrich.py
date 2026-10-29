@@ -39,7 +39,7 @@ from concurrent.futures import Future, ThreadPoolExecutor
 from dataclasses import dataclass, field
 from typing import Any, Iterator
 
-from . import cloudfiles, dbfiles
+from . import cloudfiles, dbfiles, rootinfo, summaries
 from .backends import open_backend
 from .backends.base import Backend
 from .options import ScanOptions
@@ -315,8 +315,9 @@ def run(args) -> int:
                        hydrate=args.hydrate, free_after=args.free_after)
         if stats.seen:
             try:
-                for root in args.root or [None]:
-                    backend.rebuild_aggregates(root=root)
+                for root in args.root or backend.roots():
+                    rootinfo.touch(backend, root)       # sizes, types or hashes changed: stale summaries
+                    summaries.after_scan(backend, root)
             except NotImplementedError:
                 pass
     print(f"enrich: {stats.seen} records selected ({stats.named} named, {stats.measured} measured, "

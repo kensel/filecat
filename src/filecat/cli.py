@@ -11,6 +11,7 @@ from .backends import BACKENDS
 COMMANDS = {
     "scan": "filecat.scan",
     "summary": "filecat.summary",
+    "summaries": "filecat.summaries",
     "show": "filecat.show",
     "programs": "filecat.programs",
     "signatures": "filecat.signatures",
@@ -187,6 +188,20 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--disagree", action="store_true", help="list files whose glob and magic types disagree")
     p.add_argument("--rebuild", action="store_true", help="recompute stored agg_* tables (only --root's when given)")
     p.add_argument("--top", type=int, default=50, help="rows per table (0 = all)")
+
+    p = sub.add_parser("summaries", help="the stored summary of each root that the web viewer's Roots, Summary "
+                                          "and Graph pages show: refresh the ones whose root changed, or show "
+                                          "how current they are")
+    p.add_argument("action", nargs="?", choices=("refresh", "status"), default="refresh",
+                   help="refresh (default): read each root's records once and store its aggregates and treemap "
+                        "at depth 2; status: what is stored, when it was built and when the root last changed")
+    _storage(p)
+    p.add_argument("--root", action="append", help="only these roots (repeatable); they are refreshed "
+                                                    "whatever their state, unless --stale")
+    p.add_argument("--all", action="store_true", help="refresh every root, current or not")
+    p.add_argument("--stale", action="store_true", help="only roots changed since their summary was built "
+                                                         "or without one (the default without --root)")
+    p.add_argument("--json", action="store_true", help="status: one JSON object per root")
 
     p = sub.add_parser("show", help="print one record")
     p.add_argument("rel_path", metavar="REL_PATH")
@@ -478,7 +493,7 @@ def build_parser() -> argparse.ArgumentParser:
     _storage(s)
 
     p = sub.add_parser("server", help="the coordinator: checks the agents' health and runs the scheduled "
-                                      "[[server.jobs]] (scans, storage collects, store re-sums), records "
+                                      "[[server.jobs]] (scans, storage collects, store re-sums, summaries), records "
                                       "every run in the catalog; --serve also runs the web viewer")
     p.add_argument("action", nargs="?", choices=("set-password",),
                    help="set-password: ask (twice, no echo) for the password of the web viewer's \"run now\" "
@@ -507,7 +522,8 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--no-save", dest="no_save", action="store_true",
                    help="never write: do not save computed summaries to the catalog")
     p.add_argument("--graph-max-age", dest="graph_max_age", type=float, default=120, metavar="MINUTES",
-                   help="reuse a saved Graph treemap until it is this old (default 120)")
+                   help="reuse a saved Graph treemap of a folder or another depth until it is this old "
+                        "(default 120); a root's summary at depth 2 is rebuilt when the root changes, not by age")
 
     p = sub.add_parser("config", help="write, show and test filecat.toml (backends, DSNs, Ollama)")
     csub = p.add_subparsers(dest="action", required=True)

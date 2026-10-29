@@ -27,7 +27,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
-from . import fsource, rollup
+from . import fsource, rollup, rootinfo
 from .backends.base import Backend, Document
 from .record import root_id as make_root_id
 
@@ -374,6 +374,7 @@ def cleanup(backend: Backend, root: str, purged: list[str]) -> dict[str, int]:
                 changed = True
         if changed:
             backend.put_root_info(info)
+    rootinfo.touch(backend, root)       # the purged records are gone from the root's summaries too
     return done
 
 

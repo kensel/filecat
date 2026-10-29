@@ -526,6 +526,16 @@ class MssqlBackend(Backend):
             }
         return roots_out
 
+    def stored_totals(self, root: str | None = None) -> dict[str, Any]:
+        self.flush()
+        where = " WHERE root = ?" if root is not None else ""
+        params = (root,) if root is not None else ()
+        cur = self.conn.cursor()
+        cur.execute("SELECT root, total_files, total_bytes, unreadable, depth, built_at "
+                    f"FROM agg_meta{where}", params)
+        return {rname: {"total_files": int(f), "total_bytes": int(b), "unreadable": int(u), "depth": d,
+                        "built_at": at} for rname, f, b, u, d, at in cur.fetchall()}
+
     def replace_aggregates(self, entries: dict[str, Any], depth: int, built_at: str,
                            root: str | None) -> None:
         where = " WHERE root_id = ?" if root is not None else ""

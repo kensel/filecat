@@ -23,7 +23,7 @@ import json
 import time
 from typing import Any, Iterable, Iterator
 
-from ..record import root_id
+from ..record import NON_FILE_KINDS, root_id
 from .base import Backend, Document, chunks
 
 BATCH_SIZE = 500
@@ -399,6 +399,22 @@ class MongoBackend(Backend):
                 "unreadable": m["unreadable"], "depth": m.get("depth"), "built_at": m.get("built_at"),
             }
         return roots_out
+
+    def stored_totals(self, root: str | None = None) -> dict[str, Any]:
+        self.flush()
+        meta_query = {} if root is None else {"root": root}
+        return {m["root"]: {"total_files": m["total_files"], "total_bytes": m["total_bytes"],
+                            "unreadable": m["unreadable"], "depth": m.get("depth"), "built_at": m.get("built_at")}
+                for m in self.agg_meta.find(meta_query, {"_id": 0})}
+
+    def summary_docs(self, root: str) -> Iterator[Document]:
+        """Only the fields a summary reads, and no directory or rollup records."""
+        self.flush()
+        fields = {"_id": 0, "rel_path": 1, "kind": 1, "size": 1, "suffix": 1, "mime": 1, "errors": 1,
+                  "probe.mime_glob_desc": 1}
+        query = {"root_id": root_id(root), "kind": {"$nin": list(NON_FILE_KINDS)}}
+        for doc in self.files.find(query, fields, batch_size=5000):
+            yield {**doc, "root": root}
 
     def replace_aggregates(self, entries: dict[str, Any], depth: int, built_at: str,
                            root: str | None) -> None:

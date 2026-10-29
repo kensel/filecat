@@ -34,7 +34,7 @@ from collections import defaultdict
 from dataclasses import dataclass, field
 from typing import Any, Callable
 
-from . import member_sets, samples
+from . import member_sets, rootinfo, samples
 from .backends import open_backend
 from .backends.base import Backend, Document
 
@@ -268,6 +268,8 @@ def migrate(src: Backend, dst: Backend, *, roots: list[str] | None = None,
         maybe_progress()
 
     # --- aggregates -------------------------------------------------------
+    for root in (roots or dst.roots()):         # the stored treemaps of a root copied into are stale now
+        rootinfo.touch(dst, root)
     try:
         dst.rebuild_aggregates()
     except NotImplementedError:
