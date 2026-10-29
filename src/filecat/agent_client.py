@@ -34,6 +34,7 @@ and rel_paths.
 from __future__ import annotations
 
 import base64
+import getpass
 import hashlib
 import hmac
 import io
@@ -63,6 +64,12 @@ SUBTREE_TIMEOUT = 3600.0            # sum_subtree walks a whole tree
 PROGRESS_MS = 5000                  # asked of list_dir and sum_subtree when the agent has rollups to sum
 BUSY_TRIES = 12                     # a `busy` answer is retried, this often
 BUSY_PAUSE = 2.0
+MAX_LABEL = 200                     # the agent keeps at most this many characters of a label
+# Labels of connections that are not work (agent_busy.py does not count them as a running job).
+LABEL_HEALTH = "health check"
+LABEL_BUSY_CHECK = "busy check"
+LABEL_STATUS = "agents status"           # and "agents test": anything starting "agents "
+LABEL_VIEWER = "viewer"
 HASH_POLICIES = ("auto", "full", "none")
 REMOTE_BUFFER = 128 * 1024          # BufferedReader size of open_remote: one round trip per fill
 
@@ -261,6 +268,62 @@ class Capabilities:
         return bool(cap and cap.available)
 
 
+@dataclass(frozen=True)
+class AgentSession:
+    """One open connection on the agent, as `activity` reports it: the client's label, the
+    command it is running and counters, never a path."""
+    id: int
+    peer: str
+    connected_secs: int
+    authenticated: bool
+    label: str
+    command: str | None
+    command_secs: int | None
+    last_request_secs: int | None
+    requests: int = 0
+    dirs_listed: int = 0
+    entries_listed: int = 0
+    files_measured: int = 0
+    bytes_read: int = 0
+    files_summed: int = 0
+    bytes_summed: int = 0
+    errors: int = 0
+
+    @property
+    def files(self) -> int:
+        return self.files_measured + self.files_summed
+
+    @property
+    def rate(self) -> float:
+        """Files per second over the life of the connection."""
+        return self.files / self.connected_secs if self.connected_secs > 0 else 0.0
+
+
+@dataclass(frozen=True)
+class Activity:
+    sessions: tuple[AgentSession, ...]
+    self_id: int
+
+    def others(self) -> list[AgentSession]:
+        return [s for s in self.sessions if s.id != self.self_id]
+
+
+class ActivityUnsupported(AgentError):
+    """The agent predates `activity` (filecat-agent 0.2.0 and older)."""
+
+    def __init__(self, version: str | None) -> None:
+        super().__init__("unsupported", f"activity not supported (agent {version or 'unknown version'})")
+
+
+def default_label(what: str = "filecat") -> str:
+    """`what by user@host`: the label of a connection nobody named."""
+    try:
+        user = getpass.getuser()
+    except Exception:                       # no passwd entry, no USER in a service
+        user = "unknown"
+    return f"{what} by {user}@{socket.gethostname()}"
+
+
 # --- wire helpers ----------------------------------------------------------
 def _b64(data: bytes) -> str:
     return base64.b64encode(data).decode("ascii")
@@ -326,7 +389,8 @@ class AgentClient:
     def __init__(self, host: str, port: int, cert_sha256: str, token: str, *,
                  timeout: float = CONNECT_TIMEOUT, io_timeout: float = IO_TIMEOUT,
                  policy: dict[str, Any] | None = None, name: str | None = None,
-                 busy_pause: float = BUSY_PAUSE) -> None:
+                 busy_pause: float = BUSY_PAUSE, label: str | None = None) -> None:
+        self.label = (label if label is not None else default_label())[:MAX_LABEL]
         self.host = host
         self.port = port
         self.expected_fp = normalize_fingerprint(cert_sha256)
@@ -342,9 +406,11 @@ class AgentClient:
         self._rfile: Any = None
 
     @classmethod
-    def from_config(cls, agent: "AgentConfig", policy: dict[str, Any] | None = None) -> "AgentClient":
+    def from_config(cls, agent: "AgentConfig", policy: dict[str, Any] | None = None, *,
+                    label: str | None = None) -> "AgentClient":
         return cls(agent.host, agent.port, agent.cert_sha256, agent.resolved_token(),
-                   timeout=agent.timeout, policy=policy or agent.policy() or None, name=agent.name)
+                   timeout=agent.timeout, policy=policy or agent.policy() or None, name=agent.name,
+                   label=label)
 
     def __enter__(self) -> "AgentClient":
         return self
@@ -396,7 +462,8 @@ class AgentClient:
                     f"{self.name}: certificate fingerprint {actual} is not the pinned "
                     f"{self.expected_fp}; update cert_sha256 if the agent was reinstalled")
             self._sock, self._rfile = sock, sock.makefile("rb")
-            self.info = _hello(self._exchange({"cmd": "hello"}))
+            # the label tells whoever asks `activity` on the agent what this connection is for
+            self.info = _hello(self._exchange({"cmd": "hello", "label": self.label}))
             self._exchange({"cmd": "auth", "token": self.token})
             if self._policy:
                 self._check_policy(self._policy,
@@ -597,7 +664,8 @@ class AgentClient:
         """Stop a running request by its `id`, from a connection of its own
         (this one is busy waiting for it). True when the agent found it."""
         other = AgentClient(self.host, self.port, self.expected_fp, self.token,
-                            timeout=self.timeout, io_timeout=self.timeout, name=self.name)
+                            timeout=self.timeout, io_timeout=self.timeout, name=self.name,
+                            label=f"{self.label} (cancel)"[:MAX_LABEL])
         try:
             return bool(other._call({"cmd": "cancel", "id": request_id}).get("found"))
         finally:
@@ -646,6 +714,34 @@ class AgentClient:
                             tuple(roots) if isinstance(roots, list) else None,
                             resp.get("allow_roots_source"), resp.get("deny_sha256"),
                             resp["product_type"] if isinstance(resp.get("product_type"), int) else None)
+
+    def activity(self) -> Activity:
+        """The agent's open connections: who is doing what (labels, current command, counters;
+        no paths). An agent older than 0.2.1 raises ActivityUnsupported."""
+        try:
+            resp = self._call({"cmd": "activity"})
+        except AgentError as exc:
+            if exc.code == "bad_request" and "unknown cmd" in exc.message:
+                raise ActivityUnsupported(self.info.agent_version if self.info else None) from None
+            raise
+        def num(row: dict[str, Any], key: str) -> int:
+            value = row.get(key)
+            return value if isinstance(value, int) and not isinstance(value, bool) else 0
+        def opt(row: dict[str, Any], key: str) -> int | None:
+            value = row.get(key)
+            return value if isinstance(value, int) and not isinstance(value, bool) else None
+        sessions = tuple(
+            AgentSession(
+                id=num(s, "id"), peer=str(s.get("peer") or ""), connected_secs=num(s, "connected_secs"),
+                authenticated=bool(s.get("authenticated")), label=str(s.get("label") or ""),
+                command=s.get("command") if isinstance(s.get("command"), str) else None,
+                command_secs=opt(s, "command_secs"), last_request_secs=opt(s, "last_request_secs"),
+                requests=num(s, "requests"), dirs_listed=num(s, "dirs_listed"),
+                entries_listed=num(s, "entries_listed"), files_measured=num(s, "files_measured"),
+                bytes_read=num(s, "bytes_read"), files_summed=num(s, "files_summed"),
+                bytes_summed=num(s, "bytes_summed"), errors=num(s, "errors"))
+            for s in resp.get("sessions") or [] if isinstance(s, dict))
+        return Activity(sessions, num(resp, "self_id"))
 
     def wmi(self, entry_id: str, timeout: float | None = None) -> list[dict[str, Any]]:
         """The rows of an allowlisted WMI query (Windows agents only; any other agent answers

@@ -153,7 +153,7 @@ def mask(dsn: str | None) -> str | None:
 
 # --- [[agents]] ---------------------------------------------------------
 AGENT_KEYS = ("name", "host", "port", "cert_sha256", "token", "alias", "shares", "volume",
-              "exclude", "timeout")
+              "exclude", "timeout", "max_jobs")
 
 
 @dataclass(frozen=True)
@@ -170,6 +170,7 @@ class AgentConfig:
     volume: int = 1                     # the /volumeN whose /<share> folders are \\alias\<share>
     exclude: tuple[str, ...] = ()
     timeout: float = 30.0
+    max_jobs: int = 1                   # filecat server: jobs (its own plus other clients') this agent takes at once
 
     @property
     def endpoint(self) -> str:
@@ -248,7 +249,8 @@ def _agent(table: Any, index: int) -> AgentConfig:
     return AgentConfig(
         name=name, host=host, cert_sha256=cert, token=text("token"), alias=smap.alias,
         port=number("port", DEFAULT_PORT, 1, 65535, int), shares=dict(shares), volume=volume,
-        exclude=tuple(exclude), timeout=number("timeout", 30.0, 0.001, None, float))
+        exclude=tuple(exclude), timeout=number("timeout", 30.0, 0.001, None, float),
+        max_jobs=number("max_jobs", 1, 1, 64, int))
 
 
 def load_agents(cfg: dict[str, Any]) -> list[AgentConfig]:

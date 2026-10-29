@@ -169,12 +169,12 @@ def _server_of(alias: str) -> str:
     return alias.strip("\\/")
 
 
-def collect_agent(agent: config.AgentConfig, *, platform: str | None = None,
+def collect_agent(agent: config.AgentConfig, *, platform: str | None = None, label: str | None = None,
                   measure_shares: bool = False) -> tuple[topology.Topology, dict[str, Any]]:
     """Collect one [[agents]] host through its agent: (topology, agent info for the store)."""
-    from .agent_client import AgentClient
+    from .agent_client import AgentClient, default_label
     from .topology_collect import AgentSource, collect
-    with AgentClient.from_config(agent) as client:
+    with AgentClient.from_config(agent, label=label or default_label("storage collect")) as client:
         source = AgentSource(client)
         info = client.info
         assert info is not None

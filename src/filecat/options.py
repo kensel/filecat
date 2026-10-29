@@ -59,6 +59,8 @@ class ScanOptions:
     rollup_timeout: float | None = None  # seconds one rollup may take on an SMB or local scan
     new_redaction_key: bool = False     # --new-redaction-key: write a key although sticky entries exist
     cancel: Any = None                  # threading.Event: when set the scan stops at the next entry (filecat server)
+    agent_label: str | None = None      # what an agent shows for this scan's connections (agent `activity`); None: "filecat by user@host"
+    live: Any = None                    # scan.LiveProgress: counters another thread reads while the scan runs (filecat server)
 
     @classmethod
     def from_args(cls, args: Any) -> "ScanOptions":

@@ -53,6 +53,17 @@ ALLOWLIST: dict[str, str | None] = {
     "zpool_list": None, "zpool_status": None, "zfs_list": None, "zpool_get": None,
 }
 
+# The per-connection counters `activity` reports (docs/agent-protocol.md, "activity").
+COUNTERS = ("requests", "dirs_listed", "entries_listed", "files_measured", "bytes_read",
+            "files_summed", "bytes_summed", "errors")
+MAX_LABEL = 200
+
+
+def sanitize_label(raw: str) -> str:
+    """A client's label as the agent keeps it: no control characters, at most 200 characters."""
+    return "".join(c for c in raw if c.isprintable())[:MAX_LABEL].strip()
+
+
 # --- the agent's read scope (docs/agent-protocol.md, "Allowed roots and the deny list") --------
 # Deny list, compiled into the real agent: wins over the allowed roots, no configuration changes
 # it. It applies to commands that return file content (read_file, read_range, measure), to the
@@ -289,6 +300,9 @@ class FakeAgent:
         self.ran: list[tuple[str, str | None]] = []     # (id, arg) of every command the agent ran
         self.attributes_after_list: dict[str, int] = {}     # served path -> attributes at read time, when they changed since list_dir
         self.windows_attributes: dict[str, int] | None = None   # a Windows agent: served path -> file attribute bits (default ARCHIVE); None: POSIX
+        self.activity_supported = True                  # False: answers `activity` as an agent older than 0.2.1 does
+        self.sessions: dict[int, dict[str, Any]] = {}   # open connections, as the agent's registry keeps them
+        self._session_ids = 0
         self._ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
         self._ctx.load_cert_chain(cert, key)
         self._listener = socket.create_server(("127.0.0.1", 0))
@@ -352,6 +366,11 @@ class FakeAgent:
         with self._lock:
             self._open.append(conn)
             self.connections += 1
+            self._session_ids += 1
+            sess = {"id": self._session_ids, "peer": "%s:%s" % conn.getpeername()[:2], "authenticated": False,
+                    "label": "", "command": None, "since": time.monotonic(), "last_request": None,
+                    **{k: 0 for k in COUNTERS}}
+            self.sessions[sess["id"]] = sess
         authed = False
         state: dict[str, Any] = {"policy": _Policy({})}
 
@@ -370,6 +389,7 @@ class FakeAgent:
                 with self._lock:
                     self.wire.append(("in", line.decode("utf-8", "replace").rstrip("\n")))
                 close = False
+                cmd = None
                 try:
                     req = json.loads(line)
                     if not isinstance(req, dict):
@@ -377,16 +397,23 @@ class FakeAgent:
                     with self._lock:
                         self.requests.append(req)
                     cmd = req.get("cmd")
+                    if cmd in ("hello", "auth") and isinstance(req.get("label"), str):
+                        sess["label"] = sanitize_label(req["label"])
                     if cmd == "hello":
-                        resp = {"ok": True, "protocol": self.protocol, "agent_version": "0.2.0-test",
+                        resp = {"ok": True, "protocol": self.protocol, "agent_version": "0.2.1-test",
                                 "hostname": "fake-nas", "os": "linux", "arch": "x86_64"}
                     elif cmd == "auth":
                         if req.get("token") != self.token:
                             close = True
                             raise _Fail("unauthorized", "invalid token")
                         authed, resp = True, {"ok": True}
+                        sess["authenticated"] = True
                     elif not authed:
                         raise _Fail("unauthorized", "authenticate first")
+                    elif cmd == "activity" and self.activity_supported:
+                        sess["last_request"] = time.monotonic()
+                        sess["requests"] += 1
+                        resp = self._activity(sess["id"])
                     elif cmd == "configure_policy":
                         state["policy"] = self._configure(req.get("policy") or {})
                         resp = {"ok": True}
@@ -401,7 +428,14 @@ class FakeAgent:
                             ev.set()
                         resp = {"ok": True, "found": ev is not None}
                     else:
-                        resp = self._command(cmd, req, state["policy"], send)
+                        sess["command"] = (cmd, time.monotonic())
+                        sess["last_request"] = time.monotonic()
+                        sess["requests"] += 1
+                        try:
+                            resp = self._command(cmd, req, state["policy"], send)
+                        finally:
+                            sess["command"] = None
+                        self._account(sess, cmd, resp)
                 except _Fail as exc:
                     resp = {"ok": False, "error": str(exc), "code": exc.code}
                 except FileNotFoundError as exc:
@@ -412,13 +446,53 @@ class FakeAgent:
                     resp = {"ok": False, "error": "bad json", "code": "bad_request"}
                 except OSError as exc:
                     resp = {"ok": False, "error": str(exc), "code": "io"}
+                if authed and cmd not in ("hello", "auth") and not resp.get("ok"):
+                    sess["errors"] += 1
                 send(resp)
                 if close:
                     return
         except OSError:
             return
         finally:
+            with self._lock:
+                self.sessions.pop(sess["id"], None)
             conn.close()
+
+    # --- activity ---
+    def _activity(self, self_id: int) -> dict[str, Any]:
+        """The `activity` reply: counters and command names, never a path."""
+        now = time.monotonic()
+        with self._lock:
+            rows = [{"id": s["id"], "peer": s["peer"], "connected_at": 0,
+                     "connected_secs": int(now - s["since"]), "authenticated": s["authenticated"],
+                     "label": s["label"], "command": s["command"][0] if s["command"] else None,
+                     "command_secs": int(now - s["command"][1]) if s["command"] else None,
+                     "last_request_secs": None if s["last_request"] is None else int(now - s["last_request"]),
+                     **{k: s[k] for k in COUNTERS}} for s in self.sessions.values()]
+        return {"ok": True, "self_id": self_id, "sessions": rows}
+
+    @staticmethod
+    def _account(sess: dict[str, Any], cmd: str, resp: dict[str, Any]) -> None:
+        """What a finished request adds to its connection's counters, from the reply."""
+        if not resp.get("ok"):
+            return
+        if cmd == "list_dir":
+            sess["dirs_listed"] += 1
+            sess["entries_listed"] += len(resp.get("entries") or [])
+        elif cmd == "measure":
+            sess["files_measured"] += 1
+            sess["bytes_read"] += (resp.get("size", 0) if "sha256" in resp else
+                                   2 * 1024 * 1024 if "sha256_partial" in resp else
+                                   len(base64.b64decode(resp.get("head_b64") or "")))
+        elif cmd in ("read_range", "read_file"):
+            sess["bytes_read"] += len(base64.b64decode(resp.get("data_b64") or ""))
+        elif cmd == "sum_subtree":
+            # the real walk counts every folder entered and every entry visited (files and subfolders)
+            dirs = resp.get("total_dirs", 0)
+            sess["dirs_listed"] += dirs
+            sess["entries_listed"] += dirs + resp.get("total_files", 0) + max(dirs - 1, 0)
+            sess["files_summed"] += resp.get("total_files", 0)
+            sess["bytes_summed"] += resp.get("total_size", 0)
 
     # --- policy ---
     @staticmethod

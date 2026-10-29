@@ -17,7 +17,7 @@ from . import control_auth, tls
 from .config import AgentConfig, ConfigError, expand
 
 KINDS = ("storage-collect", "scan", "store-resum")
-SERVER_KEYS = ("health_interval", "health_timeout", "health_backoff_max", "max_concurrent", "lease_ttl",
+SERVER_KEYS = ("health_interval", "health_timeout", "health_backoff_max", "max_concurrent", "progress_interval", "lease_ttl",
                "shutdown_grace", "history_keep", "history_days", "serve", "control_password_hash", "login_max_failures", "login_window", "login_block",
                "login_global_max_failures", "login_required_for_view", "tls", "jobs")
 JOB_KEYS = ("name", "kind", "agent", "roots", "every", "at", "options", "enabled", "min_age", "max_runtime",
@@ -88,6 +88,7 @@ class ServerConfig:
     health_timeout: timedelta = timedelta(seconds=5)
     health_backoff_max: timedelta = timedelta(minutes=10)
     max_concurrent: int | None = None       # None: 1 on file catalogs, else 2 (Coordinator decides)
+    progress_interval: timedelta = timedelta(minutes=10)    # a log line and a stored progress per running job; zero: off
     lease_ttl: timedelta = timedelta(seconds=90)
     shutdown_grace: timedelta = timedelta(seconds=30)
     history_keep: int = 500
@@ -238,6 +239,12 @@ def load_server(cfg: dict[str, Any], agents: list[AgentConfig]) -> ServerConfig:
             raise ConfigError(f"[server] {key} = {value!r}; want a whole number of at least {low}")
         return value
 
+    progress_interval = ServerConfig.progress_interval
+    if "progress_interval" in section:
+        raw = section["progress_interval"]
+        # 0 turns the progress lines off (a duration must otherwise be positive)
+        progress_interval = (timedelta(0) if raw == 0 and not isinstance(raw, bool)
+                             else duration("progress_interval", progress_interval))
     serve = section.get("serve")
     if serve is not None and (not isinstance(serve, str) or not parse_listen(serve)):
         raise ConfigError(f"[server] serve = {serve!r}; want HOST:PORT")
@@ -269,6 +276,7 @@ def load_server(cfg: dict[str, Any], agents: list[AgentConfig]) -> ServerConfig:
         health_timeout=duration("health_timeout", ServerConfig.health_timeout),
         health_backoff_max=duration("health_backoff_max", ServerConfig.health_backoff_max),
         max_concurrent=count("max_concurrent", None, 1),
+        progress_interval=progress_interval,
         lease_ttl=duration("lease_ttl", ServerConfig.lease_ttl, timedelta(seconds=3)),
         shutdown_grace=duration("shutdown_grace", ServerConfig.shutdown_grace),
         history_keep=count("history_keep", 500, 1) or 500,

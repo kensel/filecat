@@ -115,10 +115,18 @@ SMB scan records the creation time in the same field.
 Answered before and after `auth`; it reveals nothing secret.
 
 ```json
-{"cmd": "hello"}
-{"ok": true, "protocol": 1, "agent_version": "0.2.0", "hostname": "nas-main",
+{"cmd": "hello", "label": "scan \\\\nas3\\Apps by kense@DESKTOP"}
+{"ok": true, "protocol": 1, "agent_version": "0.2.1", "hostname": "nas-main",
  "os": "linux", "arch": "x86_64"}
 ```
+
+`label` is optional (0.2.1): a short text saying what the connection is for
+(`scan \\nas3\Apps by kense@DESKTOP`, `job nightly-apps: scan`,
+`agents status`). The agent keeps at most 200 characters, control characters
+removed, and shows it in [`activity`](#activity) and in its status log. It is
+not secret and not checked, so it only describes the client's own word.
+`filecat` sends it with `hello`; `auth` accepts the same field and the last
+one sent wins. A label that is not a string is `bad_request`.
 
 `protocol` is this page's version, an integer. Additive changes (a new
 optional field, a new command) keep it; anything else raises it. A client
@@ -635,6 +643,52 @@ not try each one and read errors.
   it per agent version as it does `allowlist_sha256`. The deny list itself is
   not sent: it is in this document and in the binary.
 
+### `activity`
+
+**New in 0.2.1.** Who is using the agent now, so a client can tell whether it
+is busy (`filecat server` asks before it starts a job; `filecat agents status`
+lists the sessions). Authenticated connections only.
+
+```json
+{"cmd": "activity"}
+{"ok": true, "self_id": 7, "sessions": [
+  {"id": 5, "peer": "192.0.2.20:51234", "connected_at": 1793000000, "connected_secs": 722,
+   "authenticated": true, "label": "scan \\\\nas3\\Apps by kense@DESKTOP",
+   "command": "sum_subtree", "command_secs": 180, "last_request_secs": 4,
+   "requests": 1204, "dirs_listed": 310, "entries_listed": 88120, "files_measured": 0,
+   "bytes_read": 0, "files_summed": 41234, "bytes_summed": 912345678901, "errors": 3},
+  {"id": 7, "peer": "192.0.2.10:40022", "connected_at": 1793000700, "connected_secs": 2,
+   "authenticated": true, "label": "agents status", "command": "activity", "command_secs": 0,
+   "last_request_secs": 0, "requests": 3, "dirs_listed": 0, "entries_listed": 0, "files_measured": 0,
+   "bytes_read": 0, "files_summed": 0, "bytes_summed": 0, "errors": 0}]}
+```
+
+- One element per open connection, the asker's own included (`self_id`, so
+  the client can leave it out). A connection is removed when it closes.
+- `command` is the command being run now, `null` when the connection is idle;
+  `command_secs` how long it has run. `last_request_secs` is the time since the
+  last request, `null` for a connection that has made none (a bare `hello`,
+  which is what a health check without `auth` looks like).
+- The counters count what the replies held, per connection: `dirs_listed` and
+  `entries_listed` (`list_dir`, and the folders and entries a `sum_subtree` or
+  a rollup visits), `files_measured` (`measure`), `bytes_read` (content read by
+  `measure`, `read_range` and `read_file`; for `measure` the file's size when
+  it was hashed in full, 2 MiB for a partial digest, else the head),
+  `files_summed` and `bytes_summed` (`sum_subtree` and rollups, updated as the
+  walk goes, not at its end), and `errors` (requests answered `ok: false`).
+- **No path and no request argument is ever in the reply**: a path could lie
+  inside a `[REDACTED]` rollup. Command names, the label and numbers only.
+- `activity` is a command, not a `run` allowlist entry: the allowlist and its
+  hash are unchanged. An agent older than 0.2.1 answers `bad_request`
+  (`unknown cmd "activity"`); the client treats that as "activity not
+  supported", never as a failure.
+
+The agent also writes one line per session that made requests (or is running
+one) every `FILECAT_AGENT_STATUS_INTERVAL` seconds (default 600; see
+[agent-deploy.md](agent-deploy.md)): label, peer, how long connected, the
+current command, and the changes since the last line and the totals of files,
+GB read and entries listed, with the rate. Nothing is logged for an idle agent.
+
 ### Allowed roots and the deny list
 
 **New.** Where the agent will read is decided **on the agent host**, never by
@@ -1005,6 +1059,14 @@ What the Rust side changes to match this page:
       Use `GetFileAttributesW` / `FindFirstFileW` data, never `CreateFileW`,
       to decide. SYSVOL on a domain controller stays readable (NTDS is on the
       deny list).
+16. **Connection label, `activity` and the status log (0.2.1).** `hello` and
+    `auth` take an optional `label` ([above](#hello)); `activity` lists the
+    open connections with their counters ([above](#activity)); a thread logs
+    each busy connection every `FILECAT_AGENT_STATUS_INTERVAL` seconds. The
+    counters are atomics added to as the walk goes (one relaxed add per file),
+    the rest of a session is behind a mutex taken once per request. Nothing in
+    the `run` allowlist, the deny list or the other commands changed, so
+    `allowlist_sha256` and `deny_sha256` are the same as in 0.2.0.
 
 ### What `synology_storage.rs` becomes
 

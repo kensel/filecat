@@ -23,7 +23,7 @@ from dataclasses import dataclass, field
 from datetime import datetime, timedelta
 from typing import Any, Callable
 
-from . import agent_status, config, control_auth, scheduler, server_cfg, server_store, tls
+from . import agent_busy, agent_status, config, control_auth, scheduler, server_cfg, server_store, tls
 from .server_cfg import JobSpec, ServerConfig
 from .server_store import ServerStore, iso
 
@@ -33,6 +33,7 @@ ADHOC_KIND = "scan-root"        # an ad-hoc scan of one root (the viewer's Scan 
 ADHOC_PREFIX = "scan:"
 TICK = 1.0
 SCAN_PROGRESS_SECONDS = 60.0
+BUSY_RECHECK = timedelta(seconds=5)     # how long one answer of an agent's `activity` serves the ticks
 
 
 def log(message: str) -> None:
@@ -61,6 +62,12 @@ class JobContext:
     catalog: argparse.Namespace                 # backend / out / dsn the server was started with
     cancel: threading.Event
     log: Callable[[str], None] = log
+    live: Any = None                            # scan.LiveProgress: what the server reads for its progress lines
+
+
+def job_label(spec: JobSpec) -> str:
+    """What the agent shows for this job's connections: `job nightly-apps: scan`."""
+    return f"job {spec.name}: {'scan' if spec.kind == ADHOC_KIND else spec.kind}"
 
 
 def _argv_args(ctx: JobContext, argv: list[str]) -> argparse.Namespace:
@@ -122,6 +129,8 @@ def _run_scan(ctx: JobContext, roots: list[str], backend: Any) -> JobResult:
     options = ScanOptions.from_args(args)
     options.cancel = ctx.cancel
     options.progress_interval = SCAN_PROGRESS_SECONDS
+    options.agent_label = job_label(ctx.spec)
+    options.live = ctx.live
     base = resume.resume_path_for(getattr(backend, "name", "backend"), getattr(backend, "path", None))
     slug = "".join(c if c.isalnum() or c in "-_" else "_" for c in ctx.spec.name)
     path = base.replace(".resume.json", f".{slug}.resume.json")      # jobs run side by side: own file
@@ -156,7 +165,7 @@ def run_storage_collect_job(ctx: JobContext) -> JobResult:
     from . import storage_cmd, topology_store
     args = _argv_args(ctx, ["storage", "collect", *ctx.spec.options, "--agent", ctx.agent.name])
     storage = config.load_storage(ctx.cfg)
-    topo, info = storage_cmd.collect_agent(ctx.agent, platform=args.platform,
+    topo, info = storage_cmd.collect_agent(ctx.agent, platform=args.platform, label=job_label(ctx.spec),
                                            measure_shares=args.measure_shares)
     if ctx.cancel.is_set():
         raise scan_cancelled()
@@ -239,6 +248,9 @@ class Run:
     thread: threading.Thread | None = None
     result: JobResult | None = None
     timed_out: bool = False
+    live: Any = None                        # scan.LiveProgress of the job (counters the progress lines read)
+    last_progress_at: datetime | None = None
+    last_files: int = 0
 
 
 class Coordinator:
@@ -246,6 +258,7 @@ class Coordinator:
                  file_cfg: dict[str, Any], catalog: argparse.Namespace,
                  clock: Callable[[], datetime] = local_now,
                  probe: Callable[..., agent_status.AgentStatus] = agent_status.probe,
+                 activity: Callable[[config.AgentConfig, float], Any] = agent_busy.fetch,
                  runners: dict[str, Callable[[JobContext], JobResult]] | None = None,
                  logger: Callable[[str], None] = log, holder: str | None = None) -> None:
         self.cfg = cfg
@@ -255,16 +268,20 @@ class Coordinator:
         self.catalog = catalog
         self.clock = clock
         self.probe = probe
+        self.activity = activity
         self.runners = runners or RUNNERS
         self.log = logger
         self.holder = holder or uuid.uuid4().hex[:16]
         self.max_concurrent = cfg.max_concurrent or (1 if (catalog.backend or "sqlite") in FILE_BACKENDS else 2)
         last = store.last_starts()
-        self.sched = scheduler.Scheduler(cfg.jobs, last, self._first_seen(last))
+        self.sched = scheduler.Scheduler(cfg.jobs, last, self._first_seen(last),
+                                         {a.name: a.max_jobs for a in agents})
         self.manual: dict[str, str] = {}        # job -> remote address: "run now" requests not started yet
         self.health: dict[str, AgentState] = {n: AgentState(n, a.endpoint) for n, a in self.agents.items()}
         self.runs: dict[str, Run] = {}
         self.last_outcome: dict[str, str] = {}
+        self.busy: dict[str, str] = {}          # job -> why it waits: its agent is busy with other clients' work
+        self._activity_cache: dict[str, tuple[datetime, Any]] = {}
         self.outcomes: list[str] = []           # every run finished in this session
         self.lost = False
         self.stopping = False
@@ -464,8 +481,11 @@ class Coordinator:
         return row
 
     def _start(self, spec: JobSpec, now: datetime, trigger: str, remote: str | None = None) -> None:
-        run = Run(spec, self._row(spec, now, trigger, "running", remote=remote), threading.Event(), time.monotonic())
+        from .scan import LiveProgress
+        run = Run(spec, self._row(spec, now, trigger, "running", remote=remote), threading.Event(), time.monotonic(),
+                  live=LiveProgress(), last_progress_at=now)
         self.store.put_run(run.row)
+        self.busy.pop(spec.name, None)
         self.runs[spec.name] = run
         self.last_outcome[spec.name] = "running"
         self.log(f"job {spec.name} ({spec.kind}, agent {spec.agent}) started")
@@ -476,7 +496,7 @@ class Coordinator:
     def _work(self, run: Run) -> None:
         spec = run.spec
         ctx = JobContext(spec, self.agents.get(spec.agent), list(self.agents.values()), self.file_cfg,
-                         self.catalog, run.cancel, self.log)
+                         self.catalog, run.cancel, self.log, run.live)
         try:
             run.result = self.runners[spec.kind](ctx)
         except KeyboardInterrupt:           # ScanCancelled
@@ -515,6 +535,64 @@ class Coordinator:
                 run.cancel.set()
                 self.log(f"job {run.spec.name} is over max_runtime: cancelling")
 
+    # --- progress lines ---
+    def _progress(self, now: datetime) -> None:
+        """Every `progress_interval`, one log line and one small write per running job: files and
+        bytes so far, the rate over the interval, the root being scanned (docs/agent-server.md)."""
+        every = self.cfg.progress_interval
+        if every <= timedelta(0):
+            return
+        for run in list(self.runs.values()):
+            if run.last_progress_at is None or now - run.last_progress_at < every or run.live is None:
+                continue
+            files, nbytes, root = run.live.snapshot()
+            rate = (files - run.last_files) / max((now - run.last_progress_at).total_seconds(), 1e-6)
+            run.last_progress_at, run.last_files = now, files
+            run.row["progress"] = {"at": iso(now), "files": files, "bytes": nbytes, "rate": round(rate, 1),
+                                   "root": root}
+            try:
+                self.store.put_run(run.row)
+            except Exception as exc:
+                self.log(f"job {run.spec.name}: progress not saved: {agent_status.error_text(exc)}")
+            elapsed = agent_busy.human_duration((now - datetime.fromisoformat(run.row["started_at"])).total_seconds())
+            self.log(f"job {run.spec.name} progress: {run.spec.kind} on {run.spec.agent}, {elapsed} elapsed, "
+                     f"{files} files, {agent_busy.human_bytes(nbytes)}, {rate:.1f} files/s"
+                     + (f", root {root}" if root else ""))
+
+    # --- busy agents ---
+    def _activity(self, agent: config.AgentConfig, now: datetime) -> Any:
+        cached = self._activity_cache.get(agent.name)
+        if cached is not None and now - cached[0] < BUSY_RECHECK:
+            return cached[1]
+        try:
+            act = self.activity(agent, self.cfg.health_timeout.total_seconds())
+        except Exception:
+            act = None                  # unreachable or unsupported: go by our own running jobs
+        self._activity_cache[agent.name] = (now, act)
+        return act
+
+    def _hold(self, now: datetime) -> Callable[[JobSpec], str | None]:
+        """Why a job that is about to start must wait: its agent already carries `max_jobs` jobs,
+        counting the other clients' (agent `activity`) as well as ours. None: start it."""
+        def hold(spec: JobSpec) -> str | None:
+            agent = self.agents.get(spec.agent)
+            if agent is None:           # an ad-hoc scan over SMB or from disk: no agent
+                return None
+            mine = [n for n, a in self.sched.running.items() if a == spec.agent]
+            act = self._activity(agent, now)
+            others = []
+            if act is not None:
+                others = [s for s in agent_busy.working(act)
+                          if not any(s.label.startswith(f"job {n}: ") for n in mine)]
+            if not others or len(mine) + len(others) < agent.max_jobs:
+                return None
+            reason = f"{agent.name} busy ({agent_busy.summary(others)})"
+            if spec.name not in self.busy:
+                self.log(f"job {spec.name} waits: {reason}")
+            self.busy[spec.name] = reason
+            return reason
+        return hold
+
     # --- one scheduling round ---
     def tick(self, now: datetime | None = None, forced: set[str] | None = None, trigger: str = "schedule") -> scheduler.Plan:
         now = now or self.clock()
@@ -523,6 +601,7 @@ class Coordinator:
         if self.lost:
             return plan
         self._reap(now)
+        self._progress(now)
         if self.health_enabled:
             self.probe_due(now)
         if not self.stopping:
@@ -532,7 +611,9 @@ class Coordinator:
             with self._lock:
                 manual = dict(self.manual)
             plan = self.sched.plan(now, max_concurrent=self.max_concurrent, down=down, unknown=unknown,
-                                   forced=set(forced or ()) | set(manual))
+                                   forced=set(forced or ()) | set(manual), hold=self._hold(now))
+            for name in [n for n in self.busy if n not in {s.name for s, _ in plan.deferred}]:
+                del self.busy[name]
             for spec, reason in plan.skipped:
                 self._forget_adhoc(spec)
                 self.log(f"job {spec.name} skipped: {reason}")
@@ -623,6 +704,10 @@ class Coordinator:
         with self._lock:
             return [s.to_dict(running.get(n)) for n, s in self.health.items()]
 
+    def _progress_of(self, name: str) -> dict[str, Any] | None:
+        run = self.runs.get(name)
+        return run.row.get("progress") if run is not None else None
+
     def jobs_snapshot(self) -> list[dict[str, Any]]:
         now = self.clock()
         out = []
@@ -632,10 +717,12 @@ class Coordinator:
                             "roots": list(spec.roots or ()), "schedule": "ad hoc", "options": [],
                             "enabled": True, "run_on_start": False, "next_due": None, "adhoc": True,
                             "running": spec.name in self.runs, "queued": spec.name in self.manual,
+                            "progress": self._progress_of(spec.name), "deferred": self.busy.get(spec.name),
                             "last_outcome": self.last_outcome.get(spec.name)})
                 continue
             out.append({**spec.to_dict(), "next_due": iso(self.sched.next_due(spec, now)),
                         "running": spec.name in self.runs, "queued": spec.name in self.manual,
+                        "progress": self._progress_of(spec.name), "deferred": self.busy.get(spec.name),
                         "last_outcome": self.last_outcome.get(spec.name)})
         return out
 
