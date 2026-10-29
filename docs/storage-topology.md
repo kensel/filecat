@@ -640,7 +640,10 @@ Server, MongoDB; `topology_store.py`, contract test in
 config and are merged at read time (a stored snapshot of the same name replaces
 them). Commands: `filecat storage collect [--agent NAME]`, `storage show [HOST]
 [--json]`, and `storage links`, which resolves over the stored snapshots when no
-`--snapshot` file is given. The web viewer is not wired yet.
+`--snapshot` file is given. The web viewer's **Topology** page (`filecat serve`, `GET /api/topology`,
+`topology_view.py`) shows every host's tree with capacity, the resolved links, the
+physical totals and each share joined (case-insensitively, by `unc`) to its catalog
+root; roots no share accounts for are listed as "not in topology".
 Why not a document per node:
 
 - A topology is small (tens, at most a few hundred nodes) and always read

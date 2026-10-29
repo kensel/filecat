@@ -186,6 +186,8 @@ def serve_output(db: str, root: str) -> dict[str, bytes]:
                  "records": ({"root": root, "limit": "500", "sort": "rel_path"},),
                  "records folders": ({"root": root, "parent": "", "limit": "500"},),
                  "records rollup": ({"root": root, "kind": "rollup"},),
+                 "rollups": ({},), "rollups by root": ({"root": root},),
+                 "rollups by tag": ({"root": root, "tag": "[REDACTED]"},), "topology": ({},),
                  "subtree": ({"root": root, "parent": ""},),
                  "treemap": ({"root": root, "prefix": "", "depth": "3"},)}
         for name, (params,) in calls.items():

@@ -111,6 +111,22 @@ td.wide { min-width: 220px; }
 .status { min-height: 20px; }
 .swatch { display: inline-block; width: 12px; height: 12px; border-radius: 3px; vertical-align: -1px; margin-right: 6px; }
 tr.hl td { background: var(--hover); }
+/* topology page */
+.topo details.host { background: var(--panel); border: 1px solid var(--line); border-radius: 8px; margin-bottom: 12px; }
+.topo details.host > summary { padding: 10px 14px; cursor: pointer; font-size: 14px; }
+.topo details.host.flash { outline: 2px solid var(--accent); }
+.topo .hostbody { border-top: 1px solid var(--line); padding: 8px 14px 12px; }
+.topo details.node { margin-left: 18px; }
+.topo details.node > summary, .topo .node.leaf { padding: 3px 0; }
+.topo details.node > summary { cursor: pointer; }
+.topo .node.leaf { margin-left: 18px; }
+.topo .nrow { display: inline-flex; flex-wrap: wrap; gap: 2px 10px; align-items: baseline; }
+.topo .children { border-left: 1px dotted var(--line); }
+.cap { display: inline-block; width: 140px; height: 8px; background: var(--code); border-radius: 4px; overflow: hidden; vertical-align: middle; }
+.cap i { display: block; height: 100%; background: var(--bar); }
+.cap.hot i { background: var(--warn); }
+.topo .sharebox { margin: 2px 0 4px 18px; padding: 4px 10px; border-left: 3px solid var(--accent-soft); }
+.topo h3 { font-size: 13px; margin: 10px 0 4px; color: var(--muted); }
 @media (max-width: 640px) {
   .grid { grid-template-columns: 1fr; }
   header { padding: 8px 16px; }
@@ -128,6 +144,8 @@ tr.hl td { background: var(--hover); }
     <a data-view="graph" href="#graph">Graph</a>
     <a data-view="browse" href="#browse">Browse</a>
     <a data-view="records" href="#records">Records</a>
+    <a data-view="rollups" href="#rollups">Rollups</a>
+    <a data-view="topology" href="#topology">Topology</a>
   </nav>
   <label>Root <select id="root"></select></label>
   <span class="spacer"></span>
@@ -153,7 +171,7 @@ function h(tag, attrs, ...kids) {
     else if (k.startsWith("on")) el.addEventListener(k.slice(2), v);
     else el.setAttribute(k, v === true ? "" : v);
   }
-  for (const kid of kids.flat()) if (kid != null && kid !== false) el.append(kid instanceof Node ? kid : String(kid));
+  for (const kid of kids.flat(Infinity)) if (kid != null && kid !== false) el.append(kid instanceof Node ? kid : String(kid));
   return el;
 }
 function bytes(n) {
@@ -873,7 +891,7 @@ async function viewGraph(params, force) {
     const lines = [h("span", {class: "mono"}, where + (n.kind === "files" ? "  (files directly here)" : ""))];
     if (n.merged) lines.push(h("div", {}, `${num(n.merged)} smaller folders, merged`));
     if (n.rollup) lines.push(h("div", {class: "muted"}, `${n.rollup.tag} rollup: ${num(n.rollup.total_dirs)} folders, ${num(n.rollup.matched)} folded in`
-      + (n.rollup.newest_mtime_ns ? `, newest ${when(n.rollup.newest_mtime_ns)}` : "") + (n.rollup.partial ? " - a lower bound" : "")));
+      + (n.rollup.newest_mtime_ns && n.rollup.tag !== "[REDACTED]" ? `, newest ${when(n.rollup.newest_mtime_ns)}` : "") + (n.rollup.partial ? " - a lower bound" : "")));
     lines.push(h("div", {}, h("b", {}, bytes(n.bytes)), ` in ${num(n.files)} files`));
     if (n.kind === "pending") lines.push(h("div", {class: "muted"}, n.error ? "Error: " + n.error : "size from the root index; summarising…"));
     if (t.seg && (mode === "suffix" || mode === "mime")) lines.push(h("div", {}, h("span", {class: "swatch", style: `background:${t.seg[2]}`}),
@@ -1147,9 +1165,10 @@ async function viewRecords(params) {
       h("button", {title: "remove filter", onclick: () => go("records", rest)}, "×"));
   });
   const search = h("input", {type: "search", placeholder: "Path contains…", value: p.q || "", size: 28});
+  const rollupOnly = p.kind === "rollup" ? null : h("button", {title: "only the rollup records (counted, not listed)", onclick: () => go("records", {...p, kind: "rollup", offset: ""})}, "Rollups only");
   const form = h("form", {onsubmit: e => { e.preventDefault(); go("records", {...p, q: search.value, offset: ""}); }}, search);
   const holder = h("section", {class: "card"}, h("div", {class: "loading"}, "Querying…"));
-  show(h("div", {}, h("div", {class: "toolbar"}, form, chips), holder));
+  show(h("div", {}, h("div", {class: "toolbar"}, form, rollupOnly, chips), holder));
   let r;
   try { r = await api("/api/records", p); } catch (e) { return fill(holder, failed(e)); }
   const q = r.query;
@@ -1162,10 +1181,13 @@ async function viewRecords(params) {
   }));
   const rows = r.rows.map(d => h("tr", {class: "click", onclick: () => go("record", {root, rel_path: d.rel_path})},
     h("td", {class: "path"}, d.rel_path || "(root)", d.unreadable ? h("span", {class: "badge warn"}, "unreadable")
-      : d.errors ? h("span", {class: "badge warn"}, `${d.errors} error${d.errors > 1 ? "s" : ""}`) : null),
+      : d.errors ? h("span", {class: "badge warn"}, `${d.errors} error${d.errors > 1 ? "s" : ""}`) : null,
+      d.kind === "rollup" && d.rollup ? [h("span", {class: "badge", title: "a rollup: counted, not listed"}, d.rollup.tag),
+        d.rollup.partial ? h("span", {class: "badge warn", title: "lower bound: some entries could not be read"}, "partial") : null,
+        h("span", {class: "sub"}, `${num(d.rollup.total_files)} files, ${num(d.rollup.total_dirs)} folders, ${num(d.rollup.matched)} folded in`)] : null),
     h("td", {}, d.kind || ""), h("td", {class: "muted hide-sm"}, d.mime || ""),
     h("td", {class: "num", title: d.size == null ? "" : num(d.size) + " bytes"}, d.kind === "dir" ? "" : bytes(d.size)),
-    h("td", {class: "num muted"}, when(d.mtime_ns))));
+    h("td", {class: "num muted"}, d.kind === "rollup" && d.rollup && d.rollup.tag === "[REDACTED]" ? "" : when(d.mtime_ns))));
   const end = Math.min(q.offset + q.limit, r.total);
   const pager = h("div", {class: "pager"},
     h("button", {disabled: q.offset <= 0, onclick: () => go("records", {...p, offset: Math.max(0, q.offset - q.limit)})}, "‹ Prev"),
@@ -1319,7 +1341,7 @@ async function viewRecord(params) {
     fact("type", d.mime ? h("a", {href: route("records", {root, mime: d.mime, files_only: 1})}, d.mime) : null),
     fact("description", probe.mime_glob_desc),
     fact("extension", d.kind !== "dir" ? h("a", {href: route("records", {root, suffix: d.suffix || "(none)", files_only: 1})}, d.suffix || "(none)") : null),
-    fact("modified", when(d.mtime_ns)), fact("created", when(d.ctime_ns)),
+    fact("modified", d.kind === "rollup" && (probe.rollup || {}).tag === "[REDACTED]" ? null : when(d.mtime_ns)), fact("created", when(d.ctime_ns)),
     fact("sha256", d.sha256 ? h("span", {class: "mono"}, d.sha256) : null),
     fact("folder", d.rel_path ? h("a", {href: route("browse", {root, parent: d.kind === "dir" ? d.rel_path : dirOf(d.rel_path)})},
       d.kind === "dir" ? "browse this folder" : (dirOf(d.rel_path) || "(root)")) : null));
@@ -1354,17 +1376,218 @@ async function loadMembers(card, root, rel, offset, tbody) {
     h("button", {onclick: () => loadMembers(card, root, rel, offset + m.limit, tbody)}, "Load more members")));
 }
 
+// --- topology (storage <-> shares <-> catalog roots; GET /api/topology) -----
+function capBar(used, size) {
+  if (used == null || !size) return null;
+  const pct = Math.min(100, used / size * 100);
+  return h("span", {class: "cap" + (pct >= 90 ? " hot" : ""), title: `${bytes(used)} of ${bytes(size)} (${pct.toFixed(1)}%)`,
+                    role: "img", "aria-label": `${pct.toFixed(0)}% used`}, h("i", {style: `width:${pct.toFixed(1)}%`}));
+}
+function jumpToHost(key) {
+  const el = document.getElementById("host-" + key);
+  if (!el) return;
+  el.open = true;
+  el.scrollIntoView({block: "start"});
+  el.classList.add("flash");
+  setTimeout(() => el.classList.remove("flash"), 1600);
+}
+function hostLink(name, key) {
+  return h("a", {href: "#topology", onclick: e => { e.preventDefault(); jumpToHost((key || name).toLowerCase()); }}, name);
+}
+function shareRoot(n) {
+  const r = n.root;
+  if (!r) return h("div", {class: "sharebox muted"}, `${n.unc || n.name}: no catalog root scanned`);
+  const rootLine = (x, sub) => h("div", {},
+    h("a", {href: route("browse", {root: x.root, parent: ""})}, x.root), " ",
+    h("span", {class: "muted"}, `${x.files == null ? "no files counted" : num(x.files) + " files, " + bytes(x.bytes)}`
+      + (x.last_scan ? ` · last scan ${ago(x.last_scan)}` : " · never scanned")), " ",
+    h("a", {href: route("graph", {root: x.root})}, "graph"), " · ", h("a", {href: route("summary", {root: x.root})}, "summary"),
+    x.state && x.state !== "ok" && x.state !== "never" ? h("span", {class: "badge warn"}, x.state) : null,
+    sub ? h("span", {class: "muted"}, " (beneath the share)") : null);
+  return h("div", {class: "sharebox"}, r.root ? rootLine(r, false) : null, (r.below || []).map(b => rootLine(b, true)));
+}
+function topoNode(n) {
+  const label = h("span", {class: "nrow"},
+    h("span", {class: "badge"}, n.type), h("b", {}, n.name),
+    h("span", {class: "muted"}, [n.level, n.type === "group" && n.role && n.role !== "data" ? n.role : null, n.kind,
+      n.mount ? `${n.mount} ${n.fs_type || ""}`.trim() : null, n.type === "share" ? (n.protocols || []).join("/") : null,
+      n.thin === true ? "thin" : n.thin === false ? "thick" : null].filter(Boolean).join(" · ")),
+    n.size_bytes != null ? h("span", {class: "num", title: num(n.size_bytes) + " bytes"}, bytes(n.size_bytes)) : null,
+    n.type === "lun" || n.type === "vdisk" ? (n.allocated_bytes != null ? capBar(n.allocated_bytes, n.size_bytes) : null)
+      : capBar(n.used_bytes, n.size_bytes),
+    n.used_bytes != null && n.type !== "lun" && n.type !== "vdisk" ? h("span", {class: "muted"}, `${bytes(n.used_bytes)} used`
+      + (n.free_bytes != null ? `, ${bytes(n.free_bytes)} free` : "")) : null,
+    n.allocated_bytes != null && (n.type === "lun" || n.type === "vdisk") ? h("span", {class: "muted"}, `${bytes(n.allocated_bytes)} allocated`) : null,
+    n.type === "share" && n.unc ? h("span", {class: "mono muted"}, n.unc) : null,
+    n.target ? h("span", {class: "muted"}, `target ${n.target}`) : null,
+    n.vm ? h("span", {class: "muted"}, `vm ${n.vm.name || n.vm.id}`) : null,
+    n.attached === false ? h("span", {class: "badge"}, "not attached") : null,
+    n.health && n.health !== "ok" ? h("span", {class: "badge warn"}, n.health) : null,
+    n.detail && n.type === "volume" ? h("span", {class: "muted"}, n.detail) : null);
+  const extras = [];
+  if (n.type === "share") extras.push(shareRoot(n));
+  if ((n.guests || []).length) extras.push(h("div", {class: "sharebox"}, "guest server: ",
+    n.guests.map((g, i) => [i ? ", " : "", g.host ? hostLink(g.host) : h("span", {class: "mono"}, g.server)]),
+    h("span", {class: "muted"}, " (jump to its section)")));
+  else if ((n.consumers || []).length) extras.push(h("div", {class: "sharebox"}, "used by: ",
+    n.consumers.map((c, i) => [i ? ", " : "", hostLink(c.host), ` ${c.name}`])));
+  if (n.provider) extras.push(h("div", {class: "sharebox"}, "made of ", hostLink(n.provider.host), ` ${n.provider.name}`,
+    h("span", {class: "muted"}, ` (${n.provider.via}${n.provider.note ? ", " + n.provider.note : ""})`),
+    n.provider.initiator_ok === false ? h("span", {class: "badge warn"}, "not on the LUN's ACL") : null));
+  const kids = n.children || [];
+  if (!kids.length) return h("div", {class: "node leaf"}, label, extras);
+  return h("details", {class: "node", open: n.type !== "share"}, h("summary", {}, label), extras,
+    h("div", {class: "children"}, kids.map(topoNode)));
+}
+function topoHost(hst) {
+  const cap = hst.capacity || {};
+  const head = h("summary", {}, h("b", {}, hst.name), " ", h("span", {class: "badge"}, hst.platform),
+    h("span", {class: "badge" + (hst.source === "manual" ? "" : " ok")}, hst.source === "manual" ? "written by hand" : "collected"),
+    hst.kind === "cluster" ? h("span", {class: "badge"}, "cluster") : null, " ",
+    h("span", {class: "muted"}, [hst.os, hst.source === "manual" ? "no snapshot (filecat.toml)"
+      : hst.scanned_at ? `collected ${ago(hst.scanned_at, null)}` : null,
+      cap.volume_bytes ? `volumes ${bytes(cap.volume_used_bytes)} of ${bytes(cap.volume_bytes)}` : null].filter(Boolean).join(" · ")));
+  const links = [];
+  if ((hst.attached_to || []).length) links.push(h("div", {}, "made of storage on: ", hst.attached_to.map((x, i) => [i ? ", " : "", hostLink(x)])));
+  if ((hst.provides_to || []).length) links.push(h("div", {}, "provides storage to: ",
+    hst.provides_to.map((x, i) => [i ? ", " : "", hostLink(x)])));
+  const disks = hst.disks || [];
+  const diskTable = disks.length ? h("details", {}, h("summary", {class: "muted"}, `${num(disks.length)} disks · ${bytes(cap.disk_bytes)}`),
+    h("div", {class: "scroll"}, h("table", {}, h("thead", {}, h("tr", {}, ["disk", "model", "media", "slot", "serial"].map(c => h("th", {}, c)),
+      h("th", {class: "num"}, "size"), h("th", {}, "made of"))),
+      h("tbody", {}, disks.map(d => h("tr", {}, h("td", {}, d.name), h("td", {class: "muted"}, d.model || ""), h("td", {class: "muted"}, d.media || ""),
+        h("td", {class: "muted"}, d.slot || ""), h("td", {class: "mono muted"}, d.serial || ""),
+        h("td", {class: "num"}, bytes(d.size_bytes)),
+        h("td", {}, d.provider ? [hostLink(d.provider.host), ` ${d.provider.name}`] : d.virtual ? h("span", {class: "badge warn"}, "no provider found") : "")))))))
+    : null;
+  const vms = (hst.vms || []).length ? h("div", {class: "muted"}, `virtual machines: ${hst.vms.map(v => v.name).join(", ")}`) : null;
+  return h("details", {class: "host", id: "host-" + hst.key, open: true}, head,
+    h("div", {class: "hostbody"}, (hst.notes || []).map(t => h("div", {class: "note"}, "note: " + t)), links, diskTable,
+      h("h3", {}, "pools, volumes, shares and block storage"),
+      (hst.tree || []).length ? (hst.tree || []).map(topoNode) : h("div", {class: "muted"}, "nothing above the disks"), vms));
+}
+async function viewTopology() {
+  show(h("div", {class: "loading"}, "Loading topology…"));
+  let d;
+  try { d = await api("/api/topology"); } catch (e) { return show(failed(e)); }
+  if (parseHash().view !== "topology") return;
+  if (!d.hosts.length && !d.waiting.length) return show(h("div", {class: "topo"}, d.problem ? h("div", {class: "errors"}, d.problem) : null,
+    h("section", {class: "card"}, h("h2", {}, "Topology"),
+      h("div", {class: "empty"}, "No storage topology has been collected for this catalog. Run ", h("span", {class: "mono"}, "filecat storage collect"),
+        " (it reads each [[agents]] host through its agent), or describe hosts by hand with [[storage.hosts]] in filecat.toml."))));
+  const ps = d.physical_summary;
+  const kpi = (v, label) => h("div", {class: "kpi"}, h("b", {}, v), h("span", {}, label));
+  const sumRow = ps ? h("div", {class: "kpis"}, kpi(num(d.hosts.length), "hosts"), kpi(bytes(ps.disk_bytes), "physical disks"),
+    kpi(`${bytes(ps.volume_used_bytes)} of ${bytes(ps.volume_bytes)}`, "volumes used (counted once)"),
+    kpi(bytes(ps.share_used_bytes), "in shares"), kpi(num(d.links.length), "links between hosts")) : null;
+  const unresolved = d.unresolved.length ? h("section", {class: "card"}, h("h2", {}, "Expecting a provider, none found"),
+    h("div", {class: "scroll"}, h("table", {}, h("tbody", {}, d.unresolved.map(u => h("tr", {},
+      h("td", {}, hostLink(u.host), ` ${u.name}`), h("td", {class: "muted"}, u.reason + (u.wanted ? ` (${u.wanted})` : ""))))))))
+    : null;
+  const waiting = d.waiting.length ? h("section", {class: "card"}, h("h2", {}, "No snapshot yet"),
+    h("div", {class: "scroll"}, h("table", {}, h("tbody", {}, d.waiting.map(w => h("tr", {}, h("td", {}, w.name),
+      h("td", {class: "muted"}, `agent ${w.agent}: run filecat storage collect --agent ${w.agent}`)))))))
+    : null;
+  const outside = h("section", {class: "card"}, h("h2", {}, "Not in topology", h("small", {}, `${num(d.roots_not_in_topology.length)} of ${num(d.roots)} roots`)),
+    d.roots_not_in_topology.length ? h("div", {class: "scroll"}, h("table", {}, h("thead", {}, h("tr", {}, h("th", {}, "root"),
+      h("th", {class: "num"}, "files"), h("th", {class: "num"}, "size"), h("th", {}, "last scan"))),
+      h("tbody", {}, d.roots_not_in_topology.map(r => h("tr", {}, h("td", {class: "path"}, h("a", {href: route("browse", {root: r.root, parent: ""})}, r.root)),
+        h("td", {class: "num"}, num(r.files)), h("td", {class: "num"}, bytes(r.bytes)), h("td", {class: "muted"}, r.last_scan ? ago(r.last_scan) : "never"))))))
+      : h("div", {class: "empty"}, "Every root is a share (or beneath one) of a host above."));
+  const all = h("button", {onclick: () => document.querySelectorAll(".topo details").forEach(x => x.open = true)}, "Expand all");
+  const none = h("button", {onclick: () => document.querySelectorAll(".topo details.node, .topo details.host > .hostbody details").forEach(x => x.open = false)}, "Collapse trees");
+  show(h("div", {class: "topo"}, d.problem ? h("div", {class: "errors"}, "filecat.toml: " + d.problem) : null, sumRow,
+    h("div", {class: "toolbar"}, all, none, h("span", {class: "note"}, "collected by `filecat storage collect`; hosts are listed by name")),
+    d.hosts.map(topoHost), h("div", {class: "stack"}, unresolved, waiting, outside)));
+}
+
+// --- rollups (the audit of `filecat rollups list`; GET /api/rollups) ---------
+const ROLLUP_COLS = [
+  {key: "root", label: "root"}, {key: "tag", label: "tag"}, {key: "parent", label: "folder"},
+  {key: "files", label: "files", num: true}, {key: "dirs", label: "folders", num: true}, {key: "size", label: "size", num: true},
+  {key: "newest_mtime_ns", label: "newest", num: true}, {key: "flags", label: "", sortable: false},
+];
+async function viewRollups(params) {
+  const p = {...params};
+  const holder = h("div", {}, h("div", {class: "loading"}, "Loading rollups…"));
+  show(holder);
+  let d;
+  try { d = await api("/api/rollups", {root: p.root || "", tag: p.tag || ""}); } catch (e) { return fill(holder, failed(e)); }
+  if (parseHash().view !== "rollups") return;
+  const sort = ROLLUP_COLS.some(c => c.key === p.sort && c.sortable !== false) ? p.sort : "size";
+  const desc = p.desc == null ? !!ROLLUP_COLS.find(c => c.key === sort).num : p.desc === "1";
+  const cmp = (a, b) => {
+    const x = a[sort] ?? (typeof b[sort] === "number" ? 0 : ""), y = b[sort] ?? (typeof a[sort] === "number" ? 0 : "");
+    return (typeof x === "number" ? x - y : String(x).localeCompare(String(y))) || a.root.localeCompare(b.root) || a.parent.localeCompare(b.parent);
+  };
+  const rows = [...d.rows].sort((a, b) => desc ? cmp(b, a) : cmp(a, b));
+  const manyRoots = d.roots.length > 1;
+  const rootSel = h("select", {onchange: e => go("rollups", {...p, root: e.target.value || null})},
+    h("option", {value: ""}, "All roots"), d.roots.map(r => h("option", {value: r, selected: r === p.root}, r)));
+  const tagSel = h("select", {onchange: e => go("rollups", {...p, tag: e.target.value || null})},
+    h("option", {value: ""}, "All tags"), d.tags.map(t => h("option", {value: t, selected: t === p.tag}, t)));
+  const t = d.totals;
+  const kpi = (v, label) => h("div", {class: "kpi"}, h("b", {}, v), h("span", {}, label));
+  const byTag = h("section", {class: "card"}, h("h2", {}, "By tag"),
+    h("div", {class: "scroll"}, h("table", {}, h("thead", {}, h("tr", {}, h("th", {}, "tag"), h("th", {class: "num"}, "rollups"),
+      h("th", {class: "num"}, "files"), h("th", {class: "num"}, "size"), h("th", {class: "num"}, "newest"))),
+      h("tbody", {}, d.by_tag.map(x => h("tr", {class: "click", onclick: () => go("rollups", {...p, tag: x.tag})},
+        h("td", {}, h("span", {class: "badge"}, x.tag), x.partial ? h("span", {class: "badge warn"}, `${x.partial} partial`) : null),
+        h("td", {class: "num"}, num(x.rollups)), h("td", {class: "num"}, num(x.files)),
+        h("td", {class: "num", title: num(x.size) + " bytes"}, bytes(x.size)),
+        h("td", {class: "num muted"}, x.tag === "[REDACTED]" ? "" : when(x.newest_mtime_ns))))))));
+  const byRoot = manyRoots ? h("section", {class: "card"}, h("h2", {}, "By root"),
+    h("div", {class: "scroll"}, h("table", {}, h("thead", {}, h("tr", {}, h("th", {}, "root"), h("th", {class: "num"}, "rollups"),
+      h("th", {class: "num"}, "files"), h("th", {class: "num"}, "size"))),
+      h("tbody", {}, d.by_root.map(x => h("tr", {class: "click", onclick: () => go("rollups", {...p, root: x.root})},
+        h("td", {class: "path"}, x.root), h("td", {class: "num"}, num(x.rollups)), h("td", {class: "num"}, num(x.files)),
+        h("td", {class: "num", title: num(x.size) + " bytes"}, bytes(x.size)))))))) : null;
+  const head = h("tr", {}, ROLLUP_COLS.filter(c => c.key !== "root" || manyRoots).map(c => {
+    const on = sort === c.key, sortable = c.sortable !== false;
+    return h("th", {class: (c.num ? "num " : "") + (sortable ? "sort" : ""),
+      onclick: sortable ? () => go("rollups", {...p, sort: c.key, desc: on ? (desc ? "0" : "1") : (c.num ? "1" : "0")}) : null},
+      c.label, on ? (desc ? " ▼" : " ▲") : "");
+  }), h("th", {}, "made by"), h("th", {}));
+  const body = rows.map(r => {
+    const red = r.redacted;
+    const flags = [r.partial ? h("span", {class: "badge warn", title: "lower bound: some entries could not be read"}, "partial") : null,
+      r.errors ? h("span", {class: "badge warn"}, `${num(r.errors)} unreadable`) : null,
+      red ? h("span", {class: "badge", title: "counts only: names are never recorded"}, "counts only") : null];
+    return h("tr", {},
+      manyRoots ? h("td", {class: "path"}, r.root) : null,
+      h("td", {}, h("span", {class: "badge"}, r.tag)),
+      h("td", {class: "path"}, red ? (r.parent || "(the root)") : h("a", {href: route("browse", {root: r.root, parent: r.parent})}, r.parent || "(the root)")),
+      h("td", {class: "num"}, num(r.files)), h("td", {class: "num"}, num(r.dirs)),
+      h("td", {class: "num", title: num(r.size) + " bytes" + (r.allocated_size ? `, ${bytes(r.allocated_size)} allocated` : "")}, bytes(r.size)),
+      h("td", {class: "num muted"}, red ? "" : when(r.newest_mtime_ns)),
+      h("td", {}, flags),
+      h("td", {class: "muted"}, Object.entries(r.rules).map(([k, n]) => `${n} ${k}`).join(", ")),
+      h("td", {}, red ? "" : h("a", {href: route("record", {root: r.root, rel_path: r.rel_path})}, "record")));
+  });
+  fill(holder, h("div", {class: "toolbar"}, h("label", {}, "Root ", rootSel), h("label", {}, "Tag ", tagSel),
+      p.root || p.tag ? h("button", {onclick: () => go("rollups", {})}, "Clear filters") : null,
+      h("span", {class: "note"}, "from the rollup records; what `filecat rollups list` prints")),
+    h("div", {class: "kpis"}, kpi(num(t.rollups), "rollups"), kpi(num(t.files), "files inside"), kpi(num(t.dirs), "folders inside"),
+      kpi(bytes(t.size), "size"), t.partial ? kpi(num(t.partial), "partial (lower bounds)") : null),
+    d.rows.length ? h("div", {class: "stack"}, h("div", {class: "grid"}, byTag, byRoot),
+      h("section", {class: "card"}, h("h2", {}, "Rollups", h("small", {}, `${num(rows.length)} by ${manyRoots ? "root, " : ""}tag and folder`)),
+        h("div", {class: "scroll"}, h("table", {}, h("thead", {}, head), h("tbody", {}, body)))))
+      : h("section", {class: "card"}, h("div", {class: "empty"}, p.root || p.tag ? "No rollups match these filters."
+        : "No rollups in this catalog: nothing was folded into a [TAG] record. See `filecat rollups suggest`.")));
+}
+
 // --- shell -----------------------------------------------------------
 const VIEWS = {roots: viewRoots, server: viewServer, summary: viewSummary, graph: viewGraph, records: viewRecords, browse: viewBrowse,
                record: viewRecord};
+Object.assign(VIEWS, {rollups: viewRollups, topology: viewTopology});
 async function render() {
   const {view, params} = parseHash();
   if (params.root && params.root !== $root.value && INFO.roots.includes(params.root)) $root.value = params.root;
   for (const a of document.querySelectorAll("#nav a")) {
     a.classList.toggle("on", a.dataset.view === (view === "record" ? "browse" : view));
-    a.href = route(a.dataset.view, a.dataset.view === "graph" ? {} : {root: $root.value});  // Graph opens on every root
+    a.href = route(a.dataset.view, ["graph", "rollups", "topology"].includes(a.dataset.view) ? {} : {root: $root.value});  // these open on every root
   }
-  if (!INFO.roots.length && view !== "server") return show(h("div", {class: "empty"}, "This catalog has no records yet."));
+  if (!INFO.roots.length && view !== "server" && view !== "topology") return show(h("div", {class: "empty"}, "This catalog has no records yet."));
   (VIEWS[view] || viewRoots)(params);
 }
 $root.addEventListener("change", () => {

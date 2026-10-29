@@ -17,6 +17,11 @@ Read-only. Serves one page (filecat/web/index.html) and a JSON API:
     GET /api/agents                    filecat server: agent health (live when `filecat server --serve`
                                        runs this viewer, else the last state saved in the catalog)
     GET /api/jobs?limit=&job=&agent=   filecat server: the configured jobs and the recent run history
+    GET /api/topology                  storage topology: every host's disks, pools, volumes, shares, LUNs and
+                                       VM disks with capacity, the links between hosts, the physical totals,
+                                       and each share joined to its catalog root (topology_view.py)
+    GET /api/rollups?root=&tag=        `filecat rollups list` as rows by root, tag and parent folder; a
+                                       [REDACTED] row is counts only (rollups_view.py)
     POST /api/pin    {"ids": [...], "label": ...}   pin treemap snapshots together
     POST /api/unpin  {"ids": [...]} or {"at": ...}  unpin snapshots, or a whole pin
     POST /api/login {"password": ...}  filecat server --serve only: a session cookie (docs/agent-server.md)
@@ -470,10 +475,24 @@ class Catalog:
             return {"supported": True, "rows": rows[:limit], "more": len(rows) > limit}
         return {"offset": offset, "limit": limit, **self.call(page)}
 
+    def topology(self, p: dict[str, str]) -> dict[str, Any]:
+        """The storage topology of every host with the shares joined to their catalog roots
+        (topology_view.py); empty `hosts` when `filecat storage collect` has not run."""
+        from . import topology_view
+        path = getattr(self.args, "config", None)
+        return self.call(lambda b: topology_view.build(b, path))
+
+    def rollups(self, p: dict[str, str]) -> dict[str, Any]:
+        """The audit of `filecat rollups list` by root, tag and parent folder (rollups_view.py);
+        a [REDACTED] row is counts only."""
+        from . import rollups_view
+        return self.call(lambda b: rollups_view.build(b, p.get("root") or None, p.get("tag") or None))
+
 
 ROUTES = {"/api/info": "info", "/api/roots": "roots", "/api/summary": "summary", "/api/records": "records",
           "/api/subtree": "subtree", "/api/treemap": "treemap", "/api/record": "record", "/api/members": "members",
           "/api/backends": "backends", "/api/pins": "pins", "/api/agents": "agents", "/api/jobs": "jobs"}
+ROUTES.update({"/api/topology": "topology", "/api/rollups": "rollups"})
 POST_ROUTES = {"/api/backend": "select", "/api/pin": "pin", "/api/unpin": "unpin"}
 RUN_PATH = re.compile(r"^/api/jobs/([A-Za-z0-9._@-]{1,128})/run$")      # POST only: "run now"
 CONTROL_HEADER = "X-Filecat-Control"
