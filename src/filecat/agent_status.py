@@ -11,7 +11,8 @@ from dataclasses import asdict, dataclass, field
 from typing import Any
 
 from . import agent_expected, config
-from .agent_client import AgentClient, AgentError, FingerprintMismatch
+from .agent_client import (LABEL_HEALTH, ActivityUnsupported, AgentClient, AgentError, AgentSession,
+                           FingerprintMismatch)
 
 _PATHLIKE = re.compile(r"""(\\\\[^\s'"]+|[A-Za-z]:[\\/][^\s'"]*|/[^\s'"]+)""")
 
@@ -50,6 +51,8 @@ class AgentStatus:
     allowlist_match: bool | None = None     # None: not known (agent silent, or nothing expected)
     deny_match: bool | None = None
     warnings: list[str] = field(default_factory=list)
+    sessions: list[dict[str, Any]] | None = None   # other connections on the agent (`activity`); None: not asked or not supported
+    activity_note: str | None = None
 
     @property
     def ok(self) -> bool:
@@ -66,12 +69,30 @@ class AgentStatus:
         return d
 
 
-def probe(agent: config.AgentConfig, timeout: float = 5.0,
+def session_dict(s: AgentSession) -> dict[str, Any]:
+    """An agent session as `agents status --json` shows it: the agent's numbers plus the
+    files total and the files/s over the connection's life."""
+    return {**asdict(s), "files": s.files, "rate": round(s.rate, 1)}
+
+
+def _add_activity(st: AgentStatus, client: AgentClient) -> None:
+    """The other sessions on the agent (never our own); an older agent is a note, not a failure."""
+    try:
+        act = client.activity()
+    except ActivityUnsupported as exc:
+        st.activity_note = str(exc)
+    except AgentError as exc:
+        st.activity_note = f"activity not available: {exc.code}"
+    else:
+        st.sessions = [session_dict(s) for s in act.others()]
+
+
+def probe(agent: config.AgentConfig, timeout: float = 5.0, *, with_activity: bool = False, label: str = LABEL_HEALTH,
           table: dict[str, Any] | None = None) -> AgentStatus:
     st = AgentStatus(agent.name, agent.endpoint)
     try:
         client = AgentClient(agent.host, agent.port, agent.cert_sha256, agent.resolved_token(),
-                             timeout=timeout, io_timeout=timeout, name=agent.name)
+                             timeout=timeout, io_timeout=timeout, name=agent.name, label=label)
     except (config.ConfigError, ValueError) as exc:         # an unset ${VAR} for the token
         st.error, st.error_code = error_text(exc), "config"
         return st
@@ -95,6 +116,8 @@ def probe(agent: config.AgentConfig, timeout: float = 5.0,
             info.protocol, caps.platform or info.os, caps.allowlist_sha256, caps.deny_sha256, table)
         if st.mismatch:
             st.warnings.append(agent_expected.MISMATCH_WARNING)
+        if with_activity:
+            _add_activity(st, client)
     except FingerprintMismatch as exc:
         st.reachable, st.cert_pin = True, "mismatch"
         st.error, st.error_code = error_text(exc), exc.code

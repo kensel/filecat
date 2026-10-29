@@ -138,6 +138,11 @@ server keeps store detection, manifest verification, probing and Ollama.
   - [x] `filecat server`: the coordinator (agent health, `[[server.jobs]]` scans, storage collects and
     store re-sums on a schedule, job history and a lease in the catalog, `--once`, `--serve` with
     `/api/agents` and `/api/jobs`); [agent-server.md](agent-server.md).
+  - [x] Agent 0.2.1: connections carry a label, `activity` lists who is doing what (no paths), the agent
+    logs a status line per busy connection every 10 minutes; `filecat agents status` shows the other
+    sessions; `filecat server` defers a job while another client works on its agent (`max_jobs`) and
+    logs and stores each running job's progress every `progress_interval`
+    ([agent-protocol.md](agent-protocol.md#activity), [agent-server.md](agent-server.md)).
   - [x] `filecat scan` and `scan-everything` read a UNC root through the
     agent that covers it: listing, stat, measuring and probing from an
     agent-backed source (`fsource.py`, [scanning.md](scanning.md#6-scanning-through-filecat-agent)),

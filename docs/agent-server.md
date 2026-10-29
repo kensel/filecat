@@ -58,6 +58,23 @@ reachable; certificate pin ok/mismatch; `allow_roots` and `allow_roots_source`; 
 `allowlist_sha256` and `deny_sha256` and whether each matches what this filecat expects.
 `--json` is one object per agent. An error text never contains a path (section 8).
 
+With an agent 0.2.1 or newer it also asks `activity` and lists the **other** connections (its own is
+left out): the client's label, address, how long it has been connected, the command it runs, and
+files, data read and files/s:
+
+```
+ok   nas3     192.0.2.13:9876  filecat-agent 0.2.1, protocol 1, host nas3 (linux/x86_64)
+  ...
+  sessions     1 other connection(s)
+    scan \\nas3\Apps by kense@DESKTOP  192.0.2.20:51234  connected 12m  sum_subtree for 3m  41234 files, 12.40 GB read, 57.3 files/s
+```
+
+`no other connections` when the agent is otherwise idle; `activity not supported (agent 0.2.0)` for
+an older one (not a failure). In `--json` the object has `sessions` (a list, or `null`) and
+`activity_note`. Every `filecat` connection carries a label: `scan <roots> by user@host` (the CLI
+scan), `storage collect by user@host`, `job <name>: <kind>` (the server's jobs), and `health check`,
+`busy check`, `agents status` and `viewer` for the ones that look rather than work.
+
 Exit code: 1 when an agent is unreachable, its pin or token fails; with `--strict` also 1 on a hash
 mismatch or any warning; otherwise 0 (a mismatch is a warning, not an outage).
 
@@ -189,9 +206,21 @@ Rules, in this order for each due job (config order):
 
 1. **Same job still running: skip.** Recorded as a `skipped` run ("previous run still running"),
    logged, and the anchor moves to now so it is not logged again every tick.
-2. **At most one job per agent at a time.** If another job of the same agent runs (or was just
-   chosen this round) the job **waits**; it stays due and starts when the agent is free. Jobs of other
-   agents are not held up.
+2. **At most `max_jobs` jobs per agent at a time** (an `[[agents]]` key, default 1). If that many of
+   the agent's jobs run (or were just chosen this round) the job **waits**; it stays due and starts
+   when the agent is free. Jobs of other agents are not held up.
+   **Busy deferral.** The limit counts the agent's other clients too: just before a job that uses an
+   agent would start, the server asks the agent's `activity` and counts the other sessions that are
+   *working*: authenticated, and either running a command now or labelled and with a request in the
+   last 60 s. Health checks, the busy check itself, `agents status` and the viewer are labelled so they
+   never count, and the server's own jobs (label `job <name>: <kind>`) are counted once, not twice.
+   When our own running jobs plus the other working sessions reach `max_jobs`, the job does **not**
+   start, stays due, and is tried again on the next tick (the answer is reused for 5 s). One line is
+   logged per busy spell, with who and for how long:
+   `job nightly-apps waits: nas3 busy (scan \\nas3\Apps by kense@DESKTOP for 12m)` (and `and 2 more`).
+   The viewer's Jobs table shows `waiting: nas3 busy (...)` for it. An agent older than 0.2.1, or one
+   that cannot be asked, falls back to counting the server's own running jobs only. The ad-hoc scan
+   of a root no agent covers (SMB) is never deferred.
 3. **Global limit** `max_concurrent` (default 2; 1 for the file backends `sqlite` and `jsonl`, whose
    writers do not like company). Over the limit a job waits.
 4. A job for an agent that is `down` is skipped (above). `max_runtime` (optional, per job) cancels a
@@ -247,6 +276,7 @@ health_interval     = "60s"     # agent probe every...
 health_timeout      = "5s"
 health_backoff_max  = "10m"     # a down agent is probed less often, up to this
 max_concurrent      = 2         # jobs at once (default 1 on sqlite/jsonl catalogs)
+progress_interval   = "10m"     # a log line and a stored progress per running job; 0 turns it off
 lease_ttl           = "90s"
 shutdown_grace      = "30s"
 history_keep        = 500       # job runs kept, newest first...
@@ -291,6 +321,23 @@ name      = "summaries"
 kind      = "summaries"         # no agent: it reads the catalog
 every     = "6h"
 ```
+
+`[[agents]]` takes one key for the server: `max_jobs = 1` (a whole number from 1 to 64): how many jobs,
+the server's and other clients' together, the agent takes at once (rule 2 above).
+
+**Progress.** Every `progress_interval` (default `10m`; `0`, a number and not `"0s"`, turns it off) each
+running job gets one log line and one small write to its run in the catalog: 
+
+```
+job nightly-apps progress: scan on nas3, 10m elapsed, 1200 files, 5.00 GB, 2.0 files/s, root \\nas3\Apps
+```
+
+and `progress` = `{"at": ..., "files": ..., "bytes": ..., "rate": files per second since the last
+one, "root": the root being scanned}` in the run's record (`/api/jobs` `recent`, and `progress` of a
+running job in `jobs`, which the Server page shows under "running"). The counters are the scan's own
+(`scan.LiveProgress`: files and bytes of the roots done plus the one in progress), so it costs the scan
+nothing; a `storage-collect` has no file count and reports 0. Only the root, never a path inside it.
+The final record keeps the last progress.
 
 Validation (all errors name the table and key): unknown keys; a `name` used twice; `agent` not in
 `[[agents]]`; neither or both of `every` and `at`; `every` below 1 minute; `at` not `HH:MM`;

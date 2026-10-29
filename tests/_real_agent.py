@@ -48,11 +48,12 @@ FAKE_ONLY = {
     "unavailable": "missing allowlist binaries", "statfs_data": "canned statfs numbers",
     "subtree_overrides": "canned sum_subtree answers", "windows_attributes": "simulated Windows attributes",
     "attributes_after_list": "simulated Windows attributes",
+    "activity_supported": "an agent that predates `activity`", "sessions": "the fake's session table",
 }
 
 
 # Tests that assert a constant of the fake or reach into it; skipped in a real-agent run (conftest.py).
-FAKE_HELLO = "asserts the fake's hello constants (agent_version 0.2.0-test, hostname fake-nas)"
+FAKE_HELLO = "asserts the fake's hello constants (agent_version 0.2.1-test, hostname fake-nas)"
 WRONG_POLICY_ID = "makes the fake answer a wrong policy id (monkeypatches _fake_agent.policy_id); the real agent's is right"
 NOT_AGAINST_THE_REAL_AGENT = {
     "test_hello_and_auth": FAKE_HELLO,

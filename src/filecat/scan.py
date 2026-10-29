@@ -9,12 +9,13 @@ from __future__ import annotations
 
 import os
 import sys
+import threading
 import time
 from typing import Any
 
 from . import (aliases, cloudfiles, fsource, preflight, record, redaction, rollup, rootcase, rootinfo,
                secretfiles, summaries)
-from .agent_client import AgentError, Measurement
+from .agent_client import AgentError, Measurement, default_label
 from .backends import open_backend
 from .backends.base import Backend
 from .hashing import hash_file
@@ -231,6 +232,33 @@ class _Progress:
         self._mark = (self.files, self.measured, self.measured_bytes)
 
 
+class LiveProgress:
+    """What a running scan has done so far, readable from another thread (`filecat server` logs it
+    every progress_interval). The scan attaches the _Progress of each root in turn; the totals of
+    the roots already finished are kept. Counters only: reading it costs the scan nothing."""
+
+    def __init__(self) -> None:
+        self._lock = threading.Lock()
+        self._files = 0
+        self._bytes = 0
+        self._current: Any = None
+        self.root: str | None = None
+
+    def attach(self, progress: Any, root: str) -> None:
+        with self._lock:
+            if self._current is not None:
+                self._files += self._current.files
+                self._bytes += self._current.bytes
+            self._current, self.root = progress, root
+
+    def snapshot(self) -> tuple[int, int, str | None]:
+        """(files, bytes, the root being scanned) so far."""
+        with self._lock:
+            cur = self._current
+            return (self._files + (cur.files if cur is not None else 0),
+                    self._bytes + (cur.bytes if cur is not None else 0), self.root)
+
+
 def _purge_dropped(backend: Backend, keep_days: int) -> None:
     """Remove dropped records moved out more than `keep_days` days ago."""
     from datetime import datetime, timedelta, timezone
@@ -266,7 +294,7 @@ def scan_roots(roots: list[str], backend: Backend, options: ScanOptions,
             plans.append(None)
             continue
         config, unc = picked
-        plans.append((agent_sources.setdefault(config.name, fsource.AgentSource(config)), unc))
+        plans.append((agent_sources.setdefault(config.name, fsource.AgentSource(config, label=options.agent_label)), unc))
     try:
         rootcase.reconcile(roots, plans, backend, options.agents)
         return _scan(paths, roots, plans, backend, options, resume_path)
@@ -350,6 +378,8 @@ def _scan(paths: list[str], roots: list[str], plans: list[tuple[fsource.AgentSou
             progress = _Progress(root, options.progress_interval,
                                  via=f" (filecat-agent {source.name})" if source else "",
                                  cancel=options.cancel)
+            if options.live is not None:
+                options.live.attach(progress, root)
             if resume.resuming(root) and not options.force:
                 print(f"{root}: resuming an unfinished scan; {resume.done_count(root)} finished "
                       "folders are skipped unless they changed", file=sys.stderr)
@@ -411,6 +441,8 @@ def _scan(paths: list[str], roots: list[str], plans: list[tuple[fsource.AgentSou
 def run(args) -> int:
     backend = open_backend(args.backend, getattr(args, "out", None), getattr(args, "dsn", None))
     options = ScanOptions.from_args(args)
+    if options.agent_label is None:
+        options.agent_label = default_label(f"scan {', '.join(args.roots)}")
     try:
         return scan_roots(args.roots, backend, options)
     finally:

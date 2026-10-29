@@ -47,7 +47,7 @@ def client_for(agent: FakeAgent, **kwargs) -> AgentClient:
 def test_hello_and_auth(agent):
     with client_for(agent) as c:
         info = c.connect()
-        assert (info.protocol, info.agent_version, info.hostname) == (1, "0.2.0-test", "fake-nas")
+        assert (info.protocol, info.agent_version, info.hostname) == (1, "0.2.1-test", "fake-nas")
         assert (info.os, info.arch) == ("linux", "x86_64")
         assert c.hello() == info
     assert [r["cmd"] for r in agent.requests[:2]] == ["hello", "auth"]
@@ -635,7 +635,7 @@ def test_agents_test_ok(fixture_dir, agent, capsys):
     path = _config_file(fixture_dir, agent)
     assert cli.main(["--config", path, "agents", "test"]) == 0
     out = capsys.readouterr().out
-    assert out.startswith("ok   fake") and "protocol 1" in out and "filecat-agent 0.2.0-test" in out
+    assert out.startswith("ok   fake") and "protocol 1" in out and "filecat-agent 0.2.1-test" in out
     assert "host fake-nas (linux/x86_64)" in out and "round trip" in out
     assert cli.main(["--config", path, "agents", "test", "fake", "--json"]) == 0
     info = json.loads(capsys.readouterr().out)

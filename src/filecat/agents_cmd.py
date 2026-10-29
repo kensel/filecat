@@ -9,7 +9,9 @@
                    hello + capabilities of each agent: version, reachable, certificate pin,
                    allowed roots and where they come from, product type, the run ids that are
                    available, and whether the agent's allowlist_sha256 and deny_sha256 are the
-                   ones this filecat expects (data/agent_expected.json). A mismatch is a warning;
+                   ones this filecat expects (data/agent_expected.json), and the other connections
+                   on the agent (`activity`: label, peer, command, files, GB read, rate; agents
+                   older than 0.2.1 say "activity not supported"). A mismatch is a warning;
                    --strict makes it exit 1. Unreachable agents always exit 1.
     enroll NAME --host HOST[:PORT] [--alias \\\\SERVER] [--write] [--token HEX|-]
                    make a token (or reuse the 64 hex digits of --token, `-` reads stdin; a supplied
@@ -32,7 +34,9 @@ from pathlib import Path
 from typing import Any
 
 from . import agent_status, config
-from .agent_client import DEFAULT_PORT, AgentClient, fetch_fingerprint, normalize_fingerprint, time_call
+from .agent_busy import human_bytes, human_duration
+from .agent_client import (DEFAULT_PORT, LABEL_STATUS, AgentClient, fetch_fingerprint, normalize_fingerprint,
+                           time_call)
 
 
 def _describe(agent: config.AgentConfig) -> dict[str, Any]:
@@ -64,7 +68,7 @@ def _list(agents: list[config.AgentConfig], as_json: bool) -> int:
 def _test(agent: config.AgentConfig, timeout: float) -> dict[str, Any]:
     """Connect, then time one more hello. Raises on any failure."""
     client = AgentClient(agent.host, agent.port, agent.cert_sha256, agent.resolved_token(),
-                         timeout=timeout, io_timeout=timeout, name=agent.name)
+                         timeout=timeout, io_timeout=timeout, name=agent.name, label="agents test")
     try:
         info, connect_s = time_call(client.connect)
         _, hello_s = time_call(client.hello)
@@ -127,8 +131,28 @@ def _print_status(st: agent_status.AgentStatus) -> None:
     print(line)
     print(f"  allowlist    {_yesno(st.allowlist_match)}  {st.allowlist_sha256 or '-'}")
     print(f"  deny list    {_yesno(st.deny_match)}  {st.deny_sha256 or '-'}")
+    _print_sessions(st)
     for w in st.warnings:
         print(f"  warning: {w}")
+
+
+def _print_sessions(st: agent_status.AgentStatus) -> None:
+    """The other connections on the agent: label, peer, for how long, command, files, GB read, rate."""
+    if st.sessions is None:
+        if st.activity_note:
+            print(f"  sessions     {st.activity_note}")
+        return
+    if not st.sessions:
+        print("  sessions     no other connections")
+        return
+    print(f"  sessions     {len(st.sessions)} other connection(s)")
+    for s in st.sessions:
+        doing = f"{s['command']} for {human_duration(s['command_secs'])}" if s["command"] else "idle"
+        who = s["label"] or "(no label)"
+        if not s["authenticated"]:
+            who += " (not authenticated)"
+        print(f"    {who}  {s['peer']}  connected {human_duration(s['connected_secs'])}  {doing}  "
+              f"{s['files']} files, {human_bytes(s['bytes_read'])} read, {s['rate']} files/s")
 
 
 def _status(agents: list[config.AgentConfig], timeout: float, as_json: bool, strict: bool) -> int:
@@ -137,7 +161,7 @@ def _status(agents: list[config.AgentConfig], timeout: float, as_json: bool, str
         return 1
     code = 0
     for agent in agents:
-        st = agent_status.probe(agent, timeout)
+        st = agent_status.probe(agent, timeout, with_activity=True, label=LABEL_STATUS)
         if as_json:
             print(json.dumps(st.to_dict(), ensure_ascii=False))
         else:

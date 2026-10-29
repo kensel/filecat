@@ -5,6 +5,7 @@
 use crate::matcher::{self, Pattern, Policy, Subject};
 use crate::proto::*;
 use crate::scope::Scope;
+use crate::session::Counters;
 use serde_json::{json, Value};
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::os::unix::ffi::{OsStrExt, OsStringExt};
@@ -214,6 +215,7 @@ pub struct Ctl<'a> {
     last: Instant,
     entries: u64,
     send: Emit<'a>,
+    stats: &'a Counters,
 }
 
 enum Stop {
@@ -222,15 +224,16 @@ enum Stop {
 }
 
 impl<'a> Ctl<'a> {
-    fn new(req: &Obj, cancel: Arc<AtomicBool>, send: Emit<'a>) -> R<Ctl<'a>> {
+    fn new(req: &Obj, cancel: Arc<AtomicBool>, send: Emit<'a>, stats: &'a Counters) -> R<Ctl<'a>> {
         let progress = opt_int(req, "progress_ms", 1, i64::MAX)?.map(|p| Duration::from_millis(p.max(MIN_PROGRESS_MS) as u64));
         let deadline = opt_int(req, "deadline_ms", 0, MAX_DEADLINE_MS)?.unwrap_or(DEFAULT_DEADLINE_MS);
         let now = Instant::now();
-        Ok(Ctl { cancel, started: now, deadline: Duration::from_millis(deadline as u64), progress, last: now, entries: 0, send })
+        Ok(Ctl { cancel, started: now, deadline: Duration::from_millis(deadline as u64), progress, last: now, entries: 0, send, stats })
     }
 
     fn tick(&mut self, bytes: u64) -> Result<(), Stop> {
         self.entries += 1;
+        self.stats.add_entry();
         if self.cancel.load(Ordering::Relaxed) {
             return Err(Stop::Cancelled);
         }
@@ -290,6 +293,13 @@ fn sum_into(acc: &mut Acc, ctl: &mut Ctl, top: &Path, opts: &SumOpts) -> R<()> {
     }
 }
 
+/// `acc.add_file` plus the session's counters (one atomic add each; a hard link counts no bytes).
+fn count_file(acc: &mut Acc, ctl: &Ctl, m: &std::fs::Metadata) {
+    let before = acc.size;
+    acc.add_file(m);
+    ctl.stats.add_summed_file(acc.size - before);
+}
+
 fn walk(acc: &mut Acc, ctl: &mut Ctl, top: &Path, opts: &SumOpts) -> Result<(), Stop> {
     let m = match std::fs::symlink_metadata(top) {
         Ok(m) => m,
@@ -299,13 +309,14 @@ fn walk(acc: &mut Acc, ctl: &mut Ctl, top: &Path, opts: &SumOpts) -> Result<(), 
         }
     };
     if !m.is_dir() {
-        acc.add_file(&m);
+        count_file(acc, ctl, &m);
         return Ok(());
     }
     let need_rel = opts.needs_rel();
     let mut stack: Vec<(PathBuf, Vec<u8>, usize)> = vec![(top.to_path_buf(), Vec::new(), 0)];
     while let Some((folder, rel, depth)) = stack.pop() {
         acc.dirs += 1;
+        ctl.stats.add_dir();
         ctl.tick(acc.size)?;
         let rd = match std::fs::read_dir(&folder) {
             Ok(r) => r,
@@ -367,7 +378,7 @@ fn walk(acc: &mut Acc, ctl: &mut Ctl, top: &Path, opts: &SumOpts) -> Result<(), 
                 }
                 stack.push((ent.path(), kid_rel, depth + 1));
             } else {
-                acc.add_file(&km);
+                count_file(acc, ctl, &km);
             }
         }
     }
@@ -375,7 +386,7 @@ fn walk(acc: &mut Acc, ctl: &mut Ctl, top: &Path, opts: &SumOpts) -> Result<(), 
 }
 
 // --- sum_subtree ---------------------------------------------------------------------------------------
-pub fn sum_subtree(scope: &Scope, policy: &Policy, sums: &Sums, req: &Obj, send: Emit) -> R<Value> {
+pub fn sum_subtree(scope: &Scope, policy: &Policy, sums: &Sums, stats: &Counters, req: &Obj, send: Emit) -> R<Value> {
     let res = scope.resolve(&req_path(req)?)?;
     let top = std::fs::metadata(&res.host)?;
     if !top.is_dir() {
@@ -391,7 +402,7 @@ pub fn sum_subtree(scope: &Scope, policy: &Policy, sums: &Sums, req: &Obj, send:
     };
     let id = request_id(req)?;
     let guard = sums.begin(id.as_deref(), MAX_SUMS)?;
-    let mut ctl = Ctl::new(req, guard.flag.clone(), send)?;
+    let mut ctl = Ctl::new(req, guard.flag.clone(), send, stats)?;
     let mut acc = Acc::new(top.dev());
     let opts = SumOpts { one_fs, patterns: &patterns, policy: Some(policy), top_vpath: res.canon.trim_ascii_end_slash() };
     sum_into(&mut acc, &mut ctl, &res.host, &opts)?;
@@ -495,7 +506,7 @@ fn classify(policy: &Policy, parent_host: &Path, kid: &Kid, vpath: &[u8], subjec
     (None, false, Why::None)
 }
 
-pub fn list_dir(scope: &Scope, policy: &Policy, sums: &Sums, req: &Obj, send: Emit) -> R<Value> {
+pub fn list_dir(scope: &Scope, policy: &Policy, sums: &Sums, stats: &Counters, req: &Obj, send: Emit) -> R<Value> {
     let path = req_path(req)?;
     let res = scope.resolve(&path)?;
     let dst = std::fs::metadata(&res.host)?;
@@ -588,7 +599,7 @@ pub fn list_dir(scope: &Scope, policy: &Policy, sums: &Sums, req: &Obj, send: Em
     if !produced.is_empty() {
         let id = request_id(req)?;
         let guard = sums.begin(id.as_deref(), MAX_SUMS)?;
-        let mut ctl = Ctl::new(req, guard.flag.clone(), send)?;
+        let mut ctl = Ctl::new(req, guard.flag.clone(), send, stats)?;
         let plain = SumOpts::plain();
         for tag in &produced {
             let members: Vec<&Kid> = kids.iter().filter(|k| k.tag.as_deref() == Some(tag)).collect();
@@ -707,7 +718,7 @@ mod tests {
         std::fs::write(f.root.join(std::ffi::OsStr::from_bytes(b"bad\xffname")), b"x").unwrap();
         let sums = Sums::default();
         let mut s = nosend();
-        let r = list_dir(&f.scope, &Policy::default(), &sums, &req(json!({"cmd": "list_dir", "path": f.root.to_string_lossy()})), &mut s).unwrap();
+        let r = list_dir(&f.scope, &Policy::default(), &sums, &Counters::default(), &req(json!({"cmd": "list_dir", "path": f.root.to_string_lossy()})), &mut s).unwrap();
         let names: Vec<&str> = r["entries"].as_array().unwrap().iter().map(|e| e["name"].as_str().unwrap()).collect();
         assert_eq!(names, ["a.txt", "b.txt", "bad\u{fffd}name", "ln", "sub"]);
         let by = |n: &str| r["entries"].as_array().unwrap().iter().find(|e| e["name"] == n).unwrap().clone();
@@ -719,8 +730,8 @@ mod tests {
         assert_eq!(by("bad\u{fffd}name")["name_b64"], b64(b"bad\xffname"));
         assert!(r["dev"].as_u64().unwrap() > 0 && r["mtime_ns"].as_i64().unwrap() % 100 == 0);
         assert!(r.get("policy_id").is_none());
-        assert_eq!(list_dir(&f.scope, &Policy::default(), &sums, &req(json!({"path": format!("{}/a.txt", f.root.display())})), &mut nosend()).err().unwrap().code, "bad_request");
-        assert_eq!(list_dir(&f.scope, &Policy::default(), &sums, &req(json!({"path": format!("{}/zz", f.root.display())})), &mut nosend()).err().unwrap().code, "not_found");
+        assert_eq!(list_dir(&f.scope, &Policy::default(), &sums, &Counters::default(), &req(json!({"path": format!("{}/a.txt", f.root.display())})), &mut nosend()).err().unwrap().code, "bad_request");
+        assert_eq!(list_dir(&f.scope, &Policy::default(), &sums, &Counters::default(), &req(json!({"path": format!("{}/zz", f.root.display())})), &mut nosend()).err().unwrap().code, "not_found");
     }
 
     #[test]
@@ -735,7 +746,7 @@ mod tests {
         let p = policy(json!({"rules": [{"id": 3, "tag": "[CACHE]", "match": ["node_modules"], "type": "dir", "case": "insensitive"}]}));
         let sums = Sums::default();
         let pr = f.root.join("proj");
-        let r = list_dir(&f.scope, &p, &sums, &req(json!({"path": pr.to_string_lossy()})), &mut nosend()).unwrap();
+        let r = list_dir(&f.scope, &p, &sums, &Counters::default(), &req(json!({"path": pr.to_string_lossy()})), &mut nosend()).unwrap();
         let names: Vec<&str> = r["entries"].as_array().unwrap().iter().map(|e| e["name"].as_str().unwrap()).collect();
         assert_eq!(names, ["[CACHE]", "src"]);
         let roll = &r["entries"][0]["rollup"];
@@ -745,7 +756,7 @@ mod tests {
         assert!(roll["oldest_mtime_ns"].is_i64());
         assert_eq!(r["policy_id"], p.id);
         // case-insensitive rule also takes NODE_MODULES; and an empty tag-named real child folds in
-        let r = list_dir(&f.scope, &p, &sums, &req(json!({"path": f.root.to_string_lossy()})), &mut nosend()).unwrap();
+        let r = list_dir(&f.scope, &p, &sums, &Counters::default(), &req(json!({"path": f.root.to_string_lossy()})), &mut nosend()).unwrap();
         let names: Vec<&str> = r["entries"].as_array().unwrap().iter().map(|e| e["name"].as_str().unwrap()).collect();
         assert_eq!(names, ["[CACHE]", "keep", "proj"]);
         assert_eq!(r["entries"][0]["rollup"]["total_size"], 7);
@@ -766,7 +777,7 @@ mod tests {
             {"tag": "[X]", "match": ["node_modules"]}],
             "markers": [{"name": ".filecat-cache", "tag": "[CACHE]"}]}));
         let a = f.root.join("a");
-        let r = list_dir(&f.scope, &p, &Sums::default(), &req(json!({"path": a.to_string_lossy()})), &mut nosend()).unwrap();
+        let r = list_dir(&f.scope, &p, &Sums::default(), &Counters::default(), &req(json!({"path": a.to_string_lossy()})), &mut nosend()).unwrap();
         let names: Vec<&str> = r["entries"].as_array().unwrap().iter().map(|e| e["name"].as_str().unwrap()).collect();
         assert_eq!(names, ["@eaDir", "[CACHE]", "[REDACTED]", "node_modules"]);
         let cache = &r["entries"][1]["rollup"];
@@ -791,7 +802,7 @@ mod tests {
         let p = policy(json!({"redaction": {"key": key, "roots": [
             {"root": "r1", "base": base, "hashes": [h], "inodes": [[moved_ino.dev(), moved_ino.ino()]]}]}}));
         let dir = f.root.join("homes/jdoe");
-        let r = list_dir(&f.scope, &p, &Sums::default(), &req(json!({"path": dir.to_string_lossy()})), &mut nosend()).unwrap();
+        let r = list_dir(&f.scope, &p, &Sums::default(), &Counters::default(), &req(json!({"path": dir.to_string_lossy()})), &mut nosend()).unwrap();
         let names: Vec<&str> = r["entries"].as_array().unwrap().iter().map(|e| e["name"].as_str().unwrap()).collect();
         assert_eq!(names, ["[REDACTED]", "other"]);
         let roll = &r["entries"][0]["rollup"];
@@ -823,7 +834,7 @@ mod tests {
         let go = |extra: Value| {
             let mut v = json!({"path": t.to_string_lossy()});
             v.as_object_mut().unwrap().extend(extra.as_object().unwrap().clone());
-            sum_subtree(&f.scope, &Policy::default(), &sums, &req(v), &mut nosend()).unwrap()
+            sum_subtree(&f.scope, &Policy::default(), &sums, &Counters::default(), &req(v), &mut nosend()).unwrap()
         };
         let all = go(json!({}));
         assert_eq!(all["total_files"], 6); // a, a2, ln, b, c, d
@@ -859,7 +870,7 @@ mod tests {
         std::fs::write(f.root.join("t/a/b/f"), b"x").unwrap();
         let t = f.root.join("t");
         let sums = Sums::default();
-        let r = sum_subtree(&f.scope, &Policy::default(), &sums, &req(json!({"path": t.to_string_lossy(), "deadline_ms": 0})), &mut nosend());
+        let r = sum_subtree(&f.scope, &Policy::default(), &sums, &Counters::default(), &req(json!({"path": t.to_string_lossy(), "deadline_ms": 0})), &mut nosend());
         // deadline 0 may or may not have passed at the first tick; either way it is not an error
         assert!(r.is_ok());
         // a failing progress write (the client went away) cancels
@@ -870,7 +881,7 @@ mod tests {
         }
         let guard_id = req(json!({"path": t.to_string_lossy(), "progress_ms": 1, "id": "p1"}));
         // progress_ms is raised to 500 ms, so a short walk finishes without a write: still ok
-        assert!(sum_subtree(&f.scope, &Policy::default(), &sums, &guard_id, &mut fail).is_ok());
+        assert!(sum_subtree(&f.scope, &Policy::default(), &sums, &Counters::default(), &guard_id, &mut fail).is_ok());
     }
 
     #[test]
@@ -881,7 +892,7 @@ mod tests {
         use std::os::unix::fs::PermissionsExt;
         std::fs::set_permissions(f.root.join("t/locked"), std::fs::Permissions::from_mode(0o0)).unwrap();
         let t = f.root.join("t");
-        let r = sum_subtree(&f.scope, &Policy::default(), &Sums::default(), &req(json!({"path": t.to_string_lossy()})), &mut nosend()).unwrap();
+        let r = sum_subtree(&f.scope, &Policy::default(), &Sums::default(), &Counters::default(), &req(json!({"path": t.to_string_lossy()})), &mut nosend()).unwrap();
         std::fs::set_permissions(f.root.join("t/locked"), std::fs::Permissions::from_mode(0o755)).unwrap();
         let root_user = unsafe { libc::geteuid() } == 0;
         if !root_user {

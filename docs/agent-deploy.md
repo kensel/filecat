@@ -87,6 +87,8 @@ FILECAT_AGENT_TOKEN=$TOKEN
 # /etc/exports, /etc/lvm/backup, /usr/syno/etc/iscsi_*.conf). Narrow it to what you catalog:
 # FILECAT_AGENT_ALLOW_ROOTS=/volume1/Backup:/volume1/Photos:/proc:/sys:/dev/disk:/etc/samba:/etc/space:/etc/VERSION:/etc/lvm/backup:/usr/syno/etc/iscsi_*.conf
 # FILECAT_AGENT_LISTEN=0.0.0.0:9876
+# seconds between status log lines for connections that are busy (default 600; 0 = off):
+# FILECAT_AGENT_STATUS_INTERVAL=600
 EOF
 chmod 600 .env
 echo "token (put it in the server's environment, not in filecat.toml): $TOKEN"
@@ -97,13 +99,29 @@ without one. `.env` itself is on the agent's deny list: it cannot be read throug
 
 Settings are taken from the command line, then the environment, then the `.env`:
 `FILECAT_AGENT_TOKEN`, `FILECAT_AGENT_TOKEN_FILE`, `FILECAT_AGENT_LISTEN` (default
-`0.0.0.0:9876`), `FILECAT_AGENT_CERT` / `FILECAT_AGENT_KEY`, `FILECAT_AGENT_ALLOW_ROOTS`.
+`0.0.0.0:9876`), `FILECAT_AGENT_CERT` / `FILECAT_AGENT_KEY`, `FILECAT_AGENT_ALLOW_ROOTS`,
+`FILECAT_AGENT_STATUS_INTERVAL` (below).
+
+**Status log.** Every `FILECAT_AGENT_STATUS_INTERVAL` seconds (default 600, `0` turns it off) the
+agent prints one line to its output for each connection that made requests, or is running one, in
+that time. Nothing is printed for an idle agent. Each line names the connection's label (what the
+client says it is doing), its address, how long it has been connected and the command it is
+running, then the change since the last line and the total of files, GB read and entries listed,
+and the rate:
+
+```
+filecat-agent: session 5 "scan \\nas3\Apps by kense@DESKTOP" from 192.0.2.20:51234, connected 12m, running sum_subtree for 3m: files +41234 (90211 total), read +12.40 GB (31.20 GB total), entries +88120 (190004 total), 68.7 files/s, requests +9 (1204 total), 3 errors
+```
+
+It sits in the output you already collect (the Task Scheduler's task log, or the file you redirect
+to). The same numbers are available live from `filecat agents status`, which lists the other
+connections on each agent. Labels and counters only: no path is ever in the log or in `activity`.
 
 ## 4. First start and the certificate fingerprint
 
 ```sh
 /usr/local/filecat-agent/filecat-agent
-# filecat-agent 0.2.0 listening on 0.0.0.0:9876
+# filecat-agent 0.2.1 listening on 0.0.0.0:9876
 # cert_sha256 a436cafae7aa...
 # generated a new certificate: /usr/local/filecat-agent/filecat-agent.crt; paste cert_sha256 into filecat.toml
 # allowed_roots (default) /volume*:/proc:...
@@ -179,6 +197,12 @@ NAS (they can edit the `.env`); it is one against a stolen token or a compromise
 Replace the binary (stop the agent first: `pkill filecat-agent`) and start it again. `hello` and
 `capabilities` report `agent_version`, `allowlist_version` and `allowlist_sha256`, so the server
 can tell which build it talks to. Keep the `.crt` and `.key` and the fingerprint does not change.
+
+**To 0.2.1** (connection labels, `activity`, the status log): nothing to configure, and the
+allowlist and deny list hashes are the same as in 0.2.0 (`filecat agents status` shows `match`).
+Update the agents before relying on busy detection: against a 0.2.0 agent `filecat agents status`
+prints `activity not supported (agent 0.2.0)` and `filecat server` goes by its own running jobs
+only. The newer `filecat` works with either agent.
 
 ## 9. Scheduled work: `filecat server`
 

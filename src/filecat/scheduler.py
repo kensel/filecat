@@ -8,9 +8,10 @@ anchor (a missed slot runs once, late).
 from __future__ import annotations
 
 import threading
+from collections import Counter
 from dataclasses import dataclass, field
 from datetime import datetime, time, timedelta
-from typing import Iterable
+from typing import Callable, Iterable
 
 from .server_cfg import JobSpec
 
@@ -61,11 +62,12 @@ class Plan:
     start: list[JobSpec] = field(default_factory=list)
     skipped: list[tuple[JobSpec, str]] = field(default_factory=list)
     waiting: list[JobSpec] = field(default_factory=list)        # due, but the agent or the limit is busy
+    deferred: list[tuple[JobSpec, str]] = field(default_factory=list)   # waiting because `hold` said the agent is busy (and why)
 
 
 class Scheduler:
     def __init__(self, jobs: Iterable[JobSpec], anchors: dict[str, datetime | None] | None = None,
-                 first_seen: dict[str, datetime] | None = None) -> None:
+                 first_seen: dict[str, datetime] | None = None, agent_limits: dict[str, int] | None = None) -> None:
         """`anchors`: when each job last started. A job that never ran waits for its first slot
         (anchor = when the server first saw it, so `every` is due a full interval later and `at`
         at its next time of day), unless it has `run_on_start`: then it has no anchor and is due."""
@@ -77,6 +79,7 @@ class Scheduler:
                 anchor = (first_seen or {}).get(j.name)
             self.anchors[j.name] = anchor
         self.running: dict[str, str] = {}       # job name -> agent name
+        self.agent_limits = agent_limits or {}  # agent name -> jobs it takes at once (default 1)
         self._edit = threading.Lock()
 
     def add(self, job: JobSpec) -> None:
@@ -92,12 +95,17 @@ class Scheduler:
             self.anchors.pop(name, None)
 
     def busy_agents(self) -> set[str]:
-        return set(self.running.values())
+        """Agents that cannot take another job: they run as many as their `max_jobs`."""
+        counts = Counter(self.running.values())
+        return {a for a, n in counts.items() if n >= self.agent_limits.get(a, 1)}
 
     def plan(self, now: datetime, *, max_concurrent: int, down: Iterable[str] = (),
-             unknown: Iterable[str] = (), forced: Iterable[str] = ()) -> Plan:
+             unknown: Iterable[str] = (), forced: Iterable[str] = (),
+             hold: Callable[[JobSpec], str | None] | None = None) -> Plan:
         """Decide for every due (or forced) job, in configuration order. Chosen jobs are marked
-        running at once, so a later job of the same agent in this round waits."""
+        running at once, so a later job of the same agent in this round waits. `hold` is asked
+        last, for a job that would start: a reason keeps it due (it is not started, not
+        skipped) and is reported in `Plan.deferred`."""
         down, unknown, forced = set(down), set(unknown), set(forced)
         plan = Plan()
         for job in self.jobs:
@@ -112,6 +120,9 @@ class Scheduler:
             elif (job.agent in unknown or job.agent in self.busy_agents()
                   or len(self.running) >= max_concurrent):
                 plan.waiting.append(job)
+            elif hold is not None and (reason := hold(job)):
+                plan.waiting.append(job)
+                plan.deferred.append((job, reason))
             else:
                 plan.start.append(job)
                 self.running[job.name] = job.agent

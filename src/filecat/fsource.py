@@ -236,11 +236,11 @@ class AgentSource:
     agent and by every thread; see the module docstring."""
     remote = True
 
-    def __init__(self, config: "AgentConfig", client_factory: Any = None) -> None:
+    def __init__(self, config: "AgentConfig", client_factory: Any = None, label: str | None = None) -> None:
         self.config = config
         self.name = config.name
         self.map = config.share_map()
-        self._factory = client_factory or (lambda: AgentClient.from_config(config, self._policy))
+        self._factory = client_factory or (lambda: AgentClient.from_config(config, self._policy, label=label))
         self._local = threading.local()
         self._clients: list[AgentClient] = []
         self._lock = threading.Lock()
