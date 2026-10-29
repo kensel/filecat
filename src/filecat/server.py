@@ -23,7 +23,7 @@ from dataclasses import dataclass, field
 from datetime import datetime, timedelta
 from typing import Any, Callable
 
-from . import agent_status, config, control_auth, scheduler, server_cfg, server_store
+from . import agent_status, config, control_auth, scheduler, server_cfg, server_store, tls
 from .server_cfg import JobSpec, ServerConfig
 from .server_store import ServerStore, iso
 
@@ -615,6 +615,7 @@ def run(args: Any) -> int:
             listen = cfg.serve or "127.0.0.1:8765"
         if listen is not None and not server_cfg.parse_listen(listen):
             raise config.ConfigError(f"--serve {listen!r}: want HOST:PORT")
+        tls_cfg = tls.effective(cfg.tls, args, (cfg_dict.get("server") or {}).get("tls"))
         pw_hash = cfg.resolve_password_hash()
         if pw_hash is not None and not control_auth.valid_hash(pw_hash):
             raise config.ConfigError("[server] control_password_hash is not a scrypt$n$r$p$salt$hash string "
@@ -669,7 +670,7 @@ def run(args: Any) -> int:
             host, port = server_cfg.parse_listen(listen)             # type: ignore[misc]
             viewer = serve.start_viewer(argparse.Namespace(
                 backend=catalog.backend, out=catalog.out, dsn=catalog.dsn, host=host, port=port, quiet=True,
-                no_save=False, graph_max_age=120, open=False, control_auth=auth), coord)
+                no_save=False, graph_max_age=120, open=False, control_auth=auth, tls=tls_cfg), coord)
             if viewer is None:
                 coord.shutdown()
                 return 2

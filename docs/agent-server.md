@@ -247,6 +247,7 @@ serve               = "127.0.0.1:8765"   # optional: same as --serve
 # login_block = "15m"            # ...for this long (doubling on every try while blocked, up to 24h)
 # login_global_max_failures = 20 # across all addresses within login_window: every login refused
 # login_required_for_view = false  # true: the whole viewer needs a login, not only "run now"
+# [server.tls] serves the viewer over HTTPS itself (self-signed, your certificate, or ACME DNS-01): section 7, "TLS"
 
 [[server.jobs]]
 name      = "nas3-topology"     # unique; shown in history and the viewer
@@ -342,7 +343,8 @@ authentication, so this is the one action that starts work, and it is guarded:
   other local software, or a web page that rebinds its DNS name to 127.0.0.1.
 * **Login, then a session.** `POST /api/login {"password": ...}` (JSON; the CSRF checks below).
   Success sets cookie `filecat_session=<secrets.token_urlsafe(32)>; HttpOnly; SameSite=Strict;
-  Path=/` (plus `Secure` when the request's Origin is https, i.e. behind a TLS proxy). Sessions are
+  Path=/` (plus `Secure` when the connection is TLS served by filecat itself, or the request's Origin is
+  https, i.e. behind a TLS proxy). Sessions are
   kept in the server's memory (a restart logs everyone out), expire after 30 minutes idle and 12
   hours absolute, and end with `POST /api/logout`. The page shows a login form when Run now is
   clicked without a session; no password or token goes into `sessionStorage`/`localStorage`.
@@ -376,8 +378,78 @@ authentication, so this is the one action that starts work, and it is guarded:
   equivalent: `filecat server --once --job NAME`. Not done: picking up a manual trigger written by
   another process (the viewer and the coordinator share a process, so it is not needed).
 
-Residual risk: HTTP carries the password and the cookie in clear text. Bind to loopback (the
-default), or put a TLS reverse proxy in front before using this over a network.
+Residual risk: over plain HTTP the password and the cookie travel in clear text. Bind to loopback
+(the default), or turn on the viewer's own TLS (next subsection), before using this over a network.
+A TLS reverse proxy in front still works; the login's rate limit then sees the proxy's address.
+
+### TLS
+
+`filecat serve` and `filecat server --serve` can serve HTTPS themselves (`tls.py`, `acme.py`). It is
+meant for a LAN-only service and never needs to be reachable from the internet. Off by default.
+
+```toml
+[server.tls]                       # the table turns TLS on; mode = "off" turns it off again
+# mode  = "self-signed"            # self-signed | acme | cert | off
+#                                  # default: acme if [server.tls.acme] exists, cert if cert is set, else self-signed
+# cert  = "${FILECAT_TLS_DIR}/viewer.crt"   # your own certificate chain (PEM) and key: mode "cert"
+# key   = "${FILECAT_TLS_DIR}/viewer.key"   # (with acme: where the issued pair is written)
+# dir   = "D:/filecat/tls"         # generated certificates and the ACME account key
+#                                  # default: .filecat-tls next to the catalog file (mode 0700)
+names = ["filecat.lan", "192.168.1.20"]   # extra SANs (self-signed) / the certificate's names (acme)
+
+[server.tls.acme]                  # mode = "acme": a publicly trusted certificate by DNS-01 only
+dns         = "cloudflare"         # cloudflare | exec
+api_token   = "${CLOUDFLARE_API_TOKEN}"   # Zone:Read + DNS:Edit on the zone, nothing else
+# zone      = "example.org"        # default: found from the name (or a 32-hex zone id)
+# dns       = "exec"
+# command   = "/usr/local/bin/dns-hook"   # called as: command add|remove <fqdn> <value>
+agree_tos   = true                 # required: you accept the CA's terms of service
+email       = "admin@example.org"  # optional contact
+# staging   = true                 # Let's Encrypt staging (untrusted certificates, generous limits)
+# directory = "https://ca.lan/acme/acme/directory"   # another CA (step-ca); ca_bundle = "root.pem" to trust it
+# propagation_delay = "30s"        # wait after publishing the TXT record...
+# resolvers = ["1.1.1.1", "8.8.8.8"]  # ...or poll these until they see it (propagation_timeout = "5m")
+```
+
+Flags override the table, on both commands: `--tls self-signed|acme|off`, `--tls-cert FILE
+--tls-key FILE` (a configured certificate). TLS 1.2 is the minimum. The listening socket is plain;
+each accepted connection is wrapped and handshakes in its own handler thread, so one stalled client
+cannot block the others.
+
+* **Configured certificate** (`cert` and `key`, `${VAR}` expanded): loaded as is. `filecat server`
+  notices changed files (once a day) and reloads them into the live context.
+* **Self-signed** (TLS on, nothing configured): an ECDSA P-256 certificate and key (mode 0600) are
+  generated into `dir` with the `cryptography` package (`pip install 'filecat[tls]'`), or the
+  `openssl` command when that is not importable; neither is a clear error and the viewer does not
+  start. SANs: the bind host (unless it is `0.0.0.0` or `::`), `localhost`, `127.0.0.1`, `::1`, this
+  machine's hostname and FQDN, and `names`; an IP in `names` becomes an IP SAN. It is valid for a
+  year, reused on later starts, and regenerated when it is within 30 days of expiry or the SANs
+  differ. **The SHA-256 fingerprint is printed at start-up**; the browser warns, and the fingerprint
+  it shows must equal that line before you accept it. (Or install `selfsigned.crt` as a trusted
+  certificate on your own machines.)
+* **ACME, DNS-01 only.** A built-in RFC 8555 client (ES256 account key stored 0600 in `dir`, one per
+  CA): new-account (contact email, terms agreed), new-order for `names` (wildcards such as
+  `*.example.org` work), then for each name a TXT record `_acme-challenge.<name>` =
+  `base64url(sha256(token.thumbprint))` is published by the DNS provider, waited for (`propagation_delay`,
+  or `resolvers` polled by UDP), answered, polled, and the order is finalized with a CSR and the chain
+  downloaded. The records are removed again, success or not. **No HTTP-01 and no TLS-ALPN-01: nothing
+  listens for the CA, so the viewer can sit on a private address; only DNS and the CA's API are used,
+  outbound.** Default CA: Let's Encrypt production; `staging = true` or `directory` change it.
+  Providers: `cloudflare` (zone looked up by name, TXT created and deleted through the v4 API) and
+  `exec` (any other provider, e.g. through lego or acme.sh hooks: `script add|remove <fqdn> <value>`,
+  exit 0 when done; no shell, so quote nothing).
+* **Renewal.** Checked at start-up and, in `filecat server`, once a day in a background thread; a
+  certificate within 30 days of expiry (or for other names) is renewed, then `load_cert_chain` runs
+  on the live context: new connections get the new certificate, no restart. If ACME fails and a
+  previous certificate exists it keeps being served and the failure is logged; with none, the viewer
+  falls back to a self-signed certificate with a loud warning and tries ACME again daily.
+* **Never logged:** the API token, the account key, private keys (and `repr` of the config hides the
+  token). The `exec` script's own stderr (last 200 characters) is, on failure: keep secrets out of it.
+* The session cookie gets `Secure` on a TLS connection; the CSRF `Origin` check then also requires an
+  `https:` origin. No HSTS header is sent (a self-signed name must stay overridable).
+
+Not done: OCSP stapling, client certificates, a second (HTTP) listener that redirects, ACME
+external account binding, reloading `[server.tls]` without a restart (a changed table needs one).
 
 ## 8. What is logged and stored (rollups.md section 3)
 
@@ -415,7 +487,7 @@ expected-hash tests.
 
 * `ScanServer.ps1`: retire it with the Windows agent, or fold `net view` share discovery into a
   `scan` job kind (`shares = "discover"`)?
-* The login is for one admin (one password). Per-user accounts, TLS in the viewer itself and
-  persisted sessions/counters are not designed.
+* The login is for one admin (one password). Per-user accounts and persisted sessions/counters are
+  not designed. (TLS in the viewer itself is done: section 7, "TLS".)
 * Alerting (mail, webhook) on an agent going down or a job failing: not designed here.
 * (Settled: a never-run job waits for its first slot unless `run_on_start = true`, section 4.)

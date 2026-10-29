@@ -13,13 +13,13 @@ from dataclasses import dataclass, field
 from datetime import time, timedelta
 from typing import Any, Iterator
 
-from . import control_auth
+from . import control_auth, tls
 from .config import AgentConfig, ConfigError, expand
 
 KINDS = ("storage-collect", "scan", "store-resum")
 SERVER_KEYS = ("health_interval", "health_timeout", "health_backoff_max", "max_concurrent", "lease_ttl",
                "shutdown_grace", "history_keep", "history_days", "serve", "control_password_hash", "login_max_failures", "login_window", "login_block",
-               "login_global_max_failures", "login_required_for_view", "jobs")
+               "login_global_max_failures", "login_required_for_view", "tls", "jobs")
 JOB_KEYS = ("name", "kind", "agent", "roots", "every", "at", "options", "enabled", "min_age", "max_runtime",
             "run_on_start")
 # the catalog and the agent are the server's to decide
@@ -99,6 +99,7 @@ class ServerConfig:
     login_block: timedelta = timedelta(minutes=15)
     login_global_max_failures: int = 20         # across all addresses within login_window: all logins refused
     login_required_for_view: bool = False       # the whole viewer needs a session, not only "run now"
+    tls: tls.TlsConfig | None = None            # [server.tls]: serve the viewer over HTTPS (tls.py)
     jobs: tuple[JobSpec, ...] = field(default_factory=tuple)
 
     def resolve_password_hash(self) -> str | None:
@@ -251,6 +252,7 @@ def load_server(cfg: dict[str, Any], agents: list[AgentConfig]) -> ServerConfig:
     required = section.get("login_required_for_view", False)
     if not isinstance(required, bool):
         raise ConfigError("[server] login_required_for_view wants true or false")
+    tls_cfg = tls.parse_table(section.get("tls"))
     tables = section.get("jobs", [])
     if not isinstance(tables, list):
         raise ConfigError("server.jobs: write one [[server.jobs]] table per job (double brackets)")
@@ -276,7 +278,7 @@ def load_server(cfg: dict[str, Any], agents: list[AgentConfig]) -> ServerConfig:
         login_window=duration("login_window", ServerConfig.login_window),
         login_block=duration("login_block", ServerConfig.login_block),
         login_global_max_failures=count("login_global_max_failures", 20, 1) or 20,
-        login_required_for_view=required, jobs=tuple(jobs))
+        login_required_for_view=required, tls=tls_cfg, jobs=tuple(jobs))
 
 
 def parse_listen(text: str | None) -> tuple[str, int] | None:

@@ -35,7 +35,10 @@ reused until it is --graph-max-age old; see treemap.py for pins. Apart
 from saving aggregates and snapshots, and pinning (all off with
 --no-save, which keeps treemaps in memory instead), the server never writes.
 
-There is no authentication: the default bind is 127.0.0.1, and binding
+Plain HTTP unless TLS is asked for: `--tls self-signed|acme`, `--tls-cert/--tls-key`, or a
+[server.tls] table in filecat.toml make the viewer serve HTTPS itself (tls.py; docs/agent-server.md
+"TLS"), and the session cookie is then Secure. Encryption is not authentication: without
+`filecat server --serve` and its login there is none, the default bind is 127.0.0.1, and binding
 anything else prints a warning.
 """
 from __future__ import annotations
@@ -45,6 +48,7 @@ import itertools
 import json
 import os
 import re
+import ssl
 import sys
 import threading
 import time
@@ -59,7 +63,7 @@ from pathlib import Path, PureWindowsPath
 from typing import Any, Callable
 from urllib.parse import parse_qs, urlsplit
 
-from . import browse, control_auth, treemap
+from . import browse, config, control_auth, tls, treemap
 from .backends import open_backend
 
 _EMPTY = {"suffix": [], "mime": [], "dir": [], "total_files": 0, "total_bytes": 0, "unreadable": 0}
@@ -524,6 +528,10 @@ def make_handler(catalog: Catalog, page: bytes) -> type[BaseHTTPRequestHandler]:
         def _logged_in(self) -> bool:
             return bool(catalog.auth is not None and catalog.auth.sessions.valid(self._session()))
 
+        def _tls(self) -> bool:
+            """This connection is TLS served by filecat itself (not a proxy's)."""
+            return isinstance(self.connection, ssl.SSLSocket)
+
         def _csrf_ok(self) -> bool:
             """Same-origin, custom header, JSON: a browser cannot send this cross-site without a CORS
             preflight, which this server never answers. Sends the refusal and returns False."""
@@ -537,7 +545,7 @@ def make_handler(catalog: Catalog, page: bytes) -> type[BaseHTTPRequestHandler]:
             origin = self.headers.get("Origin")
             if origin is not None:
                 parts = urlsplit(origin)
-                if parts.scheme not in ("http", "https") or parts.netloc != host:
+                if parts.scheme not in (("https",) if self._tls() else ("http", "https")) or parts.netloc != host:
                     self._json(HTTPStatus.FORBIDDEN, {"error": "cross-origin request refused"})
                     return False
             # DNS rebinding: bound to loopback, the Host must be a loopback name
@@ -587,7 +595,7 @@ def make_handler(catalog: Catalog, page: bytes) -> type[BaseHTTPRequestHandler]:
             if control_auth.verify_password(body.get("password"), auth.password_hash):
                 auth.guard.success(ip)
                 sid = auth.sessions.create()
-                secure = "; Secure" if (self.headers.get("Origin") or "").startswith("https:") else ""
+                secure = "; Secure" if self._tls() or (self.headers.get("Origin") or "").startswith("https:") else ""
                 cookie = f"{control_auth.COOKIE}={sid}; HttpOnly; SameSite=Strict; Path=/{secure}"
                 return self._json(HTTPStatus.OK, {"ok": True}, {"Set-Cookie": cookie})
             auth.guard.fail(ip)
@@ -663,20 +671,40 @@ class Viewer:
 
     def __init__(self, httpd: ThreadingHTTPServer, catalog: Catalog) -> None:
         self.httpd, self.catalog = httpd, catalog
-        self.url = f"http://{'127.0.0.1' if httpd.server_address[0] in ('', '0.0.0.0') else httpd.server_address[0]}:" \
+        self._stop = threading.Event()
+        scheme = "https" if isinstance(httpd, tls.TlsHTTPServer) else "http"
+        if isinstance(httpd, tls.TlsHTTPServer):
+            tls.start_renewal(httpd.tls, self._stop)      # once a day: renew, reload into the live context
+        self.url = f"{scheme}://{'127.0.0.1' if httpd.server_address[0] in ('', '0.0.0.0') else httpd.server_address[0]}:" \
                    f"{httpd.server_address[1]}/"
         self._thread = threading.Thread(target=httpd.serve_forever, name="filecat-viewer", daemon=True)
         self._thread.start()
 
     def stop(self) -> None:
+        self._stop.set()
         self.httpd.shutdown()
         self.httpd.server_close()
         self.catalog.close()
 
 
+def _listen(args: Any, catalog: Catalog, page: bytes, tls_cfg: tls.TlsConfig | None) -> ThreadingHTTPServer:
+    """Bind args.host:args.port; with tls_cfg over HTTPS (certificate made or loaded now, its fingerprint
+    printed). Raises OSError (the bind) or tls.TlsError (no certificate)."""
+    handler = make_handler(catalog, page)
+    if tls_cfg is None:
+        return ThreadingHTTPServer((args.host, args.port), handler)
+    manager = tls.TlsManager(tls_cfg, args.host, tls.default_dir(getattr(args, "out", None)))
+    manager.start()
+    httpd = tls.TlsHTTPServer((args.host, args.port), handler, manager)
+    for line in manager.banner():
+        print(f"filecat serve: {line}", file=sys.stderr)
+    return httpd
+
+
 def start_viewer(args: Any, coordinator: Any = None) -> Viewer | None:
     """Open the catalog and serve the page on args.host:args.port in a thread; None (after saying
-    why) when either fails. With a coordinator the agent and job endpoints are live."""
+    why) when either fails. With a coordinator the agent and job endpoints are live. args.tls (a
+    tls.TlsConfig, from [server.tls] and the flags) makes it HTTPS, renewed daily while it runs."""
     page = resources.files("filecat").joinpath("web/index.html").read_bytes()
     try:
         catalog = Catalog(args)
@@ -685,7 +713,11 @@ def start_viewer(args: Any, coordinator: Any = None) -> Viewer | None:
         return None
     catalog.coordinator = coordinator
     try:
-        httpd = ThreadingHTTPServer((args.host, args.port), make_handler(catalog, page))
+        httpd = _listen(args, catalog, page, getattr(args, "tls", None))
+    except tls.TlsError as exc:
+        catalog.close()
+        print(f"filecat serve: {exc}", file=sys.stderr)
+        return None
     except OSError as exc:
         catalog.close()
         print(f"filecat serve: cannot listen on {args.host}:{args.port}: {exc}", file=sys.stderr)
@@ -701,18 +733,29 @@ def start_viewer(args: Any, coordinator: Any = None) -> Viewer | None:
 def run(args: Any) -> int:
     page = resources.files("filecat").joinpath("web/index.html").read_bytes()
     try:
+        cfg = config.load(config.find(getattr(args, "config", None)))
+        tls_cfg = tls.effective(tls.parse_table((cfg.get("server") or {}).get("tls")), args,
+                                (cfg.get("server") or {}).get("tls"))
+    except config.ConfigError as exc:
+        print(f"filecat serve: {exc}", file=sys.stderr)
+        return 2
+    try:
         catalog = Catalog(args)
     except Exception as exc:
         print(f"filecat serve: cannot open {args.backend} backend: {exc}", file=sys.stderr)
         return 1
     try:
-        server = ThreadingHTTPServer((args.host, args.port), make_handler(catalog, page))
+        server = _listen(args, catalog, page, tls_cfg)
+    except tls.TlsError as exc:
+        catalog.close()
+        print(f"filecat serve: {exc}", file=sys.stderr)
+        return 2
     except OSError as exc:
         catalog.close()
         print(f"filecat serve: cannot listen on {args.host}:{args.port}: {exc}", file=sys.stderr)
         return 1
     host = "127.0.0.1" if args.host in ("", "0.0.0.0") else args.host
-    url = f"http://{host}:{server.server_address[1]}/"
+    url = f"{'https' if isinstance(server, tls.TlsHTTPServer) else 'http'}://{host}:{server.server_address[1]}/"
     if args.host not in ("127.0.0.1", "localhost", "::1"):
         print(f"filecat serve: warning: listening on {args.host or 'all interfaces'} with no "
               "authentication; anyone who can reach it can read the catalog", file=sys.stderr)

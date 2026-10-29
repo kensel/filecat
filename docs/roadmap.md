@@ -163,6 +163,11 @@ server keeps store detection, manifest verification, probing and Ollama.
   - [x] `filecat server` follow-ups: jobs wait for their first slot (`run_on_start` opts out), an
     atomic lease per backend, a **Run now** button behind a password login with rate limiting
     ([agent-server.md](agent-server.md#run-now-and-the-login-it-needs)), `agents enroll --token`.
+  - [x] TLS for the web viewer, served by filecat itself (LAN only, nothing exposed): `[server.tls]`
+    and `--tls`/`--tls-cert`/`--tls-key` on `serve` and `server`; a configured certificate, a
+    generated self-signed one (fingerprint printed, regenerated before expiry or when the names
+    change), or ACME with DNS-01 only (Cloudflare or an `exec` hook), renewed daily and reloaded
+    into the live context ([agent-server.md](agent-server.md#tls)). Optional extra `tls`.
   - [x] GitHub Actions for the agent: clippy, cargo tests (including the allowlist/deny hash check),
     the three static musl builds with a static-link check, checksums and artifacts, the ARM tests
     under qemu on pushes to main, and the Python agent tests against the real binary on Linux.

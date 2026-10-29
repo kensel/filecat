@@ -149,6 +149,14 @@ def _scan_options(p: argparse.ArgumentParser) -> None:
                         "new key and leave the old entries to be matched by inode only")
 
 
+def _tls_flags(p: argparse.ArgumentParser) -> None:
+    p.add_argument("--tls", dest="tls_mode", choices=("self-signed", "acme", "off"),
+                   help="serve the viewer over HTTPS: a generated self-signed certificate, one from ACME "
+                        "(DNS-01, [server.tls.acme]), or off; overrides [server.tls] (docs/agent-server.md \"TLS\")")
+    p.add_argument("--tls-cert", dest="tls_cert", metavar="FILE", help="PEM certificate (chain) to serve; needs --tls-key")
+    p.add_argument("--tls-key", dest="tls_key", metavar="FILE", help="PEM private key for --tls-cert")
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="filecat", description="File catalog for local drives and NAS shares.")
     parser.add_argument("--config", metavar="PATH",
@@ -475,6 +483,7 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--serve", nargs="?", const="", default=None, metavar="HOST:PORT",
                    help="also run the web viewer in this process (default 127.0.0.1:8765, or [server] serve); "
                         "it gets live /api/agents and /api/jobs")
+    _tls_flags(p)
     p.add_argument("--once", action="store_true",
                    help="run every job that is due now once, then exit (for Task Scheduler or cron)")
     p.add_argument("--job", action="append", metavar="NAME",
@@ -486,6 +495,7 @@ def build_parser() -> argparse.ArgumentParser:
     _storage(p)
     p.add_argument("--host", default="127.0.0.1", help="address to bind (default 127.0.0.1; no auth)")
     p.add_argument("--port", type=int, default=8765, help="port (default 8765, 0 = any free port)")
+    _tls_flags(p)
     p.add_argument("--open", action="store_true", help="open the page in the default browser")
     p.add_argument("--quiet", action="store_true", help="do not log each request")
     p.add_argument("--no-save", dest="no_save", action="store_true",

@@ -485,6 +485,7 @@ huge root into size-capped parts is planned in `docs/jsonl-parts-plan.md`.
 ```
 filecat serve [--backend B --out F | --dsn DSN] [--port 8765] [--host 127.0.0.1] [--open]
               [--no-save] [--graph-max-age MINUTES]
+              [--tls self-signed|acme|off | --tls-cert FILE --tls-key FILE]
 ```
 
 Serves a read-only page at http://127.0.0.1:8765/ for any backend. The page
@@ -534,9 +535,25 @@ summary and marks it stale when the records have changed since. When a root
 has no stored summary, the viewer computes it and saves it. Rebuild & save
 recomputes at the selected depth. Graph snapshots go in a `treemaps` table
 (`<stem>.treemaps.json` for JSONL). `--no-save` keeps the viewer from writing
-anything. There
-is no authentication, so keep the default `--host 127.0.0.1` unless the
-network is trusted. The JSON API is under `/api/` (see `serve.py`).
+anything. A plain
+`filecat serve` has no authentication, so keep the default `--host 127.0.0.1`
+unless the network is trusted. The JSON API is under `/api/` (see `serve.py`).
+
+It speaks plain HTTP unless you ask for TLS, which filecat serves itself, with
+no reverse proxy and nothing reachable from the internet. `--tls self-signed`
+(or a `[server.tls]` table in `filecat.toml`) generates a certificate for the
+bind host, `localhost` and this machine's names, reuses it, renews it before
+it expires and prints its SHA-256 fingerprint to check in the browser;
+`--tls-cert`/`--tls-key` serve your own; `--tls acme` gets a publicly trusted
+one for a name on your own domain by DNS-01 (Cloudflare, or any provider
+through a hook script) and renews it. Encryption is not a login: for "run now"
+and `login_required_for_view` use `filecat server --serve`. Install the
+`tls` extra (`pip install 'filecat[tls]'`) for certificate generation, or have
+the `openssl` command; see [docs/agent-server.md](docs/agent-server.md#tls).
+```toml
+[server.tls]
+names = ["filecat.lan"]          # extra names in the certificate
+```
 
 ## Import and enrich
 
