@@ -39,6 +39,10 @@ setup() {
     x86_64)
       export CC_x86_64_unknown_linux_musl="${CC_x86_64_unknown_linux_musl:-gcc}" ;;
     armv7)
+      # Built for size: a DS2015xs (Linux 3.10.108, alpine) SIGKILLs at exec, silently, any armv7
+      # agent whose loaded image spans more than ~0x197000 bytes; opt-level 3 reached that in 0.2.2.
+      # check_span below fails the build before it gets there again.
+      export CARGO_TARGET_ARMV7_UNKNOWN_LINUX_MUSLEABIHF_RUSTFLAGS="${CARGO_TARGET_ARMV7_UNKNOWN_LINUX_MUSLEABIHF_RUSTFLAGS:--C opt-level=s}"
       export CC_armv7_unknown_linux_musleabihf="${CC_armv7_unknown_linux_musleabihf:-arm-linux-gnueabihf-gcc}"
       export CARGO_TARGET_ARMV7_UNKNOWN_LINUX_MUSLEABIHF_LINKER="${CARGO_TARGET_ARMV7_UNKNOWN_LINUX_MUSLEABIHF_LINKER:-arm-linux-gnueabihf-gcc}"
       export CARGO_TARGET_ARMV7_UNKNOWN_LINUX_MUSLEABIHF_RUNNER="${CARGO_TARGET_ARMV7_UNKNOWN_LINUX_MUSLEABIHF_RUNNER:-qemu-arm-static}" ;;
@@ -62,11 +66,34 @@ report() {  # path, short name
   return 0
 }
 
+# armv7 only: the span of the LOAD segments (lowest address to the end of the bss, in pages) must
+# stay below the largest that ran on the DS2015xs (0x197000; one page more is killed at exec).
+# Fails above ARMV7_MAX_SPAN, warns within 64 KiB of it.
+ARMV7_MAX_SPAN=$((0x197000))
+check_span() {  # path
+  command -v readelf >/dev/null 2>&1 || { echo "  span    not checked (no readelf)"; return 0; }
+  min=; max=0
+  for seg in $(readelf -lW "$1" | awk '$1 == "LOAD" { print $3 ":" $6 }'); do  # VirtAddr:MemSiz
+    lo=$((${seg%%:*})); hi=$((lo + ${seg#*:}))
+    if [ -z "$min" ] || [ "$lo" -lt "$min" ]; then min=$lo; fi
+    if [ "$hi" -gt "$max" ]; then max=$hi; fi
+  done
+  span=$(( (max + 4095) / 4096 * 4096 - min / 4096 * 4096 ))
+  printf '  span    0x%x bytes (limit 0x%x)\n' "$span" "$ARMV7_MAX_SPAN"
+  if [ "$span" -gt "$ARMV7_MAX_SPAN" ]; then
+    echo "armv7 image span 0x$(printf %x "$span") is over 0x$(printf %x "$ARMV7_MAX_SPAN"): the DS2015xs kills it at exec (see setup)" >&2
+    return 1
+  fi
+  [ "$span" -gt $((ARMV7_MAX_SPAN - 0x10000)) ] && echo "  warning: within 64 KiB of the armv7 span limit" >&2
+  return 0
+}
+
 release() {
   for t in $(expand "${1:-x86_64}"); do
     tr=$(triple "$t"); setup "$t"
     cargo build --release --target "$tr"
     report "$CARGO_TARGET_DIR/$tr/release/filecat-agent" "$t ($tr)"
+    if [ "$t" = armv7 ]; then check_span "$CARGO_TARGET_DIR/$tr/release/filecat-agent"; fi
   done
 }
 

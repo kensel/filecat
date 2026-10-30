@@ -268,3 +268,10 @@ release notes). The steps, and every file that carries the version, are in
   `mdadm`, `btrfs` and `blkid` are there.
 - Large trees: a walk is bound by `lstat`; allow minutes for millions of files and use the
   client's `progress_ms` rather than a long timeout.
+- armv7 image size: a DS2015xs (DSM on Linux 3.10.108, `synology_alpine`) kills an armv7 binary
+  at exec, as `Killed` (exit 137) with nothing in `dmesg`, when its loaded image spans more than
+  0x197000 bytes (about 1.59 MiB, first LOAD address to the end of the bss, in pages). It is the
+  size, not the code, the layout or the load address: the same code with 900 more bytes of data is
+  killed. The 0.2.2 armv7 build sat exactly at the limit, so `build.sh` builds armv7 with
+  `-C opt-level=s` (about 0x156000) and fails the build if the span passes 0x197000 (a warning
+  within 64 KiB of it). x86_64 and aarch64 are built with `opt-level = 3` as before.

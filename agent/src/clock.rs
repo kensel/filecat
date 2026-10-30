@@ -1,7 +1,8 @@
 //! An `Instant` that never panics, for timeouts, deadlines and the `activity` ages. std's
 //! `Instant::now` unwraps `clock_gettime(CLOCK_MONOTONIC)` and panics when it fails or returns an
-//! out-of-range `tv_nsec`, which killed connections on an armv7 Synology (the client saw a TLS
-//! error). This one clamps the reading and, when the monotonic clock is not usable, falls back to
+//! out-of-range `tv_nsec`; a panic there ends the connection, which the client sees as a TLS
+//! error (suspected on an armv7 Synology). This one clamps the reading and, when the monotonic
+//! clock is not usable, falls back to
 //! the wall clock; a reading that goes backwards counts as zero. Wall-clock dates
 //! (`SystemTime`) are not covered.
 
