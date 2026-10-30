@@ -286,6 +286,26 @@ release notes). The steps, and every file that carries the version, are in
   0.2.3 the armv7 agent could not serve a connection on such a NAS. The agent now reads every
   clock through `src/clock.rs`, which makes the old syscall on 32-bit ARM, including rustls's
   clock; a test fails if any other source reads std's clocks.
+- Synology's syscall block on ARM: upstream Linux 3.10 ends at 379 (`finit_module`); Synology's
+  own syscalls reportedly occupy 402-427 (`SYNOUtime`, `SYNOArchiveBit`, `recvfile`, the
+  `SYNO*Stat64` calls, `SYNONotifyInit` ...), which collides with the 64-bit time syscalls newer
+  kernels put at 403-423 and with `io_uring` at 425-427. Only 403 is confirmed here (the `dmesg`
+  line above); the rest is from a summary of Synology's 3.10 `calls.S`, not checked against the
+  source. What the agent uses on 32-bit ARM, and why it stays out of that block:
+
+  | need | syscall | note |
+  |---|---|---|
+  | the clock | `clock_gettime` (263) | `src/clock.rs` calls it directly; musl would try 403 first |
+  | sleeping | `nanosleep` (162) | musl uses `clock_nanosleep_time64` (407) only for a time that does not fit 32 bits |
+  | locks, untimed waits | `futex` (240) | std calls it directly on musl; timed waits go through `src/clock.rs` instead |
+  | file metadata | `statx` (397), then `fstatat64` (327) | 397 is not implemented on 3.10 (`ENOSYS`), and std falls back to 327 for good |
+  | directory listing | `getdents64` (217) | |
+  | random (TLS) | `getrandom` (384), then `/dev/urandom` | 384 is Linux 3.17+: `ENOSYS` on 3.10, and the fallback reads the device |
+
+  No timers, `ppoll`/`pselect`, `utimensat` (the agent never writes), message queues or
+  `io_uring`. A new dependency or std feature that reads the clock or uses those calls would
+  reach Synology's block: test armv7 builds on the NAS itself, since qemu-user and CI kernels
+  have the upstream syscalls.
 - Which build a Synology model needs: look up its CPU and package arch (platform) in Synology's
   table, [What kind of CPU does my NAS have?](https://kb.synology.com/en-global/DSM/tutorial/What_kind_of_CPU_does_my_NAS_have#x15-series)
   (the DS2015xs: Annapurna Labs Alpine AL-514, 4 cores, `armv7`, package arch `alpine`, DDR3 4 GB).
