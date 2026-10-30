@@ -121,7 +121,7 @@ connections on each agent. Labels and counters only: no path is ever in the log 
 
 ```sh
 /usr/local/filecat-agent/filecat-agent
-# filecat-agent 0.2.1 listening on 0.0.0.0:9876
+# filecat-agent 0.2.2 listening on 0.0.0.0:9876
 # cert_sha256 a436cafae7aa...
 # generated a new certificate: /usr/local/filecat-agent/filecat-agent.crt; paste cert_sha256 into filecat.toml
 # allowed_roots (default) /volume*:/proc:...
@@ -203,6 +203,9 @@ allowlist and deny list hashes are the same as in 0.2.0 (`filecat agents status`
 Update the agents before relying on busy detection: against a 0.2.0 agent `filecat agents status`
 prints `activity not supported (agent 0.2.0)` and `filecat server` goes by its own running jobs
 only. The newer `filecat` works with either agent.
+
+**To 0.2.2**: the agent behaves exactly as 0.2.1 (same protocol, allowlist and deny list hashes);
+0.2.2 is the first release built and published by the release workflow. Updating is optional.
 
 ## 9. Scheduled work: `filecat server`
 
