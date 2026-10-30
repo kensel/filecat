@@ -277,3 +277,17 @@ release notes). The steps, and every file that carries the version, are in
   `-z max-page-size=0x10000` (GNU ld already does so for aarch64, not for armv7), which loads with
   4 KiB pages too, and `check_pages` fails the build of either ARM binary that would not load with
   64 KiB pages.
+- Which build a Synology model needs: look up its CPU and package arch (platform) in Synology's
+  table, [What kind of CPU does my NAS have?](https://kb.synology.com/en-global/DSM/tutorial/What_kind_of_CPU_does_my_NAS_have#x15-series)
+  (the DS2015xs: Annapurna Labs Alpine AL-514, 4 cores, `armv7`, package arch `alpine`, DDR3 4 GB).
+  `uname -a` on the NAS ends in the platform too (`synology_alpine_ds2015xs`). The platform picks
+  the binary by `uname -m` (`armv7l` -> armv7, `aarch64` -> aarch64, `x86_64` -> x86_64) and tells
+  the page size: Synology's toolchains come per platform, and a platform with a `4k` twin
+  (`alpine` and `alpine4k`) is, by the name, the one that does not use 4 KiB pages. The toolchains and their kernel versions
+  are listed per DSM release in the [toolchain archive](https://archive.synology.com/download/ToolChain/toolchain/7.1-42661)
+  (DSM 7.1: `alpine` and `alpine4k`, both Linux 3.10.108), and how to use them is in the developer
+  guide, [Download DSM Tool Chain](https://help.synology.com/developer-guide/compile_applications/download_dsm_tool_chain.html).
+  filecat does not use them (the agent is a static musl binary built with Rust's own toolchain);
+  they are the reference for a platform's kernel, page size and architecture flags.
+- To check the page size on the NAS itself: `grep -m1 KernelPageSize /proc/self/smaps` (`64 kB`
+  expected on `alpine`, `4 kB` on most others).
