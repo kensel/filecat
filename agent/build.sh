@@ -39,10 +39,11 @@ setup() {
     x86_64)
       export CC_x86_64_unknown_linux_musl="${CC_x86_64_unknown_linux_musl:-gcc}" ;;
     armv7)
-      # Built for size: a DS2015xs (Linux 3.10.108, alpine) SIGKILLs at exec, silently, any armv7
-      # agent whose loaded image spans more than ~0x197000 bytes; opt-level 3 reached that in 0.2.2.
-      # check_span below fails the build before it gets there again.
-      export CARGO_TARGET_ARMV7_UNKNOWN_LINUX_MUSLEABIHF_RUSTFLAGS="${CARGO_TARGET_ARMV7_UNKNOWN_LINUX_MUSLEABIHF_RUSTFLAGS:--C opt-level=s}"
+      # Linked for 64 KiB pages: Synology's "alpine" kernels (DS2015xs, Linux 3.10.108; not
+      # "alpine4k") use them, and a segment whose address and file offset differ by other than a
+      # multiple of 64 KiB cannot be mapped there: the agent is SIGKILLed at exec, silently. GNU ld
+      # aligns armv7 for 4 KiB pages by default (aarch64 already for 64 KiB). check_pages below.
+      export CARGO_TARGET_ARMV7_UNKNOWN_LINUX_MUSLEABIHF_RUSTFLAGS="${CARGO_TARGET_ARMV7_UNKNOWN_LINUX_MUSLEABIHF_RUSTFLAGS:--C link-arg=-Wl,-z,max-page-size=0x10000}"
       export CC_armv7_unknown_linux_musleabihf="${CC_armv7_unknown_linux_musleabihf:-arm-linux-gnueabihf-gcc}"
       export CARGO_TARGET_ARMV7_UNKNOWN_LINUX_MUSLEABIHF_LINKER="${CARGO_TARGET_ARMV7_UNKNOWN_LINUX_MUSLEABIHF_LINKER:-arm-linux-gnueabihf-gcc}"
       export CARGO_TARGET_ARMV7_UNKNOWN_LINUX_MUSLEABIHF_RUNNER="${CARGO_TARGET_ARMV7_UNKNOWN_LINUX_MUSLEABIHF_RUNNER:-qemu-arm-static}" ;;
@@ -66,26 +67,27 @@ report() {  # path, short name
   return 0
 }
 
-# armv7 only: the span of the LOAD segments (lowest address to the end of the bss, in pages) must
-# stay below the largest that ran on the DS2015xs (0x197000; one page more is killed at exec).
-# Fails above ARMV7_MAX_SPAN, warns within 64 KiB of it.
-ARMV7_MAX_SPAN=$((0x197000))
-check_span() {  # path
-  command -v readelf >/dev/null 2>&1 || { echo "  span    not checked (no readelf)"; return 0; }
-  min=; max=0
-  for seg in $(readelf -lW "$1" | awk '$1 == "LOAD" { print $3 ":" $6 }'); do  # VirtAddr:MemSiz
-    lo=$((${seg%%:*})); hi=$((lo + ${seg#*:}))
-    if [ -z "$min" ] || [ "$lo" -lt "$min" ]; then min=$lo; fi
-    if [ "$hi" -gt "$max" ]; then max=$hi; fi
+# ARM builds: every LOAD segment must load on a 64 KiB-page kernel (see setup): address and file
+# offset congruent modulo 64 KiB, alignment at least 64 KiB, and no 64 KiB page shared by two
+# segments (the later mapping would replace the earlier one's permissions on it).
+PAGE64K=$((0x10000))
+check_pages() {  # path
+  command -v readelf >/dev/null 2>&1 || { echo "  pages   not checked (no readelf)"; return 0; }
+  bad=; prev=-1
+  # Offset:VirtAddr:MemSiz:Align (Align is the last field: Flg may hold a space, "R E")
+  for seg in $(readelf -lW "$1" | awk '$1 == "LOAD" { print $2 ":" $3 ":" $6 ":" $NF }'); do
+    off=$((${seg%%:*})); rest=${seg#*:}; va=$((${rest%%:*})); rest=${rest#*:}
+    msz=$((${rest%%:*})); align=$((${rest#*:}))
+    [ $(( (va - off) % PAGE64K )) -eq 0 ] || bad="$bad va 0x$(printf %x $va) vs offset 0x$(printf %x $off);"
+    [ "$align" -ge "$PAGE64K" ] || bad="$bad align 0x$(printf %x $align) at va 0x$(printf %x $va);"
+    [ $((va / PAGE64K)) -gt "$prev" ] || bad="$bad va 0x$(printf %x $va) shares a 64 KiB page;"
+    prev=$(( (va + msz - 1) / PAGE64K ))
   done
-  span=$(( (max + 4095) / 4096 * 4096 - min / 4096 * 4096 ))
-  printf '  span    0x%x bytes (limit 0x%x)\n' "$span" "$ARMV7_MAX_SPAN"
-  if [ "$span" -gt "$ARMV7_MAX_SPAN" ]; then
-    echo "armv7 image span 0x$(printf %x "$span") is over 0x$(printf %x "$ARMV7_MAX_SPAN"): the DS2015xs kills it at exec (see setup)" >&2
+  if [ -n "$bad" ]; then
+    echo "  pages   NOT loadable with 64 KiB pages:$bad" >&2
     return 1
   fi
-  [ "$span" -gt $((ARMV7_MAX_SPAN - 0x10000)) ] && echo "  warning: within 64 KiB of the armv7 span limit" >&2
-  return 0
+  echo "  pages   loadable with 64 KiB pages"
 }
 
 release() {
@@ -93,7 +95,7 @@ release() {
     tr=$(triple "$t"); setup "$t"
     cargo build --release --target "$tr"
     report "$CARGO_TARGET_DIR/$tr/release/filecat-agent" "$t ($tr)"
-    if [ "$t" = armv7 ]; then check_span "$CARGO_TARGET_DIR/$tr/release/filecat-agent"; fi
+    if [ "$t" != x86_64 ]; then check_pages "$CARGO_TARGET_DIR/$tr/release/filecat-agent"; fi
   done
 }
 

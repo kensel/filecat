@@ -268,10 +268,12 @@ release notes). The steps, and every file that carries the version, are in
   `mdadm`, `btrfs` and `blkid` are there.
 - Large trees: a walk is bound by `lstat`; allow minutes for millions of files and use the
   client's `progress_ms` rather than a long timeout.
-- armv7 image size: a DS2015xs (DSM on Linux 3.10.108, `synology_alpine`) kills an armv7 binary
-  at exec, as `Killed` (exit 137) with nothing in `dmesg`, when its loaded image spans more than
-  0x197000 bytes (about 1.59 MiB, first LOAD address to the end of the bss, in pages). It is the
-  size, not the code, the layout or the load address: the same code with 900 more bytes of data is
-  killed. The 0.2.2 armv7 build sat exactly at the limit, so `build.sh` builds armv7 with
-  `-C opt-level=s` (about 0x156000) and fails the build if the span passes 0x197000 (a warning
-  within 64 KiB of it). x86_64 and aarch64 are built with `opt-level = 3` as before.
+- 64 KiB pages: Synology's `alpine` kernels (DS2015xs and the other Annapurna Alpine models on
+  Linux 3.10.108; the `alpine4k` ones use 4 KiB) use 64 KiB memory pages. A binary whose LOAD
+  segments are laid out for 4 KiB pages is killed at exec, as `Killed` (exit 137) with nothing in
+  `dmesg`, when a segment's address and file offset differ by other than a multiple of 64 KiB; when
+  two segments share a 64 KiB page, the later one's permissions replace the earlier one's (code
+  that is no longer executable). The 0.2.2 armv7 build loaded by luck. `build.sh` links armv7 with
+  `-z max-page-size=0x10000` (GNU ld already does so for aarch64, not for armv7), which loads with
+  4 KiB pages too, and `check_pages` fails the build of either ARM binary that would not load with
+  64 KiB pages.
