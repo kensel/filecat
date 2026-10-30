@@ -4,6 +4,7 @@
 //! caps; a timeout that kills the child's process group; at most two at once.
 
 use crate::allowlist::{self, ArgKind, Entry};
+use crate::clock::Instant;
 use crate::proto::*;
 use crate::scope::{Scope, RootsSource};
 use serde_json::{json, Value};
@@ -14,7 +15,7 @@ use std::os::unix::process::{CommandExt, ExitStatusExt};
 use std::process::{Command, Stdio};
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 pub const MAX_RUNS: usize = 2;
 pub const MAX_STDOUT: usize = 4 * 1024 * 1024;

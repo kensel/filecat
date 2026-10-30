@@ -4,12 +4,13 @@
 //! Nothing here holds a path or a request argument: command names, the client's label and
 //! numbers only, because a path could lie inside a `[REDACTED]` rollup.
 
+use crate::clock::Instant;
 use crate::proto::Fail;
 use serde_json::{json, Value};
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, Ordering::Relaxed};
 use std::sync::{Arc, Mutex, MutexGuard};
-use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 pub const MAX_LABEL_CHARS: usize = 200;
 const MIB: u64 = 1024 * 1024;

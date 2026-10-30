@@ -7,6 +7,7 @@
 compile_error!("filecat-agent phase 1 is Linux only; the Windows agent is phase 2 (src/windows_phase2.rs)");
 
 mod allowlist;
+mod clock;
 mod config;
 mod matcher;
 mod prims;

@@ -2,6 +2,7 @@
 //! Counters only: no name, path or OS error text from inside a folded folder ever leaves this
 //! module, and nothing here logs.
 
+use crate::clock::Instant;
 use crate::matcher::{self, Pattern, Policy, Subject};
 use crate::proto::*;
 use crate::scope::Scope;
@@ -13,7 +14,7 @@ use std::os::unix::fs::MetadataExt;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
-use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 pub const MAX_SUMS: usize = 4;
 pub const MAX_DEPTH: usize = 4096;
