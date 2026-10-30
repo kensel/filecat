@@ -40,9 +40,10 @@ setup() {
       export CC_x86_64_unknown_linux_musl="${CC_x86_64_unknown_linux_musl:-gcc}" ;;
     armv7)
       # Linked for 64 KiB pages: Synology's "alpine" kernels (DS2015xs, Linux 3.10.108; not
-      # "alpine4k") use them, and a segment whose address and file offset differ by other than a
-      # multiple of 64 KiB cannot be mapped there: the agent is SIGKILLed at exec, silently. GNU ld
-      # aligns armv7 for 4 KiB pages by default (aarch64 already for 64 KiB). check_pages below.
+      # "alpine4k") use 32 KiB pages, and a segment whose address and file offset differ by other
+      # than a multiple of the page size cannot be mapped there: the agent is SIGKILLed at exec,
+      # silently. 64 KiB covers 4, 16, 32 and 64 KiB kernels. GNU ld aligns armv7 for 4 KiB pages
+      # by default (aarch64 already for 64 KiB). check_pages below.
       export CARGO_TARGET_ARMV7_UNKNOWN_LINUX_MUSLEABIHF_RUSTFLAGS="${CARGO_TARGET_ARMV7_UNKNOWN_LINUX_MUSLEABIHF_RUSTFLAGS:--C link-arg=-Wl,-z,max-page-size=0x10000}"
       export CC_armv7_unknown_linux_musleabihf="${CC_armv7_unknown_linux_musleabihf:-arm-linux-gnueabihf-gcc}"
       export CARGO_TARGET_ARMV7_UNKNOWN_LINUX_MUSLEABIHF_LINKER="${CARGO_TARGET_ARMV7_UNKNOWN_LINUX_MUSLEABIHF_LINKER:-arm-linux-gnueabihf-gcc}"
@@ -67,7 +68,8 @@ report() {  # path, short name
   return 0
 }
 
-# ARM builds: every LOAD segment must load on a 64 KiB-page kernel (see setup): address and file
+# ARM builds: every LOAD segment must load on a 64 KiB-page kernel, and so on the DS2015xs's
+# 32 KiB pages and any smaller (see setup): address and file
 # offset congruent modulo 64 KiB, alignment at least 64 KiB, and no 64 KiB page shared by two
 # segments (the later mapping would replace the earlier one's permissions on it).
 PAGE64K=$((0x10000))

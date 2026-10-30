@@ -268,26 +268,27 @@ release notes). The steps, and every file that carries the version, are in
   `mdadm`, `btrfs` and `blkid` are there.
 - Large trees: a walk is bound by `lstat`; allow minutes for millions of files and use the
   client's `progress_ms` rather than a long timeout.
-- 64 KiB pages: Synology's `alpine` kernels (DS2015xs and the other Annapurna Alpine models on
-  Linux 3.10.108; the `alpine4k` ones use 4 KiB) use 64 KiB memory pages. A binary whose LOAD
-  segments are laid out for 4 KiB pages is killed at exec, as `Killed` (exit 137) with nothing in
-  `dmesg`, when a segment's address and file offset differ by other than a multiple of 64 KiB; when
-  two segments share a 64 KiB page, the later one's permissions replace the earlier one's (code
-  that is no longer executable). The 0.2.2 armv7 build loaded by luck. `build.sh` links armv7 with
-  `-z max-page-size=0x10000` (GNU ld already does so for aarch64, not for armv7), which loads with
-  4 KiB pages too, and `check_pages` fails the build of either ARM binary that would not load with
-  64 KiB pages.
+- Large pages: Synology's `alpine` kernel (DS2015xs and the other Annapurna Alpine models on
+  Linux 3.10.108; the `alpine4k` ones use 4 KiB) uses **32 KiB** memory pages (`KernelPageSize:
+  32 kB`, measured on a DS2015xs). A binary whose LOAD segments are laid out for 4 KiB pages is
+  killed at exec, as `Killed` (exit 137) with nothing in `dmesg`, when a segment's address and file
+  offset differ by other than a multiple of 32 KiB; when two segments share a 32 KiB page, the
+  later one's permissions replace the earlier one's (code that is no longer executable). The 0.2.2
+  armv7 build loaded by luck. `build.sh` links armv7 with `-z max-page-size=0x10000` (GNU ld already
+  does so for aarch64, not for armv7), which loads with 4, 16, 32 and 64 KiB pages, and
+  `check_pages` fails the build of either ARM binary that would not load with 64 KiB pages.
 - Which build a Synology model needs: look up its CPU and package arch (platform) in Synology's
   table, [What kind of CPU does my NAS have?](https://kb.synology.com/en-global/DSM/tutorial/What_kind_of_CPU_does_my_NAS_have#x15-series)
   (the DS2015xs: Annapurna Labs Alpine AL-514, 4 cores, `armv7`, package arch `alpine`, DDR3 4 GB).
   `uname -a` on the NAS ends in the platform too (`synology_alpine_ds2015xs`). The platform picks
   the binary by `uname -m` (`armv7l` -> armv7, `aarch64` -> aarch64, `x86_64` -> x86_64) and tells
   the page size: Synology's toolchains come per platform, and a platform with a `4k` twin
-  (`alpine` and `alpine4k`) is, by the name, the one that does not use 4 KiB pages. The toolchains and their kernel versions
+  (`alpine` and `alpine4k`) is the one that does not use 4 KiB pages (`alpine`: 32 KiB). The
+  toolchains and their kernel versions
   are listed per DSM release in the [toolchain archive](https://archive.synology.com/download/ToolChain/toolchain/7.1-42661)
   (DSM 7.1: `alpine` and `alpine4k`, both Linux 3.10.108), and how to use them is in the developer
   guide, [Download DSM Tool Chain](https://help.synology.com/developer-guide/compile_applications/download_dsm_tool_chain.html).
   filecat does not use them (the agent is a static musl binary built with Rust's own toolchain);
   they are the reference for a platform's kernel, page size and architecture flags.
-- To check the page size on the NAS itself: `grep -m1 KernelPageSize /proc/self/smaps` (`64 kB`
-  expected on `alpine`, `4 kB` on most others).
+- To check the page size on the NAS itself: `grep -m1 KernelPageSize /proc/self/smaps` (`32 kB`
+  on `alpine`, `4 kB` on most others).
