@@ -317,6 +317,37 @@ After the v0.2.0 rollups (stages A and B of [rollups.md](rollups.md)):
 - Optional rollup measures: size by extension, age buckets, largest matched
   children (never for private rules).
 
+## v0.2.x: to do
+
+- **Scan roots that are not in the catalog yet**, and Synology shared folders
+  that are not SMB shares (an NFS-only folder such as `\\nas3\pve`):
+  - Today the Roots page's Scan needs a root already in the root index
+    (`POST /api/roots/scan` answers 404), and a `scan` job with no `roots`
+    covers the catalog's roots plus the topology's `unc_roots`, which holds
+    only SMB shares: an NFS-only export is collected as a share node with
+    `protocols: ["nfs"]` and no `unc` (`topology_collect/synology.py`), so
+    no job ever picks it up.
+  - Wanted: give NFS-only (and folder-only) shares their `\\<alias>\<name>`
+    root so jobs and the Roots page list them; an "add root" in the viewer
+    (a share from the agent's topology, or a typed root an agent covers) that
+    queues its first scan; and `filecat roots add` or a dry-run listing of the
+    shares an agent has that the catalog does not.
+  - Check first: `filecat scan --agent nas3 \\nas3\pve` should already read
+    `/volume1/pve` (the share is looked up in the volume folder the agent
+    lists, scanning.md "One share, two spellings"); if it does, that is the
+    workaround until the above exists.
+- **Summaries: a scan that writes nothing can stamp a root changed** (flaky
+  `test_summaries.py::test_an_unchanged_root_is_not_rebuilt_however_old_the_graph_max_age`,
+  about 1 run in 8 locally, once in CI on the v0.2.2 commit). In
+  `rootinfo.finish()`, a root with no `changed_at` and an unchanged scan gets
+  `last_scan.finished_at` or the attempt's `started_at`, both whole seconds:
+  a summary built at `...:00.99` looks older than a stamp of `...:01` from a
+  scan that started just after the second turned, so it is stale and rebuilt
+  for nothing. Fix: no stamp newer than the records' last real change (leave
+  it unset, or use a stamp no later than the stored summary's), and make the
+  test deterministic. The other occasional Windows failures in
+  `test_summaries.py` and `test_roots_actions.py` may share the cause.
+
 ## v0.2.5: file-name search
 
 Use the catalog as a file-name search across every host, as voidtools
