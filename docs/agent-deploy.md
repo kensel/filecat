@@ -277,6 +277,15 @@ release notes). The steps, and every file that carries the version, are in
   armv7 build loaded by luck. `build.sh` links armv7 with `-z max-page-size=0x10000` (GNU ld already
   does so for aarch64, not for armv7), which loads with 4, 16, 32 and 64 KiB pages, and
   `check_pages` fails the build of either ARM binary that would not load with 64 KiB pages.
+- The clock on Synology's 32-bit ARM kernels: musl reads the time with `clock_gettime64`
+  (syscall 403, Linux 5.1+) and falls back to the old `clock_gettime` only when the kernel says
+  `ENOSYS`. Synology's 3.10 kernel has its own syscall at 403 ("archive bit") that answers `EINVAL`
+  (`dmesg`: `Archive bit cmd:<address> not implement.`), so every clock reading of a musl binary
+  fails, and std panics on it (`time.rs ... Os { code: 22, kind: InvalidInput }`): the agent
+  starts, then each connection's thread dies and the client sees `ConnectionResetError`. Before
+  0.2.3 the armv7 agent could not serve a connection on such a NAS. The agent now reads every
+  clock through `src/clock.rs`, which makes the old syscall on 32-bit ARM, including rustls's
+  clock; a test fails if any other source reads std's clocks.
 - Which build a Synology model needs: look up its CPU and package arch (platform) in Synology's
   table, [What kind of CPU does my NAS have?](https://kb.synology.com/en-global/DSM/tutorial/What_kind_of_CPU_does_my_NAS_have#x15-series)
   (the DS2015xs: Annapurna Labs Alpine AL-514, 4 cores, `armv7`, package arch `alpine`, DDR3 4 GB).

@@ -18,6 +18,16 @@ pub struct Tls {
     pub generated: bool,
 }
 
+/// rustls's clock (session tickets): the agent's, not std's `SystemTime` (see clock.rs).
+#[derive(Debug)]
+struct AgentTime;
+
+impl rustls::time_provider::TimeProvider for AgentTime {
+    fn current_time(&self) -> Option<rustls::pki_types::UnixTime> {
+        crate::clock::wall().map(rustls::pki_types::UnixTime::since_unix_epoch)
+    }
+}
+
 fn write_private(path: &Path, data: &[u8]) -> Result<(), String> {
     let mut f = std::fs::OpenOptions::new().write(true).create_new(true).mode(0o600).open(path).map_err(|e| format!("{}: {e}", path.display()))?;
     f.write_all(data).map_err(|e| format!("{}: {e}", path.display()))
@@ -51,7 +61,7 @@ pub fn load_or_generate(cert_path: &Path, key_path: &Path) -> Result<Tls, String
     let fingerprint = crate::proto::hex(&Sha256::digest(leaf.as_ref()));
     let key = PrivateKeyDer::from_pem_slice(&key_pem).map_err(|e| format!("{}: {e}", key_path.display()))?;
     let provider = Arc::new(rustls::crypto::ring::default_provider());
-    let config = rustls::ServerConfig::builder_with_provider(provider)
+    let config = rustls::ServerConfig::builder_with_details(provider, Arc::new(AgentTime))
         .with_safe_default_protocol_versions()
         .map_err(|e| e.to_string())?
         .with_no_client_auth()

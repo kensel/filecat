@@ -10,7 +10,7 @@ use serde_json::{json, Value};
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, Ordering::Relaxed};
 use std::sync::{Arc, Mutex, MutexGuard};
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::time::Duration;
 
 pub const MAX_LABEL_CHARS: usize = 200;
 const MIB: u64 = 1024 * 1024;
@@ -205,7 +205,7 @@ impl Registry {
             id: self.next.fetch_add(1, Relaxed) + 1,
             peer,
             connected: Instant::now(),
-            connected_unix: SystemTime::now().duration_since(UNIX_EPOCH).map_or(0, |d| d.as_secs()),
+            connected_unix: crate::clock::unix_now().as_secs(),
             meta: Mutex::new(Meta::default()),
             counters: Counters::default(),
         });

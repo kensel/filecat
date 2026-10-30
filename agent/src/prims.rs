@@ -193,7 +193,7 @@ pub fn read_file(scope: &Scope, req: &Obj) -> R<Value> {
         data.truncate(got);
         let _ = tx.send(out.map(|_| data));
     });
-    let mut data = match rx.recv_timeout(READ_FILE_DEADLINE) {
+    let mut data = match crate::clock::recv_timeout(&rx, READ_FILE_DEADLINE) {
         Ok(r) => r?,
         Err(_) => return Err(Fail::io("read timed out")),
     };
