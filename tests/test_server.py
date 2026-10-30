@@ -311,6 +311,12 @@ def test_health_up_down_backoff_and_recovery():
         st = coord.health["nas3"]
         waits.append((st.next_check - clock.now).total_seconds())
     assert waits == [120, 200, 200, 200] and coord.health["nas3"].failures == 5
+    # hours down: the doubling stops growing (2**N times a timedelta overflowed after ~31 failures)
+    coord.health["nas3"].failures = 500
+    clock.advance(seconds=300)
+    coord.probe_due(clock(), wait=True)
+    st = coord.health["nas3"]
+    assert st.failures == 501 and (st.next_check - clock.now).total_seconds() == 200
     down.clear()
     clock.advance(seconds=300)
     coord.probe_due(clock(), wait=True)

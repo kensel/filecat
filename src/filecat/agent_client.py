@@ -573,6 +573,8 @@ class AgentClient:
         alive, and `busy` is retried after a pause."""
         if progress_ms:
             payload = {**payload, "progress_ms": progress_ms}
+            if on_progress is None:         # asked for: the progress lines are expected, not an error
+                on_progress = lambda _progress: None
         for attempt in range(BUSY_TRIES):
             try:
                 return self._call(payload, timeout, on_progress)

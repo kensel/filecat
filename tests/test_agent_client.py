@@ -723,6 +723,18 @@ def test_progress_lines_are_read_before_the_response(agent, tree):
     assert [r["progress_ms"] for r in agent.requests if r["cmd"] == "list_dir"] == [500]
 
 
+def test_progress_asked_for_without_a_callback_is_not_a_protocol_error(agent, tree):
+    # storage collect --measure-shares: sum_subtree(progress_ms=5000) and no on_progress; the
+    # first progress line of a share that took longer used to fail it as "not a protocol-1 response"
+    _big(tree)
+    agent.progress_always = True
+    with client_for(agent) as c:
+        c.configure_policy(rules=CACHE_RULE)
+        assert c.list_dir("/volume1/Backup", progress_ms=500).entries
+        assert c.sum_subtree("/volume1/Backup", progress_ms=500).total_files > 0
+    assert any("progress" in line for way, line in agent.wire if way == "out")
+
+
 def test_no_progress_line_is_sent_to_a_client_that_did_not_ask(agent, tree):
     _big(tree)
     agent.progress_always = True

@@ -336,6 +336,12 @@ After the v0.2.0 rollups (stages A and B of [rollups.md](rollups.md)):
     `/volume1/pve` (the share is looked up in the volume folder the agent
     lists, scanning.md "One share, two spellings"); if it does, that is the
     workaround until the above exists.
+- **Run the agent as a service on DSM**, started at boot and restarted when it
+  exits: today it is started by hand in a shell (nas2). Options to compare: a
+  DSM Task Scheduler "boot-up" task (root) running a small wrapper script, an
+  `/usr/local/etc/rc.d/filecat-agent.sh` start/stop script, or a systemd unit
+  on DSM 7 (`/etc/systemd/system`, which DSM updates may reset). Document the
+  chosen one in agent-deploy.md, with where its output goes (the status log).
 - **Summaries: a scan that writes nothing can stamp a root changed** (flaky
   `test_summaries.py::test_an_unchanged_root_is_not_rebuilt_however_old_the_graph_max_age`,
   about 1 run in 8 locally, once in CI on the v0.2.2 commit). In

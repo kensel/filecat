@@ -479,7 +479,8 @@ class Coordinator:
                     self.log(f"agent {name} is down: {status.error}")
                     st.state, st.since = "down", iso(now)
                 st.last_error = status.error
-                delay = min(self.cfg.health_interval * 2 ** (st.failures - 1), self.cfg.health_backoff_max)
+                # the exponent is capped: timedelta * 2**N overflows a C int after ~31 failures
+                delay = min(self.cfg.health_interval * 2 ** min(st.failures - 1, 20), self.cfg.health_backoff_max)
                 st.next_check = now + delay
             self._dirty = True
 
