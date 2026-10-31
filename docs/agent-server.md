@@ -63,7 +63,7 @@ left out): the client's label, address, how long it has been connected, the comm
 files, data read and files/s:
 
 ```
-ok   nas3     192.0.2.13:9876  filecat-agent 0.2.2, protocol 1, host nas3 (linux/x86_64)
+ok   nas3     192.0.2.13:9876  filecat-agent 0.2.3, protocol 1, host nas3 (linux/x86_64)
   ...
   sessions     1 other connection(s)
     scan \\nas3\Apps by kense@DESKTOP  192.0.2.20:51234  connected 12m  sum_subtree for 3m  41234 files, 12.40 GB read, 57.3 files/s

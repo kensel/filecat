@@ -121,7 +121,7 @@ connections on each agent. Labels and counters only: no path is ever in the log 
 
 ```sh
 /usr/local/filecat-agent/filecat-agent
-# filecat-agent 0.2.2 listening on 0.0.0.0:9876
+# filecat-agent 0.2.3 listening on 0.0.0.0:9876
 # cert_sha256 a436cafae7aa...
 # generated a new certificate: /usr/local/filecat-agent/filecat-agent.crt; paste cert_sha256 into filecat.toml
 # allowed_roots (default) /volume*:/proc:...
@@ -206,6 +206,13 @@ only. The newer `filecat` works with either agent.
 
 **To 0.2.2**: the agent behaves exactly as 0.2.1 (same protocol, allowlist and deny list hashes);
 0.2.2 is the first release built and published by the release workflow. Updating is optional.
+
+**To 0.2.3**: required for armv7 Synology models on Synology's `alpine` kernel (DS2015xs and
+the like), where earlier armv7 agents either were killed at exec or dropped every connection (see
+"Notes for DSM": 32 KiB pages, and syscall 403). Same protocol, allowlist and deny list hashes;
+x86_64 and aarch64 agents behave as 0.2.2. Update `filecat` too: its health checks no longer crash
+after an agent has been down for hours, and `storage collect --measure-shares` no longer fails
+every share that takes over 5 s to sum.
 
 ## 9. Scheduled work: `filecat server`
 
