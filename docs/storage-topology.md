@@ -293,7 +293,14 @@ reads through a small **source fetcher** interface (`Source`: `read_file`,
 - `RecordedSource(dir)` serves recorded raw outputs, so tests and bug reports
   feed a collector what a real host printed, without an agent
   (`tests/data/raw/nas3/`: the files as read, `run/<id>.stdout`, `statfs.json`,
-  `subtree.json`).
+  `subtree.json`);
+- `RecordingSource(source, dir)` wraps a live source and writes such a
+  recording: `filecat storage collect --record DIR` (into `DIR/<agent>`) keeps
+  what the collector read, the output of every argument-free allowlist command
+  the host has (`zpool`, `zfs`, `midclt` ... on a platform no collector knows
+  yet), a few identity files (`/etc/version`, `/etc/os-release`) and the
+  `/dev/disk/by-*` links. It holds what the host printed (serial numbers, share
+  names): run `scripts/sanitize.py` over it before it goes under `tests/data/`.
 
 A source that cannot be read leaves its nodes or fields out and adds a note
 to the snapshot (`collector.notes`); a collection never fails for a missing

@@ -169,18 +169,43 @@ def _server_of(alias: str) -> str:
     return alias.strip("\\/")
 
 
+# --record: read besides what the collector reads, for a platform it does not know yet
+RECORD_FILES = ("/etc/version", "/etc/os-release", "/etc/hostname", "/proc/mounts", "/proc/partitions",
+                "/proc/mdstat")
+RECORD_DIRS = ("/sys/block", "/dev/disk/by-id", "/dev/disk/by-uuid", "/dev/disk/by-partuuid",
+               "/dev/disk/by-path", "/dev/zvol")
+
+
 def collect_agent(agent: config.AgentConfig, *, platform: str | None = None, label: str | None = None,
-                  measure_shares: bool = False) -> tuple[topology.Topology, dict[str, Any]]:
-    """Collect one [[agents]] host through its agent: (topology, agent info for the store)."""
-    from .agent_client import AgentClient, default_label
-    from .topology_collect import AgentSource, collect
+                  measure_shares: bool = False, record: str | None = None
+                  ) -> tuple[topology.Topology, dict[str, Any]]:
+    """Collect one [[agents]] host through its agent: (topology, agent info for the store). With
+    `record`, a directory, the raw outputs are also written there as a recording (RecordingSource:
+    what the collector read, every argument-free allowlist entry, RECORD_FILES and RECORD_DIRS)."""
+    from .agent_client import AgentClient, AgentError, default_label
+    from .topology_collect import AgentSource, RecordingSource, collect
     with AgentClient.from_config(agent, label=label or default_label("storage collect")) as client:
-        source = AgentSource(client)
+        source: Any = AgentSource(client)
+        if record:
+            source = RecordingSource(source, record)
         info = client.info
         assert info is not None
         topo = collect(source, platform, name=_server_of(agent.alias), unc_server="\\\\" + _server_of(agent.alias),
                        measure_shares=measure_shares)
-        caps = source.capabilities()
+        if record:
+            for path in RECORD_FILES:
+                try:
+                    source.read_file(path)
+                except AgentError:
+                    pass
+            for path in RECORD_DIRS:
+                try:
+                    source.list_dir(path)
+                except AgentError:
+                    pass
+            source.record_runs()
+            source.save()
+        caps = source.inner.capabilities() if record else source.capabilities()
     return topo, {"name": agent.name, "version": info.agent_version, "protocol": info.protocol,
                   "hostname": info.hostname, "os": info.os, "arch": info.arch,
                   "allowlist_version": caps.allowlist_version, "allowlist_sha256": caps.allowlist_sha256}
@@ -201,7 +226,11 @@ def _collect(args: Any) -> int:
     try:
         for agent in agents:
             try:
-                topo, info = collect_agent(agent, platform=args.platform, measure_shares=args.measure_shares)
+                record = str(Path(args.record) / agent.name) if args.record else None
+                topo, info = collect_agent(agent, platform=args.platform, measure_shares=args.measure_shares,
+                                           record=record)
+                if record and not args.json:
+                    print(f"{agent.name}: raw outputs recorded in {record}")
             except Exception as exc:    # report every agent, whatever fails (unreachable, invalid topology)
                 failed += 1
                 msg = str(exc).strip().splitlines()[0] if str(exc).strip() else type(exc).__name__

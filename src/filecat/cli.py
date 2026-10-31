@@ -476,6 +476,11 @@ def build_parser() -> argparse.ArgumentParser:
     s.add_argument("--measure-shares", dest="measure_shares", action="store_true",
                    help="also sum each share with the agent for its used bytes (minutes on a big share)")
     s.add_argument("--dry-run", dest="dry_run", action="store_true", help="collect and validate, store nothing")
+    s.add_argument("--record", metavar="DIR",
+                   help="also write each host's raw outputs to DIR/<agent> (what the collector read, every "
+                        "argument-free allowlist command, a few identity files): a recording that "
+                        "tests/RecordedSource replay, for a new collector or a bug report. It holds what the "
+                        "host printed (serials, share names): look at it before sharing it")
     s.add_argument("--json", action="store_true", help="one JSON object per agent")
     _storage(s)
     s = ssub.add_parser("show", help="the stored snapshots and the hosts written by hand; with a host, "

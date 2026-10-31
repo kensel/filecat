@@ -19,7 +19,7 @@ from typing import Any, Callable
 
 from .. import topology
 from . import linux, synology
-from .source import AgentSource, RecordedSource, Source
+from .source import AgentSource, RecordedSource, RecordingSource, Source
 
 COLLECTORS: dict[str, Callable[..., topology.Topology]] = {
     synology.PLATFORM: synology.collect,
@@ -41,4 +41,4 @@ def collect(source: Source, platform: str | None = None, **kwargs: Any) -> topol
     return COLLECTORS[platform](source, **kwargs)
 
 
-__all__ = ["AgentSource", "RecordedSource", "Source", "COLLECTORS", "collect", "detect_platform"]
+__all__ = ["AgentSource", "RecordedSource", "RecordingSource", "Source", "COLLECTORS", "collect", "detect_platform"]

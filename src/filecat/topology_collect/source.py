@@ -7,7 +7,8 @@ the topology from what comes back. Two sources exist:
 * `AgentSource` wraps an `AgentClient`: read_file, list_dir, statfs, sum_subtree, run and
   capabilities of a filecat-agent (docs/agent-protocol.md).
 * `RecordedSource` serves a directory of recorded raw outputs, so tests (and a bug report) feed
-  a collector what a real host printed without an agent.
+  a collector what a real host printed without an agent; `RecordingSource` wraps a live source
+  and writes one (`filecat storage collect --record DIR`).
 
 Both raise `AgentError` with the protocol's codes (`not_found`, `permission_denied`, `refused`,
 `bad_request`, ...), which is what collectors catch: a source that cannot be read leaves its
@@ -60,7 +61,8 @@ class AgentSource:
 
     def __init__(self, client: AgentClient) -> None:
         self.client = client
-        self.hostname = client.connect().hostname
+        self.hello = client.connect()
+        self.hostname = self.hello.hostname
         self._caps: Capabilities | None = None
 
     def read_file(self, path: str, max: int = 1024 * 1024) -> FileData:
@@ -186,3 +188,125 @@ class RecordedSource:
 
     def has(self, entry_id: str) -> bool:
         return entry_id in self._available
+
+
+class RecordingSource:
+    """Wraps a source and writes everything read through it as a recording (the layout above),
+    so a host's raw outputs can be replayed with `RecordedSource` (a new collector's tests, a bug
+    report). `record_runs()` also runs every argument-free allowlist entry the host has, so a
+    platform the collector does not know yet (TrueNAS, Proxmox) is captured whole. `save()`
+    writes the json files. A name the local file system cannot hold (`:` on Windows) is skipped
+    and listed in meta.json's `skipped`. The recording holds whatever the host printed (serial
+    numbers, share names, middleware query output): look at it before sharing it."""
+
+    def __init__(self, inner: Any, root: str | Path) -> None:
+        self.inner = inner
+        self.root = Path(root)
+        self.hostname = inner.hostname
+        self._links: dict[str, str] = {}
+        self._statfs: dict[str, dict[str, Any]] = {}
+        self._subtree: dict[str, dict[str, Any]] = {}
+        self._skipped: list[str] = []
+        (self.root / "files").mkdir(parents=True, exist_ok=True)
+        (self.root / "run").mkdir(exist_ok=True)
+
+    def _path(self, path: str) -> Path | None:
+        if not path.startswith("/") or ".." in path.split("/"):
+            return None
+        return self.root / "files" / path.lstrip("/")
+
+    def _write(self, label: str, real: Path | None, data: bytes, *, keep: bool = False) -> None:
+        if real is None:
+            return
+        try:
+            real.parent.mkdir(parents=True, exist_ok=True)
+            if keep and real.exists():
+                return
+            real.write_bytes(data)
+        except OSError:
+            self._skipped.append(label)
+
+    def read_file(self, path: str, max: int = 1024 * 1024) -> FileData:
+        data = self.inner.read_file(path, max)
+        self._write(path, self._path(path), data.data)
+        return data
+
+    def list_dir(self, path: str) -> list[DirEntry]:
+        entries = self.inner.list_dir(path)
+        base = self._path(path)
+        if base is not None:
+            try:
+                base.mkdir(parents=True, exist_ok=True)
+            except OSError:
+                self._skipped.append(path)
+                return entries
+            for e in entries:
+                full = path.rstrip("/") + "/" + e.name
+                if e.kind == "link" and e.link_target is not None:
+                    self._links[full] = e.link_target
+                elif e.kind == "dir":
+                    try:
+                        (base / e.name).mkdir(exist_ok=True)
+                    except OSError:
+                        self._skipped.append(full)
+                else:                           # listed only: an empty file, unless it is read too
+                    self._write(full, base / e.name, b"", keep=True)
+        return entries
+
+    def statfs(self, path: str) -> StatFs:
+        st = self.inner.statfs(path)
+        self._statfs[path] = {"total_bytes": st.total_bytes, "free_bytes": st.free_bytes,
+                              "avail_bytes": st.avail_bytes, "block_size": st.block_size,
+                              "fs_type_id": st.fs_type_id, "flags": st.flags, "files": st.files,
+                              "files_free": st.files_free}
+        return st
+
+    def sum_subtree(self, path: str, deadline_ms: int | None = None) -> SubtreeSummary:
+        s = self.inner.sum_subtree(path, deadline_ms)
+        self._subtree[path] = {"total_files": s.total_files, "total_dirs": s.total_dirs,
+                               "total_size": s.total_size, "total_allocated_size": s.total_allocated_size,
+                               "newest_mtime_ns": s.newest_mtime_ns, "errors": s.errors}
+        return s
+
+    def run(self, entry_id: str, arg: str | None = None) -> RunResult:
+        res = self.inner.run(entry_id, arg)
+        stem = entry_id if arg is None else f"{entry_id}@{quote(arg, safe='')}"
+        out = self.root / "run" / f"{stem}.stdout"
+        self._write(f"run {stem}", out, res.stdout.encode("utf-8"))
+        if res.stderr:
+            self._write(f"run {stem}", out.with_suffix(".stderr"), res.stderr.encode("utf-8"))
+        if res.exit_code not in (0, None):
+            self._write(f"run {stem}", out.with_suffix(".exit"), f"{res.exit_code}\n".encode())
+        return res
+
+    def has(self, entry_id: str) -> bool:
+        return self.inner.has(entry_id)
+
+    def record_runs(self) -> list[str]:
+        """Run every available allowlist entry that takes no argument; returns the ids run. One
+        that fails is left out (its error is in the result list as `id: error`)."""
+        caps = self.inner.capabilities() if hasattr(self.inner, "capabilities") else None
+        done = []
+        for cap in sorted((caps.entries.values() if caps else ()), key=lambda c: c.id):
+            if not cap.available or cap.arg_kind:
+                continue
+            try:
+                self.run(cap.id)
+                done.append(cap.id)
+            except AgentError as exc:
+                done.append(f"{cap.id}: {exc.code}")
+        return done
+
+    def save(self) -> None:
+        caps = self.inner.capabilities() if hasattr(self.inner, "capabilities") else None
+        hello = getattr(self.inner, "hello", None)
+        meta: dict[str, Any] = {"hostname": self.hostname, "os": getattr(hello, "os", "linux"),
+                                "arch": getattr(hello, "arch", "")}
+        if self._skipped:
+            meta["skipped"] = sorted(set(self._skipped))
+        for name, value in (("meta.json", meta), ("links.json", self._links),
+                            ("statfs.json", self._statfs), ("subtree.json", self._subtree)):
+            (self.root / name).write_text(json.dumps(value, indent=1, sort_keys=True) + "\n", encoding="utf-8")
+        if caps is not None:
+            available = sorted(c.id for c in caps.entries.values() if c.available)
+            (self.root / "capabilities.json").write_text(json.dumps(available, indent=1) + "\n", encoding="utf-8")

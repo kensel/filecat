@@ -40,6 +40,18 @@ def test_nas3_collects_to_the_lab_fixture():
     assert "collector" not in got            # nothing was unreadable
 
 
+def test_a_recording_made_while_collecting_replays_to_the_same_topology(tmp_path):
+    # storage collect --record: RecordingSource writes what the collector read; collecting again
+    # from that recording alone gives the same topology
+    from filecat.topology_collect import RecordingSource
+    rec = RecordingSource(RecordedSource(NAS3), tmp_path / "nas3")
+    first = collect(rec, unc_server="\\\\nas3", now=NOW, measure_shares=True).to_dict()
+    rec.save()
+    again = collect(RecordedSource(tmp_path / "nas3"), unc_server="\\\\nas3", now=NOW, measure_shares=True)
+    assert again.to_dict() == first
+    assert json.loads((tmp_path / "nas3" / "meta.json").read_text())["hostname"] == "nas3"
+
+
 def test_nas3_layers():
     t = nas3()
     assert t.platform == "synology" and t.host["os"] == "DSM 7.2.2"
@@ -470,6 +482,18 @@ def test_storage_collect_show_and_links(served, fixture_dir, capsys):
     assert code == 0 and [s["name"] for s in doc["snapshots"]] == ["nas3"] and doc["snapshots"][0]["from"] == "catalog"
     code, out = go("collect", "--agent", "nope")
     assert code == 2 and "no such [[agents]]" in out.err
+
+
+def test_storage_collect_record_writes_a_replayable_recording(served, fixture_dir, capsys):
+    cfg = _config(fixture_dir, served)
+    rec = fixture_dir / "rec"
+    code, out = run(capsys, "--config", str(cfg), "storage", "collect", "--measure-shares", "--dry-run",
+                    "--record", str(rec))
+    assert code == 0 and f"nas3: raw outputs recorded in {rec / 'nas3'}" in out.out
+    assert (rec / "nas3" / "run" / "mdadm_detail_scan.stdout").is_file()      # argument-free entries are run
+    assert "mdadm_detail_scan" in json.loads((rec / "nas3" / "capabilities.json").read_text())
+    replayed = collect(RecordedSource(rec / "nas3"), unc_server="\\\\nas3", now=NOW, measure_shares=True)
+    assert len(replayed.nodes) == 23
 
 
 def test_storage_links_reads_nothing_when_there_is_no_catalog(fixture_dir, capsys, monkeypatch):
