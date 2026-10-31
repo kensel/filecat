@@ -9,8 +9,9 @@ rebuild. A collector is a function over a `Source`:
     with AgentClient.from_config(agent) as client:
         topo = collect(AgentSource(client), name="nas3", unc_server="\\\\\\\\nas3")
 
-Collectors: `synology` (DSM 7: disks, md, LVM, volumes, shares, LUNs, VMM) and `linux` (disks,
-mounted file systems). TrueNAS and Proxmox follow the same pattern: one module, a `collect`
+Collectors: `synology` (DSM 7: disks, md, LVM, volumes, shares, LUNs, VMM), `truenas` (disks, ZFS
+pools, vdevs, datasets, zvols, SMB/NFS shares) and `linux` (disks, mounted file systems). Proxmox
+follows the same pattern: one module, a `collect`
 function, recorded raw outputs under tests/data/raw/<host>/ to test it with `RecordedSource`.
 """
 from __future__ import annotations
@@ -18,18 +19,22 @@ from __future__ import annotations
 from typing import Any, Callable
 
 from .. import topology
-from . import linux, synology
+from . import linux, synology, truenas
 from .source import AgentSource, RecordedSource, RecordingSource, Source
 
 COLLECTORS: dict[str, Callable[..., topology.Topology]] = {
     synology.PLATFORM: synology.collect,
+    truenas.PLATFORM: truenas.collect,
     linux.PLATFORM: linux.collect,
 }
 
 
 def detect_platform(source: Source) -> str:
-    """The most specific collector that applies to the host: `synology` for a DSM host, else `linux`."""
-    return synology.PLATFORM if synology.is_synology(source) else linux.PLATFORM
+    """The most specific collector that applies to the host: `synology` for a DSM host, `truenas`
+    for TrueNAS SCALE / CE, else `linux`."""
+    if synology.is_synology(source):
+        return synology.PLATFORM
+    return truenas.PLATFORM if truenas.is_truenas(source) else linux.PLATFORM
 
 
 def collect(source: Source, platform: str | None = None, **kwargs: Any) -> topology.Topology:

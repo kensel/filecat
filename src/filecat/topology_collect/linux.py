@@ -8,7 +8,7 @@ gets a note in the snapshot saying the layers are not collected.
 from __future__ import annotations
 
 import re
-from typing import Any
+from typing import Any, Callable
 
 from .. import topology
 from .common import Reader, finish
@@ -49,17 +49,17 @@ def _sysfs_disks(r: Reader) -> list[dict[str, Any]]:
     return out
 
 
-def collect(source: Source, *, name: str | None = None, unc_server: str | None = None,
-            now: str | None = None, measure_shares: bool = False) -> topology.Topology:
-    r = Reader(source)
-    host_name = name or source.hostname
+def disks(r: Reader, platform: str = PLATFORM) -> tuple[list[dict[str, Any]], Callable[[str], str | None]]:
+    """The disk nodes (lsblk, else /sys/block; keyed by serial, else WWN, else device name) and a
+    function from a kernel name (a disk, a partition, a device stacked on one) to its disk's id.
+    `platform` names the key of each node's `platform` details (other collectors reuse this)."""
     devices = _lsblk(r)
     if devices is None:
         r.note("lsblk is not available: disks come from /sys/block")
         devices = _sysfs_disks(r)
     by_kname = {d.get("kname") or d["name"]: d for d in devices}
 
-    disks: list[dict[str, Any]] = []
+    nodes: list[dict[str, Any]] = []
     disk_id: dict[str, str] = {}
     for d in devices:
         if d.get("type") != "disk" or _SKIP_DISK.match(d["name"]):
@@ -83,9 +83,9 @@ def collect(source: Source, *, name: str | None = None, unc_server: str | None =
         if d.get("model"):
             node["model"] = d["model"]
         node["media"] = "nvme" if d["name"].startswith("nvme") else "hdd" if d.get("rota") else "ssd"
-        node["platform"] = {PLATFORM: plat}
+        node["platform"] = {platform: plat}
         disk_id[d.get("kname") or d["name"]] = did
-        disks.append(node)
+        nodes.append(node)
 
     def disk_of(kname: str) -> str | None:
         seen = set()
@@ -95,6 +95,14 @@ def collect(source: Source, *, name: str | None = None, unc_server: str | None =
                 return disk_id[kname]
             kname = (by_kname.get(kname) or {}).get("pkname")
         return None
+    return nodes, disk_of
+
+
+def collect(source: Source, *, name: str | None = None, unc_server: str | None = None,
+            now: str | None = None, measure_shares: bool = False) -> topology.Topology:
+    r = Reader(source)
+    host_name = name or source.hostname
+    disk_nodes, disk_of = disks(r)
 
     uuids: dict[str, str] = {}                      # kernel name -> file system uuid
     for entry in r.entries("/dev/disk/by-uuid"):
@@ -138,4 +146,4 @@ def collect(source: Source, *, name: str | None = None, unc_server: str | None =
         mm = re.search(r'^PRETTY_NAME="?([^"\n]+)"?', release, re.M)
         if mm:
             host["os"] = mm.group(1)
-    return finish(PLATFORM, host, [*disks, *volumes], r, name="linux", collected_at=now)
+    return finish(PLATFORM, host, [*disk_nodes, *volumes], r, name="linux", collected_at=now)

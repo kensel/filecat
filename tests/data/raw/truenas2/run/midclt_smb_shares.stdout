@@ -1,0 +1,177 @@
+[
+ {
+  "id": 1,
+  "purpose": "DEFAULT_SHARE",
+  "name": "ds017",
+  "path": "/mnt/pool0/ds017",
+  "dataset": "pool0/ds017",
+  "relative_path": "",
+  "enabled": true,
+  "comment": "",
+  "readonly": false,
+  "browsable": true,
+  "access_based_share_enumeration": false,
+  "locked": false,
+  "audit": {
+   "enable": false,
+   "watch_list": [],
+   "ignore_list": []
+  },
+  "options": {
+   "aapl_name_mangling": false,
+   "hostsallow": [],
+   "hostsdeny": []
+  },
+  "tier": null
+ },
+ {
+  "id": 2,
+  "purpose": "DEFAULT_SHARE",
+  "name": "ds011",
+  "path": "/mnt/pool0/ds011",
+  "dataset": "pool0/ds011",
+  "relative_path": "",
+  "enabled": true,
+  "comment": "",
+  "readonly": false,
+  "browsable": true,
+  "access_based_share_enumeration": false,
+  "locked": false,
+  "audit": {
+   "enable": false,
+   "watch_list": [],
+   "ignore_list": []
+  },
+  "options": {
+   "aapl_name_mangling": false,
+   "hostsallow": [],
+   "hostsdeny": []
+  },
+  "tier": null
+ },
+ {
+  "id": 3,
+  "purpose": "DEFAULT_SHARE",
+  "name": "ds012",
+  "path": "/mnt/pool0/ds012",
+  "dataset": "pool0/ds012",
+  "relative_path": "",
+  "enabled": true,
+  "comment": "",
+  "readonly": false,
+  "browsable": true,
+  "access_based_share_enumeration": false,
+  "locked": false,
+  "audit": {
+   "enable": false,
+   "watch_list": [],
+   "ignore_list": []
+  },
+  "options": {
+   "aapl_name_mangling": false,
+   "hostsallow": [],
+   "hostsdeny": []
+  },
+  "tier": null
+ },
+ {
+  "id": 4,
+  "purpose": "DEFAULT_SHARE",
+  "name": "ds016",
+  "path": "/mnt/pool0/ds016",
+  "dataset": "pool0/ds016",
+  "relative_path": "",
+  "enabled": true,
+  "comment": "",
+  "readonly": true,
+  "browsable": true,
+  "access_based_share_enumeration": false,
+  "locked": false,
+  "audit": {
+   "enable": false,
+   "watch_list": [],
+   "ignore_list": []
+  },
+  "options": {
+   "aapl_name_mangling": false,
+   "hostsallow": [],
+   "hostsdeny": []
+  },
+  "tier": null
+ },
+ {
+  "id": 5,
+  "purpose": "DEFAULT_SHARE",
+  "name": "jails",
+  "path": "/mnt/pool0/iocage/jails",
+  "dataset": "pool0/iocage/jails",
+  "relative_path": "",
+  "enabled": true,
+  "comment": "",
+  "readonly": false,
+  "browsable": true,
+  "access_based_share_enumeration": false,
+  "locked": false,
+  "audit": {
+   "enable": false,
+   "watch_list": [],
+   "ignore_list": []
+  },
+  "options": {
+   "aapl_name_mangling": false,
+   "hostsallow": [],
+   "hostsdeny": []
+  },
+  "tier": null
+ },
+ {
+  "id": 6,
+  "purpose": "DEFAULT_SHARE",
+  "name": "appdata",
+  "path": "/mnt/pool0/AppData",
+  "dataset": "pool0/AppData",
+  "relative_path": "",
+  "enabled": true,
+  "comment": "",
+  "readonly": true,
+  "browsable": true,
+  "access_based_share_enumeration": false,
+  "locked": false,
+  "audit": {
+   "enable": false,
+   "watch_list": [],
+   "ignore_list": []
+  },
+  "options": {
+   "aapl_name_mangling": false,
+   "hostsallow": [],
+   "hostsdeny": []
+  },
+  "tier": null
+ },
+ {
+  "id": 7,
+  "purpose": "DEFAULT_SHARE",
+  "name": "ds065",
+  "path": "/mnt/pool0/ds065",
+  "dataset": "pool0/ds065",
+  "relative_path": "",
+  "enabled": true,
+  "comment": "",
+  "readonly": true,
+  "browsable": true,
+  "access_based_share_enumeration": false,
+  "locked": false,
+  "audit": {
+   "enable": false,
+   "watch_list": [],
+   "ignore_list": []
+  },
+  "options": {
+   "aapl_name_mangling": false,
+   "hostsallow": [],
+   "hostsdeny": []
+  },
+  "tier": null
+ }
+]

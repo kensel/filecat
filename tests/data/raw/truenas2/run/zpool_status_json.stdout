@@ -1,0 +1,112 @@
+{
+ "output_version": {
+  "command": "zpool status",
+  "vers_major": 0,
+  "vers_minor": 1
+ },
+ "pools": {
+  "boot-pool": {
+   "name": "boot-pool",
+   "state": "ONLINE",
+   "pool_guid": 17928622918366983245,
+   "txg": 2306648,
+   "spa_version": 5000,
+   "zpl_version": 5,
+   "scan_stats": {
+    "function": "SCRUB",
+    "state": "FINISHED",
+    "start_time": 1793180702,
+    "end_time": 1793180740,
+    "to_examine": 12493553664,
+    "examined": 12492652544,
+    "skipped": 1863680,
+    "processed": 0,
+    "errors": 0,
+    "bytes_per_scan": 0,
+    "pass_start": 1793180706,
+    "scrub_pause": 0,
+    "scrub_spent_paused": 0,
+    "issued_bytes_per_scan": 12489277440,
+    "issued": 12489277440
+   },
+   "vdevs": {
+    "boot-pool": {
+     "name": "boot-pool",
+     "vdev_type": "root",
+     "guid": 17928622918366983245,
+     "class": "normal",
+     "state": "ONLINE",
+     "alloc_space": 12497379328,
+     "total_space": 33285996544,
+     "def_space": 33285996544,
+     "read_errors": 0,
+     "write_errors": 0,
+     "checksum_errors": 0,
+     "vdevs": {
+      "/dev/sda3": {
+       "name": "/dev/sda3",
+       "vdev_type": "disk",
+       "guid": 17406772257960788159,
+       "path": "/dev/sda3",
+       "class": "normal",
+       "state": "ONLINE",
+       "alloc_space": 12497379328,
+       "total_space": 33285996544,
+       "def_space": 33285996544,
+       "rep_dev_size": 33290715136,
+       "phys_space": 33819459584,
+       "read_errors": 0,
+       "write_errors": 0,
+       "checksum_errors": 0,
+       "slow_ios": 0
+      }
+     }
+    }
+   },
+   "error_count": 0
+  },
+  "pool0": {
+   "name": "pool0",
+   "state": "ONLINE",
+   "pool_guid": 8667592160816057359,
+   "txg": 2213069,
+   "spa_version": 5000,
+   "zpl_version": 5,
+   "vdevs": {
+    "pool0": {
+     "name": "pool0",
+     "vdev_type": "root",
+     "guid": 8667592160816057359,
+     "class": "normal",
+     "state": "ONLINE",
+     "alloc_space": 10069235400704,
+     "total_space": 11802570129408,
+     "def_space": 11802570129408,
+     "read_errors": 0,
+     "write_errors": 0,
+     "checksum_errors": 0,
+     "vdevs": {
+      "/dev/disk/by-partuuid/ec264ca4-2130-4f48-9259-c5ff0206ba59": {
+       "name": "/dev/disk/by-partuuid/ec264ca4-2130-4f48-9259-c5ff0206ba59",
+       "vdev_type": "disk",
+       "guid": 8006433134533452512,
+       "path": "/dev/disk/by-partuuid/ec264ca4-2130-4f48-9259-c5ff0206ba59",
+       "class": "normal",
+       "state": "ONLINE",
+       "alloc_space": 10069235400704,
+       "total_space": 11802570129408,
+       "def_space": 11802570129408,
+       "rep_dev_size": 11802574848000,
+       "phys_space": 11809012580352,
+       "read_errors": 0,
+       "write_errors": 0,
+       "checksum_errors": 0,
+       "slow_ios": 0
+      }
+     }
+    }
+   },
+   "error_count": 0
+  }
+ }
+}

@@ -1,0 +1,11 @@
+[
+ "lsblk_json",
+ "midclt_iscsi_extents",
+ "midclt_nfs_shares",
+ "midclt_pool_query",
+ "midclt_smb_shares",
+ "zfs_list",
+ "zfs_list_json",
+ "zpool_get_json",
+ "zpool_status_json"
+]

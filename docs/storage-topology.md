@@ -246,6 +246,30 @@ The vdev layer is needed here and is an ordinary `group`. Cache and spare
 vdevs hold no data; they are groups with their own `role` and contribute no
 `size_bytes` to the pool.
 
+The collector is `topology_collect/truenas.py` (detected by `ID=truenas` in
+os-release, or `midclt` on the host), tested against `tests/data/raw/truenas2`
+(a TrueNAS 26 recording with the dataset and share names made generic). It
+reads the JSON forms (`zpool status -j`, `zpool get -j`, `zfs list -j`;
+OpenZFS 2.3, TrueNAS 24.10+) and the `midclt` queries. As built:
+
+- A vdev of one device is a group with `level: single`, named after its
+  partition (`sdb1`, from the `/dev/disk/by-partuuid` link that `zpool status
+  -P` prints). A member's state sets its disk's `health`.
+- Dataset ids are `vol:<guid>` from `zfs list -H -p`: `zfs list -j
+  --json-int` clamps a guid above 2^63 to 2^63-1 (about half of them), which
+  would give many datasets one id. Without the text listing a clamped dataset
+  is keyed by its name.
+- TrueNAS's own trees are one node each, with the number of datasets they hide
+  in `platform.truenas.datasets_inside`: the boot pool's boot environments,
+  `.system`, `ix-applications`, `ix-apps`, `iocage` (truenas2: 262 of its 283
+  datasets). A dataset inside one that is a share's path stays visible.
+- A zvol is `thin` when it has no `refreservation`; `allocated_bytes` is its
+  `referenced` (what the data takes), `platform.truenas.used_bytes` the
+  `used` (with the reservation and metadata).
+- SMB and NFS shares of one path are one node; a disabled share has `health:
+  warning`. A share whose path no collected dataset holds is left out with a
+  note (a share needs a parent).
+
 ### Proxmox
 
 | Node | Source | Notes |

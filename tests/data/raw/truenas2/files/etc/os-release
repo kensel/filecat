@@ -1,0 +1,10 @@
+PRETTY_NAME="TrueNAS 26.0.0-BETA.3"
+NAME="TrueNAS"
+VERSION="26.0.0-BETA.3"
+ID=truenas
+ID_LIKE=debian
+HOME_URL="https://www.truenas.com"
+DOCUMENTATION_URL="https://www.truenas.com/docs"
+SUPPORT_URL="https://forums.truenas.com"
+BUG_REPORT_URL="https://ixsystems.atlassian.net/jira"
+PRIVACY_POLICY="https://www.truenas.com/legal/privacy-policy"

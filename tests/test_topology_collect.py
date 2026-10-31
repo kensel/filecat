@@ -235,7 +235,8 @@ def test_storage_show_labels_cache_group_volume_cache_and_disks():
 def test_detect_platform_and_dispatch():
     assert detect_platform(RecordedSource(NAS3)) == "synology"
     with pytest.raises(ValueError, match="no collector"):
-        collect(RecordedSource(NAS3), "truenas")
+        collect(RecordedSource(NAS3), "proxmox")
+    assert collect(RecordedSource(NAS3), "truenas", now=NOW).platform == "truenas"   # forced: notes, no ZFS
 
 
 # --- parsers --------------------------------------------------------------------------------
