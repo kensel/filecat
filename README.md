@@ -55,6 +55,7 @@ filecat config init                 # writes ./filecat.toml; database servers on
 filecat config init --backend mongodb --dsn mongodb://127.0.0.1:27017/filecat --force
 filecat config init --user          # %APPDATA%\filecat\filecat.toml instead
 filecat config show                 # file in use and effective settings, passwords masked (--reveal)
+filecat config suggest              # sections and entries an older file lacks, section order, why nothing rolls up
 filecat config test                 # read-only: driver, connect, version, database, user, tables
 filecat config test postgres --dsn "postgresql://filecat:pw@db01/filecat"   # try a DSN before saving it
 filecat config verify               # test, then create the schema and put/get/delete one record
