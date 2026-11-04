@@ -192,7 +192,7 @@ def test_no_password_or_no_coordinator_disables_both_actions(fixture_dir):
 
 def test_scan_queues_exactly_that_root(rig):
     session = rig.cookie()
-    assert rig.request("POST", "/api/roots/scan", {"root": r"\\nas3\Nope"}, cookie=session)[0] == 404
+    assert rig.request("POST", "/api/roots/scan", {"root": r"\\nowhere\Nope"}, cookie=session)[0] == 404
     assert rig.request("POST", "/api/roots/scan", {}, cookie=session)[0] == 400
     status, body, _ = rig.request("POST", "/api/roots/scan", {"root": BACKUP}, cookie=session)
     assert status == 202 and body["queued"] and body["agent"] == "nas3"
@@ -293,6 +293,75 @@ def run_cli(capsys, *argv):
     code = cli.main(list(argv))
     out = capsys.readouterr()
     return code, out.out, out.err
+
+
+# --- roots storage collect found that the catalog does not hold yet ------------------------------
+PVE = r"\\nas3\pve"
+
+
+def put_nas3_shares(path):
+    """A stored nas3 snapshot with three shares: Backup (in the catalog, spelled in another case),
+    pve (NFS-only, never scanned) and Media (SMB, never scanned)."""
+    from filecat import topology, topology_store
+    vol = {"id": "vol:1", "type": "volume", "parent": None, "name": "/volume1", "mount": "/volume1"}
+    shares = [{"id": f"share:{n.lower()}", "type": "share", "parent": "vol:1", "name": n, "path": f"/volume1/{n}",
+               "unc": f"\\\\nas3\\{n}", "protocols": p} for n, p in (("backup", ["smb"]), ("pve", ["nfs"]),
+                                                                       ("Media", ["smb"]))]
+    topo = topology.parse({"version": topology.VERSION, "platform": "synology", "collected_at": "2026-11-04T00:00:00Z",
+                           "host": {"name": "nas3", "unc_server": "\\\\nas3"}, "nodes": [vol, *shares]})
+    b = SqliteBackend(path)
+    try:
+        topology_store.save_snapshot(b, topo)
+    finally:
+        b.close()
+
+
+def test_missing_lists_the_collected_shares_the_catalog_lacks(fixture_dir):
+    db = str(fixture_dir / "cat.sqlite")
+    seed(db)
+    put_nas3_shares(db)
+    b = SqliteBackend(db)
+    try:
+        found = rootinfo.missing(b)
+        assert [m["root"] for m in found] == [r"\\nas3\Media", PVE]     # backup is BACKUP, ignoring case
+        assert found[0]["host"] == "nas3" and found[0]["platform"] == "synology"
+        assert [m["root"] for m in rootinfo.missing(b, known=[BACKUP, PVE])] == [r"\\nas3\Media"]
+        put_doc(b, PVE, "x.txt")                     # records with no index entry (imported): not missing
+        assert [m["root"] for m in rootinfo.missing(b)] == [r"\\nas3\Media"]
+    finally:
+        b.close()
+    assert rootinfo.missing(MemoryBackend()) == []
+
+
+def test_the_roots_page_offers_the_first_scan_of_a_found_share(fixture_dir):
+    seed(str(fixture_dir / "cat.sqlite"))
+    put_nas3_shares(str(fixture_dir / "cat.sqlite"))
+    rig = Rig(fixture_dir, runners={ADHOC_KIND: lambda ctx: JobResult("ok", 0, {"files": 0})})
+    try:
+        roots, _ = roots_of(rig)
+        assert roots[PVE]["found"] == {"host": "nas3", "platform": "synology"} and roots[PVE]["state"] == "never"
+        assert roots[PVE]["removable"] is False and BACKUP in roots and r"\\nas3\backup" not in roots
+        session = rig.cookie()
+        assert rig.request("POST", "/api/summaries/refresh", {"root": PVE}, cookie=session)[0] == 404
+        status, body, _ = rig.request("POST", "/api/roots/scan", {"root": PVE}, cookie=session)
+        assert status == 202 and body["agent"] == "nas3"
+        # a root nobody listed, typed in the page: an agent covers it, so its first scan may be queued
+        assert rig.request("POST", "/api/roots/scan", {"root": r"\\nas3\Typed"}, cookie=session)[0] == 202
+    finally:
+        rig.close()
+
+
+def test_roots_missing_command(fixture_dir, capsys):
+    db = str(fixture_dir / "cat.sqlite")
+    seed(db)
+    base = ["roots", "missing", "--backend", "sqlite", "--out", db]
+    assert run_cli(capsys, *base)[0] == 0                                   # no snapshot: nothing missing
+    put_nas3_shares(db)
+    code, out, _ = run_cli(capsys, *base)
+    assert code == 1 and "nas3: 2 shares not in the catalog" in out and PVE in out
+    assert 'filecat scan "\\\\nas3\\Media" "\\\\nas3\\pve"' in out
+    code, out, _ = run_cli(capsys, *base, "--json")
+    assert code == 1 and [json.loads(l)["root"] for l in out.splitlines()] == [r"\\nas3\Media", PVE]
 
 
 def test_roots_remove_command(fixture_dir, capsys, monkeypatch):

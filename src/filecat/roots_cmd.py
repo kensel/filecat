@@ -131,7 +131,41 @@ def run_remove(args: Any) -> int:
     return 0
 
 
+def run_missing(args: Any) -> int:
+    """`roots missing [--json]`: rootinfo.missing, grouped by host, with the command that scans
+    each host's through its agent. Exit 1 when there are some, so a script can tell."""
+    from . import config
+    with open_backend(args.backend, args.out, args.dsn) as backend:
+        rows = rootinfo.missing(backend)
+    if args.json:
+        for r in rows:
+            print(json.dumps(r, ensure_ascii=False))
+        return 1 if rows else 0
+    if not rows:
+        print("every share storage collect found is a root of the catalog")
+        return 0
+    try:
+        agents = config.load_agents(config.load(config.find(getattr(args, "config", None))))
+    except Exception:                       # no or a broken filecat.toml: the list is still worth showing
+        agents = []
+    by_host: dict[str, list[str]] = {}
+    for r in rows:
+        by_host.setdefault(r["host"] or "?", []).append(r["root"])
+    for host, roots in by_host.items():
+        print(f"{host}: {len(roots)} share{'s' if len(roots) != 1 else ''} not in the catalog")
+        for root in roots:
+            print(f"  {root}")
+        agent = config.agent_for(agents, roots[0])
+        quoted = " ".join(f'"{r}"' for r in roots)
+        print(f"  scan: filecat scan {quoted}" + (f" --agent {agent.name}" if agent else "") + "\n")
+    print("A scheduled scan job with no `roots` covers them already: it takes every share of its "
+          "agent's stored snapshot.")
+    return 1
+
+
 def run(args: Any) -> int:
+    if args.action == "missing":
+        return run_missing(args)
     if args.action in ("case-check", "case-merge"):
         from . import rootcase
         if not rootcase.SAMPLE_MIN <= args.sample <= rootcase.SAMPLE_MAX:

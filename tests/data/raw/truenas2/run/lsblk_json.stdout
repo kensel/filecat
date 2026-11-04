@@ -1,0 +1,108 @@
+{
+ "blockdevices": [
+  {
+   "name": "sda",
+   "kname": "sda",
+   "pkname": null,
+   "type": "disk",
+   "size": 34359738368,
+   "rota": false,
+   "model": "QEMU HARDDISK",
+   "serial": "TRUENASDISK001",
+   "wwn": null,
+   "mountpoints": [
+    null
+   ],
+   "children": [
+    {
+     "name": "sda1",
+     "kname": "sda1",
+     "pkname": "sda",
+     "type": "part",
+     "size": 1048576,
+     "rota": false,
+     "mountpoints": [
+      null
+     ]
+    },
+    {
+     "name": "sda2",
+     "kname": "sda2",
+     "pkname": "sda",
+     "type": "part",
+     "size": 536870912,
+     "rota": false,
+     "mountpoints": [
+      null
+     ]
+    },
+    {
+     "name": "sda3",
+     "kname": "sda3",
+     "pkname": "sda",
+     "type": "part",
+     "size": 33821818368,
+     "rota": false,
+     "mountpoints": [
+      null
+     ]
+    }
+   ]
+  },
+  {
+   "name": "sdb",
+   "kname": "sdb",
+   "pkname": null,
+   "type": "disk",
+   "size": 11811160064000,
+   "rota": false,
+   "model": "QEMU HARDDISK",
+   "serial": "TRUENASDISK002",
+   "wwn": null,
+   "mountpoints": [
+    null
+   ],
+   "children": [
+    {
+     "name": "sdb1",
+     "kname": "sdb1",
+     "pkname": "sdb",
+     "type": "part",
+     "size": 11811158966272,
+     "rota": false,
+     "mountpoints": [
+      null
+     ]
+    }
+   ]
+  },
+  {
+   "name": "zd0",
+   "kname": "zd0",
+   "pkname": null,
+   "type": "disk",
+   "size": 107374182400,
+   "rota": false,
+   "model": null,
+   "serial": null,
+   "wwn": null,
+   "mountpoints": [
+    null
+   ]
+  },
+  {
+   "name": "sr0",
+   "kname": "sr0",
+   "pkname": null,
+   "type": "rom",
+   "size": 1073741312,
+   "rota": true,
+   "model": "QEMU DVD-ROM",
+   "serial": "QM00003",
+   "wwn": null,
+   "mountpoints": [
+    null
+   ]
+  }
+ ]
+}

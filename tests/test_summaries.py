@@ -298,6 +298,31 @@ def test_an_unchanged_root_is_not_rebuilt_however_old_the_graph_max_age(viewer):
     assert viewer.json("/api/treemap", root=ROOT, depth=3)["source"] == "saved"
 
 
+@pytest.mark.parametrize("scanned_before", [False, True])
+def test_a_scan_that_writes_nothing_never_stamps_its_own_time(monkeypatch, scanned_before):
+    """The flake this replaced: a root with no change stamp got the unchanged scan's start, in whole
+    seconds, as its stamp; a summary built at ...:00.99 then looked older than a scan begun at
+    ...:01. Here that scan starts a full second after the build, every time."""
+    from datetime import datetime, timezone
+    backend = MemoryBackend()
+    put_files(backend)
+    if scanned_before:                       # an entry from before the stamp: a last scan, no changed_at
+        from filecat.record import root_id
+        backend.put_root_info({"root_id": root_id(ROOT), "root": ROOT,
+                               "last_scan": {"finished_at": "2026-01-01T00:00:00+00:00", "status": "ok"}})
+    summaries.refresh(backend, ROOT)
+    assert summaries.status(backend, ROOT)["state"] == "fresh"
+    later = datetime.now(timezone.utc) + timedelta(seconds=1)
+    monkeypatch.setattr(rootinfo, "now", lambda: later.isoformat(timespec="seconds"))
+    scanned(backend, write=[new_document(ROOT, "", kind="dir")])
+    info = backend.get_root_info(ROOT)
+    assert info["changed_at"] == ("2026-01-01T00:00:00+00:00" if scanned_before else rootinfo.UNKNOWN_CHANGE)
+    assert summaries.status(backend, ROOT)["state"] == "fresh"
+    # a scan that does write stamps the root as before, and the summary goes stale
+    scanned(backend, write=[{**new_document(ROOT, "docs/new.txt", kind="text", size=1), "suffix": "txt"}])
+    assert summaries.status(backend, ROOT)["state"] == "stale"
+
+
 def test_a_scan_in_progress_marks_the_summary_stale_but_does_not_rebuild_it(viewer):
     build(viewer)
     viewer.with_backend(lambda b: rootinfo.begin(b, ROOT, rootinfo.ScanTracker(b, ROOT)))

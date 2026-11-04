@@ -8,7 +8,7 @@ gets a note in the snapshot saying the layers are not collected.
 from __future__ import annotations
 
 import re
-from typing import Any
+from typing import Any, Callable
 
 from .. import topology
 from .common import Reader, finish
@@ -56,15 +56,24 @@ def _sysfs_disks(r: Reader) -> list[dict[str, Any]]:
     return out
 
 
-def collect(source: Source, *, name: str | None = None, unc_server: str | None = None,
-            now: str | None = None, measure_shares: bool = False) -> topology.Topology:
-    r = Reader(source)
-    host_name = name or source.hostname
+# Models a hypervisor gives its guests' disks: their serial is the one the VM's config sets
+# (Proxmox `serial=`), so such a disk is virtual and links to the vdisk by `serial:`.
+VIRTUAL_MODELS = ("QEMU HARDDISK", "QEMU_HARDDISK", "VBOX HARDDISK", "Virtual disk", "Virtual Disk")
+
+
+def block_disks(r: Reader, platform: str = "linux"
+                ) -> tuple[list[dict[str, Any]], Callable[[str], str | None]]:
+    """The disk nodes of a Linux host (lsblk, else /sys/block) and `disk_of(kname)`, the disk id a
+    block device (a partition, a disk) sits on, or None. Paths to one LUN (one serial or WWN) are
+    one disk with `platform.<platform>.paths`; an NAA type 6 WWN is a `naa:` match (a SAN LUN), a
+    hypervisor's disk model makes the disk virtual with a `serial:` match. Shared by the Linux and
+    TrueNAS collectors."""
     devices = _lsblk(r)
     if devices is None:
         r.note("lsblk is not available: disks come from /sys/block")
         devices = _sysfs_disks(r)
     by_kname = {d.get("kname") or d["name"]: d for d in devices}
+    PLATFORM = platform                 # noqa: N806 - the key under node["platform"]
 
     disks: list[dict[str, Any]] = []
     disk_id: dict[str, str] = {}
@@ -102,6 +111,9 @@ def collect(source: Source, *, name: str | None = None, unc_server: str | None =
         naa = _naa6(wwn)
         if naa:                           # a SAN LUN (e.g. a Synology iSCSI LUN): link to it by NAA id
             node["match"] = [f"naa:{naa}"]
+        elif serial and (d.get("model") or "").strip() in VIRTUAL_MODELS:
+            node["virtual"] = True        # a VM's disk: its bytes are the hypervisor's
+            node["match"] = [f"serial:{serial}"]
         node["platform"] = {PLATFORM: plat}
         disk_id[d.get("kname") or d["name"]] = did
         by_id[did] = node
@@ -119,6 +131,14 @@ def collect(source: Source, *, name: str | None = None, unc_server: str | None =
                 return disk_id[kname]
             kname = (by_kname.get(kname) or {}).get("pkname")
         return None
+    return disks, disk_of
+
+
+def collect(source: Source, *, name: str | None = None, unc_server: str | None = None,
+            now: str | None = None, measure_shares: bool = False) -> topology.Topology:
+    r = Reader(source)
+    host_name = name or source.hostname
+    disks, disk_of = block_disks(r)
 
     uuids: dict[str, str] = {}                      # kernel name -> file system uuid
     for entry in r.entries("/dev/disk/by-uuid"):

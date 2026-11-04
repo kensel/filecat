@@ -128,14 +128,27 @@ def test_image_template_orphan_vdisk_and_nfs_export(fixture_dir):
         "[LUN_11111111-2222-4333-8444-555555555555]\nuuid=11111111-2222-4333-8444-555555555555\n"
         "name=vdisk.99999999-0000-4000-8000-000000000000.11111111-2222-4333-8444-555555555555.sata.0\n"
         "lid=11\nbytes=1000\ndevtype=7\n"))
-    (rec / "files" / "etc" / "exports").write_text("/volume1/Apps *(rw)\n/volume1/Media *(ro)\n")
+    (rec / "files" / "etc" / "exports").write_text("/volume1/Apps *(rw)\n/volume1/Media *(ro)\n"
+                                                   "/volume1/Apps/vm *(rw)\n")
+    for folder in ("pve", "@docker", "#snapshot", "Media"):     # folders on the volume, shared or not
+        (rec / "files" / "volume1" / folder).mkdir()
     t = collect(RecordedSource(rec), unc_server="\\\\nas3", now=NOW)
     image = t.nodes["vdisk:dc8c50db-f451-4367-966a-f6277ac5341b"]
     assert image.attached is False and image.vm is None and image.name == "[VMM_IMAGE: b9c5e9e5]"
     orphan = t.nodes["vdisk:11111111-2222-4333-8444-555555555555"]
     assert orphan.vm["name"] == "[ORPHANED_VDISK]" and t.nodes[orphan.vm["id"]].platform["synology"]["orphaned"]
     assert t.nodes["share:apps"].protocols == ["smb", "nfs"]
-    assert t.nodes["share:media"].protocols == ["nfs"] and t.nodes["share:media"].unc is None
+    # an NFS-only shared folder is still a root: \\nas3\Media scans through the agent
+    assert t.nodes["share:media"].protocols == ["nfs"] and t.nodes["share:media"].unc == "\\\\nas3\\Media"
+    assert t.nodes["share:vm"].unc is None              # an export inside the Apps share: part of that root
+    # a top-level folder that no Samba file or export names (DSM's SMB off for it) is a root too
+    pve = t.nodes["share:pve"]
+    assert (pve.unc, pve.protocols, pve.path) == ("\\\\nas3\\pve", [], "/volume1/pve")
+    assert pve.platform["synology"]["source"] == "folder"
+    assert not any(n.name.startswith(("@", "#")) for n in t.of_type("share"))
+    roots = topology_store.snapshot_document(t)["unc_roots"]
+    assert {"\\\\nas3\\Media", "\\\\nas3\\pve"} <= set(roots)
+    assert topology.share_entries(t)["/volume1/pve"] == "\\\\nas3\\pve"
 
 
 DSM_SHARES = (
@@ -241,7 +254,7 @@ def test_storage_show_labels_cache_group_volume_cache_and_disks():
 def test_detect_platform_and_dispatch():
     assert detect_platform(RecordedSource(NAS3)) == "synology"
     with pytest.raises(ValueError, match="no collector"):
-        collect(RecordedSource(NAS3), "truenas")
+        collect(RecordedSource(NAS3), "proxmox")
 
 
 # --- parsers --------------------------------------------------------------------------------
@@ -323,6 +336,85 @@ def test_linux_collector_merges_paths_to_one_iscsi_lun(fixture_dir):
     assert any("2 paths" in n for n in t.extra["collector"]["notes"])
     links, _ = topology.resolve_links([nas3(), t])
     assert {l.consumer: l.provider for l in links}[("pve2", lun_disk.id)] == ("nas3", LUN3)
+
+
+# --- the TrueNAS collector against a recorded truenas2 (the lab's TrueNAS VM on pve2) ---------
+TRUENAS2 = DATA / "raw" / "truenas2"
+
+
+def truenas2(**kw) -> topology.Topology:
+    return collect(RecordedSource(TRUENAS2), now=NOW, **kw)
+
+
+def test_truenas_is_detected_by_its_middleware_client():
+    assert detect_platform(RecordedSource(TRUENAS2)) == "truenas"
+    t = truenas2()
+    assert t.platform == "truenas" and t.name == "truenas2" and t.host["os"] == "TrueNAS 24.10.2"
+    assert "collector" not in t.extra                       # everything was readable
+
+
+def test_truenas_pools_and_their_disks():
+    t = truenas2()
+    tank, boot = t.nodes["pool:9100000000000001"], t.nodes["pool:9100000000000010"]
+    assert (tank.name, tank.level, tank.health) == ("tank", "single", "ok")
+    assert (tank.size_bytes, tank.allocated_bytes, tank.free_bytes) == (11_700_000_000_000, 10_900_000_000_000,
+                                                                       800_000_000_000)
+    assert tank.platform["truenas"] == {"guid": "9100000000000001", "ashift": 12, "fragmentation": 9,
+                                        "dedup_ratio": "1.00"}
+    # the pool's device is a partition named by its partuuid: it resolves to the disk it is on
+    assert tank.members == [{"disk": "disk:TRUENASDISK002", "role": "data"}]
+    assert boot.members == [{"disk": "disk:TRUENASDISK001", "role": "data"}]
+    disk = t.nodes["disk:TRUENASDISK002"]
+    # a QEMU disk is virtual and carries the serial the VM's config set: open question 1(c) on a real host
+    assert disk.virtual is True and disk.match == ["serial:TRUENASDISK002"] and disk.health == "ok"
+    assert {d.id for d in t.of_type("disk")} == {"disk:TRUENASDISK001", "disk:TRUENASDISK002"}   # no zd0, no sr0
+
+
+def test_truenas_datasets_skip_the_system_ones():
+    t = truenas2()
+    vols = {v.name: v for v in t.of_type("volume")}
+    assert set(vols) == {"boot-pool", "tank", "tank/isos", "tank/migrated"}
+    root = vols["tank"]
+    assert root.parent == "pool:9100000000000001" and root.mount == "/mnt/tank"
+    assert (root.used_bytes, root.free_bytes, root.size_bytes) == (10_900_000_000_000, 800_000_000_000,
+                                                                   11_700_000_000_000)
+    migrated = vols["tank/migrated"]
+    assert migrated.parent == root.id and migrated.size_bytes is None and migrated.used_bytes == 10_800_000_000_000
+
+
+def test_truenas_zvols_are_measured_from_zfs():
+    t = truenas2()
+    luns = {l.name: l for l in t.of_type("lun")}
+    vm = luns["tank/vm-disk"]
+    assert (vm.kind, vm.thin, vm.size_bytes, vm.allocated_bytes) == ("zvol", True, 107_374_182_400, 23_500_000_000)
+    assert vm.path == "/dev/zvol/tank/vm-disk" and vm.parent == "vol:9100000000000002"
+    assert vm.match == ["naa:6589cfc000000a1b2c3d4e5f60718293"]                  # from its iSCSI extent
+    assert vm.platform["truenas"]["extent"] == "vm-disk"
+    db = luns["tank/db-disk"]
+    assert db.thin is False and db.allocated_bytes == 30_000_000_000 and db.match == []
+    assert db.platform["truenas"]["refreservation"] == 55_000_000_000
+
+
+def test_truenas_shares_have_roots_and_are_measured_from_their_dataset():
+    t = truenas2()
+    shares = {s.name: s for s in t.of_type("share")}
+    assert set(shares) == {"migrated", "isos"}                                      # "old" is disabled
+    m = shares["migrated"]
+    assert (m.unc, m.protocols, m.parent, m.used_bytes) == ("\\\\truenas2\\migrated", ["smb"],
+                                                            "vol:9100000000000003", 10_800_000_000_000)
+    assert (shares["isos"].unc, shares["isos"].protocols) == ("\\\\truenas2\\isos", ["nfs"])
+    assert topology.share_entries(t) == {"/mnt/tank/isos": "\\\\truenas2\\isos",
+                                         "/mnt/tank/migrated": "\\\\truenas2\\migrated"}
+
+
+def test_truenas2_links_through_pve2_and_the_cluster_to_nas3_lun3():
+    def lab(name):
+        return topology.parse(json.loads((DATA / name).read_text(encoding="utf-8"))["topology"])
+    snaps = [truenas2(), lab("lab_pve2.json"), lab("lab_pvec.json"), nas3()]
+    links, unresolved = topology.resolve_links(snaps)
+    tank = ("truenas2", "disk:TRUENASDISK002")
+    assert topology.chain(links, tank)[-1] == ("nas3", LUN3)
+    assert not [u for u in unresolved if u.node[0] == "truenas2"]
 
 
 # --- the fake agent: read_file, statfs, run, capabilities, with the allowlist enforced -------

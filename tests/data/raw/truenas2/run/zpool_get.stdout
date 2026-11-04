@@ -1,0 +1,5 @@
+boot-pool	guid	9100000000000010	-
+boot-pool	ashift	12	local
+tank	guid	9100000000000001	-
+tank	ashift	12	local
+tank	health	ONLINE	-
