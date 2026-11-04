@@ -1662,7 +1662,8 @@ async function viewRollups(params) {
       h("section", {class: "card"}, h("h2", {}, "Rollups", h("small", {}, `${num(rows.length)} by ${manyRoots ? "root, " : ""}tag and folder`)),
         h("div", {class: "scroll"}, h("table", {}, h("thead", {}, head), h("tbody", {}, body)))))
       : h("section", {class: "card"}, h("div", {class: "empty"}, p.root || p.tag ? "No rollups match these filters."
-        : "No rollups in this catalog: nothing was folded into a [TAG] record. See `filecat rollups suggest`.")));
+        : "No rollups in this catalog: nothing was folded into a [TAG] record. Every rollup type is manual until "
+          + "[rollups] in filecat.toml sets it to \"automatic\"; `filecat rollups suggest` lists what the built-in rules would fold.")));
 }
 
 // --- search (file names across every root; /api/search) --------------------------

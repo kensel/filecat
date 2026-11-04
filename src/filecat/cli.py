@@ -540,6 +540,8 @@ def build_parser() -> argparse.ArgumentParser:
     c.add_argument("--stdout", action="store_true", help="print the file instead of writing it")
     c = csub.add_parser("show", help="the config file in use and the effective settings")
     c.add_argument("--reveal", action="store_true", help="do not mask passwords")
+    csub.add_parser("suggest", help="compare the config file with what `config init` writes: missing sections "
+                                    "and entries, section order, unknown names, and why nothing rolls up")
     for action, text in (("test", "read-only connection check for each configured backend"),
                          ("verify", "test, then create the schema and write/read/delete one record")):
         c = csub.add_parser(action, help=text)
