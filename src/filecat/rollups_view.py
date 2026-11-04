@@ -53,8 +53,11 @@ def _sum(rows: list[dict[str, Any]], key: str) -> dict[str, Any]:
 
 
 def build(backend: Backend, root: str | None = None, tag: str | None = None) -> dict[str, Any]:
-    """{"rows", "roots", "tags", "by_tag", "by_root", "totals", "filter"}: `roots` and `tags` list
-    every choice (ignoring the filters) for the page's drop-downs."""
+    """{"rows", "roots", "tags", "by_tag", "by_root", "totals", "filter", "stores"}: `roots` and
+    `tags` list every choice (ignoring the filters) for the page's drop-downs. `stores` are the
+    tagged backup and database store folders (Backend.store_folders) with the same filters, each
+    saying whether its bulk folders rolled up (`rolled`): a Veeam job is a [BACKUP] whose files
+    stay listed."""
     everything = backend.rollup_totals()
     all_rows = [_row(rt, r) for rt, rows in everything.items() for r in rows]
     wanted_tag = (tag or "").upper() or None
@@ -67,6 +70,18 @@ def build(backend: Backend, root: str | None = None, tag: str | None = None) -> 
         by_root.append({**_sum([r for r in rows if r["root"] == rt], "root"), "root": rt})
     totals = _sum(rows, "total")
     totals.pop("total")
-    return {"filter": {"root": root or None, "tag": tag or None}, "rows": rows,
-            "roots": sorted({r["root"] for r in all_rows}), "tags": sorted({r["tag"] for r in all_rows}),
+    stores = []
+    rolled = {(r["root"], r["parent"], r["tag"]) for r in all_rows}
+    try:
+        found = list(backend.store_folders())
+    except NotImplementedError:
+        found = []
+    for s in sorted(found, key=lambda s: (s["root"] or "", s["rel_path"])):
+        if (root and s["root"] != root) or (wanted_tag and s["store_tag"].upper() != wanted_tag):
+            continue
+        stores.append({"root": s["root"], "rel_path": s["rel_path"], "tag": s["store_tag"], "format": s["format"],
+                       "rolled": (s["root"], s["rel_path"], s["store_tag"]) in rolled})
+    return {"filter": {"root": root or None, "tag": tag or None}, "rows": rows, "stores": stores,
+            "roots": sorted({r["root"] for r in all_rows} | {s["root"] for s in found if s["root"]}),
+            "tags": sorted({r["tag"] for r in all_rows} | {s["store_tag"] for s in found}),
             "by_tag": by_tag, "by_root": by_root, "totals": totals}

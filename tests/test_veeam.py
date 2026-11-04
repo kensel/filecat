@@ -237,3 +237,18 @@ def test_a_copied_job_is_a_copy_and_a_second_job_of_the_machine_is_a_job(fixture
     pc = os.path.join(str(fixture_dir / "c"), "Job DESKTOP-TEST 2")
     assert copies == [sorted([pa, pb])]
     assert jobs["host:desktop-test"] == sorted([pa, pb, pc])
+
+
+def test_a_job_folder_is_tagged_backup_with_its_files_still_listed(fixture_dir):
+    # a Veeam job does not roll up (its data files sit at its top), yet the folder is a [BACKUP]
+    from filecat import rollup
+    make_job(fixture_dir / "Backup")
+    backend = MemoryBackend()
+    root = str(fixture_dir)
+    cfg = rollup.RollupConfig(modes={**rollup.RollupConfig().modes, "backup": "automatic"})
+    walk_root(root, ScanOptions(rollup_config=cfg), backend, None, _resume(), _measure_stub)
+    docs = {d["rel_path"]: d for d in backend.list(root=root)}
+    job = docs[f"Backup/{JOB}"]
+    assert job["probe"]["store_tag"] == "[BACKUP]" and "rollup_tags" not in job["probe"]
+    assert f"Backup/{JOB}/{JOB}2024-04-01T003011.vbk" in docs
+    assert not [d for d in docs.values() if d.get("kind") == "rollup"]

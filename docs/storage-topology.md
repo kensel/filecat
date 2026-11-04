@@ -151,7 +151,7 @@ a device before the agent relies on them.
 
 | Node | From | Notes |
 |---|---|---|
-| disk | the space history (`/etc/space/space_history_*.xml`) for model, serial, slot and bay; `/sys/block` for size and `rotational`; serial fallbacks `device/syno_disk_serial`, then SMART identify | `platform.synology.device = /dev/sataN` (`/dev/sdX` on older models), `physical_location` (`0-1`: enclosure-bay); `slot` is the bay number |
+| disk | the space history (`/etc/space/space_history_*.xml`) for model, serial, slot and bay; `/sys/block` for size and `rotational`; serial fallbacks `device/syno_disk_serial`, then SMART identify | `platform.synology.device = /dev/sataN` (`/dev/sdX` on older models), `physical_location` (`0-1`: enclosure-bay); `slot` is the bay number. A Virtual DSM disk (serial = its VMM vdisk uuid) gets `virtual: true` and `match: ["vmmdisk:<uuid>"]` |
 | group | the space history's `<raid>` (`level` raid1/raid5/raid6/raid10, member partitions); `/proc/mdstat`, `mdadm --detail --scan` (UUID) and `/sys/block/mdX/size` for sizes and health. Without the history: mdstat alone | `[UUU_]` gives `degraded`; SHR with unequal disks gives several groups (md2, md3, ...) in one pool, each with its own level. An SSD cache space (`reference="@shared_cache"`) is a group with `role: cache` under the pool of the volume it caches; a cache of one SSD is reported as raid1 and is not degraded for that |
 | pool | the space history's `<space>` (its LVM uuid is the VG id of `/etc/lvm/backup/vgN`); without it the LVM VG over the md arrays, or the md array itself | one array: the pool's `level` is that array's (raid10 on nas3, raid5 on NAS2); several arrays in one LVM: `shr` (with the history the group nodes keep each array's real level; without it `shr` is a guess from the array count); name "Storage Pool 1" is not stable, so it is a field |
 | volume | `/proc/mounts` lines under `/volumeN`; `statvfs`; `blkid` | `device` is `/dev/mapper/cachedev_0` when SSD cache is on; `vg1/volume_1` in `platform` |
@@ -494,8 +494,8 @@ same relationship is one line of config: truenas2's disk linked to
 
 NAS01 is the same on a different axis: `nas3` has `vm:<guid>` NAS01 whose two
 vdisks carry `vmmdisk:<vdisk uuid>`; NAS01's own snapshot has two virtual
-disks carrying the same uuid, **if** Virtual DSM can see it (open question
-4); otherwise a `[[storage.links]]` entry per disk. LUN-4..7 (target
+disks whose serial is that uuid (open question 4: it can), so they carry
+`vmmdisk:<uuid>` and link without a `[[storage.links]]` entry. LUN-4..7 (target
 `lkensel-g5-5090`, initiator its IQN) match the workstation's four iSCSI
 disks by `naa`; the workstation's IQN being in the LUN's `initiators` is
 reported on the link as `initiator_ok`, a hint and not a requirement.
@@ -687,9 +687,10 @@ into their own store, since they are already keyed by root.
    central side keeps the latest snapshot of each host for resolving, how
    stale a snapshot may be before its links are called unresolved, and the
    catalog store that would hold links and hosts edited in the viewer.
-4. Can Virtual DSM see its VMM vdisk uuid? Unknown: the guest's disk model is
-   "Virtual disk" and its serial may be generated. If not, link by config, or
-   by size and boot order (not implemented, too weak to guess).
+4. Can Virtual DSM see its VMM vdisk uuid? Yes (answered on NAS01, a Virtual DSM
+   on nas3): the guest's disks have model "Storage" and the vdisk uuid as their
+   serial. The Synology collector gives a disk whose serial is uuid-shaped
+   `virtual: true` and `match: ["vmmdisk:<uuid>"]`, so it links without config.
 5. Does a cluster snapshot come from any one node's agent (as
    `cluster_topology`, duplicated across nodes, latest wins) or from a
    cluster-level entry in `[[agents]]`?

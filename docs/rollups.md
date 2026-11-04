@@ -779,6 +779,20 @@ step with the code by `tests/test_store_formats.py`:
 | abb virtual view | n/a (already not walked) | |
 
 Only folders are rolled; top-level data files keep their listed-only rows.
+
+**The store's folder is tagged whether or not anything rolls up.** Every
+detected store's `dir` record gets `probe.store_tag` (`[BACKUP]` for a backup
+format, `[DATABASE]` for an engine), whatever the mode, beside
+`probe.backup` / `probe.database`. A Veeam job keeps its `.vbk` / `.vib`
+listed (no `rollup_children`) and is still a `[BACKUP]`. `probe.rollup_tags`
+is something else: the tags of rolled children in that folder, which a rescan
+uses to clean up. `Backend.store_folders(root, prefix)` lists the tagged
+folders; MongoDB reads them through a partial index on `probe.store_tag`, so
+the Graph and the Rollups page do not scan every folder record. The viewer
+shows the tag as a badge in Browse, the record list, the inspector and the
+Graph's tooltips, and the Rollups page lists every tagged store with whether
+it rolled up. A store recorded before tagging gets its tag from
+`rollups migrate` (4.4) or a rescan.
 The rule that makes a store rollup: store detected, not `--measure-backups`
 (or `--measure-databases` for an engine) for that store (they need the files),
 and either `backup` / `database` is `automatic`, or the store's folder is listed
@@ -894,6 +908,9 @@ target `T` (a store child, or a rule match):
 4. **Phase 3, cleanup** (once per run): the table of section 3.5 (dropped
    entries beneath purged paths, prunes, treemaps, root index, resume).
 5. **Aggregates** of the root are rebuilt.
+6. **Store tags.** Every store folder without `probe.store_tag` (recorded
+   before stores were tagged, section 4.1) gets it, whatever the mode;
+   `--tags` limits this as it limits the targets. `--dry-run` counts them.
 
 Refuses while a scan of the root is running (as `samples prune`). `--dry-run`
 prints, per target, the rows, bytes and the rollup it would write. A

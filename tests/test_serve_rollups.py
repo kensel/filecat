@@ -110,3 +110,34 @@ def test_an_empty_catalog_has_no_rollups(tmp_path):
     finally:
         catalog.close()
     assert doc["rows"] == [] and doc["roots"] == [] and doc["totals"]["rollups"] == 0
+
+
+def test_a_veeam_job_is_a_tagged_store_with_its_files_listed(fixture_dir):
+    from tests.test_veeam import JOB, make_job
+    from filecat import treemap
+    root = fixture_dir / "bk"
+    make_job(root / "Backup")
+    db = str(fixture_dir / "veeam.sqlite")
+    backend = SqliteBackend(db)
+    run_scan(str(root), options(config({"backup": "automatic"})), backend)
+    stores = list(backend.store_folders(str(root)))
+    tiles = treemap.build(backend.sizes(str(root), ""), "", 2, stores=stores)["folders"]
+    backend.close()
+    assert {t["path"]: t.get("store_tag") for t in tiles} == {f"Backup/{JOB}": "[BACKUP]"}
+    args = SimpleNamespace(backend="sqlite", out=db, dsn=None, quiet=True, no_save=False)
+    catalog = serve.Catalog(args)
+    server = ThreadingHTTPServer(("127.0.0.1", 0), serve.make_handler(catalog, b"<html></html>"))
+    threading.Thread(target=server.serve_forever, daemon=True).start()
+    base = f"http://127.0.0.1:{server.server_address[1]}"
+    try:
+        d = get(base, "/api/rollups")
+        assert d["stores"] == [{"root": str(root), "rel_path": f"Backup/{JOB}", "tag": "[BACKUP]",
+                                "format": "veeam", "rolled": False}]
+        assert d["tags"] == ["[BACKUP]"] and d["rows"] == []
+        assert get(base, "/api/rollups", tag="[CACHE]")["stores"] == []
+        rows = get(base, "/api/records", root=str(root), parent="Backup", kind="dir")["rows"]
+        assert [(r["name"], r.get("store_tag")) for r in rows] == [(JOB, "[BACKUP]")]
+    finally:
+        server.shutdown()
+        server.server_close()
+        catalog.close()

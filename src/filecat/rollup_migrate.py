@@ -1,7 +1,7 @@
 """`filecat rollups migrate`: turn the rows an existing catalog holds for what
 rollups now replace into rollups, without a rescan (docs/rollups.md 4.4).
 
-Two kinds of target, found in one read-only plan:
+Two kinds of target, found in one read-only plan, and one fix-up:
 
 * a rule target: stored records that the current rules, markers' tags in the
   config, or the sticky store match (so a rule added after the catalog was
@@ -9,7 +9,11 @@ Two kinds of target, found in one read-only plan:
 * a store target: a backup or database store whose type is `automatic`, or
   whose folder is listed in `[[rollups.backup_store]]` /
   `[[rollups.database_store]]`: the rows of its bulk folders (store_formats.json
-  `rollup_children`) become the store's `[BACKUP]` / `[DATABASE]`.
+  `rollup_children`) become the store's `[BACKUP]` / `[DATABASE]`;
+* every store folder recorded before stores were tagged gets `probe.store_tag`
+  (`[BACKUP]` / `[DATABASE]`), as a scan now writes it: the tag says what the
+  folder is whether or not anything in it rolls up, and is written whatever
+  the mode.
 
 Per target (a parent folder, a tag and the children it folds in), in three
 phases that are safe to stop at any point and to run again:
@@ -81,6 +85,7 @@ class Result:
     bytes: int = 0
     resumed: bool = False
     done: bool = False
+    tagged: int = 0                  # store folders given probe.store_tag
 
 
 class _Entry:
@@ -147,14 +152,21 @@ def _norm(path: str) -> str:
 
 
 def _plan_stores(backend: Backend, root: str, cfg: rollup.RollupConfig, tags: set[str] | None,
-                 claimed: list[str]) -> list[Target]:
+                 claimed: list[str]) -> tuple[list[Target], list[Document]]:
+    """The store targets, and the store folder records without `probe.store_tag`."""
     out: list[Target] = []
+    untagged: list[Document] = []
     for d in backend.list(kind="dir", root=root):
         rel = d["rel_path"]
         found = _store_format(d)
-        if found is None or any(rel == c or rel.startswith(c + "/") for c in claimed):
+        if found is None:
             continue
         fmt, kind = found
+        tag = "[DATABASE]" if kind == "database" else "[BACKUP]"
+        if (d.get("probe") or {}).get("store_tag") != tag and (not tags or tag in tags):
+            untagged.append(d)
+        if any(rel == c or rel.startswith(c + "/") for c in claimed):
+            continue
         mode = cfg.mode_of(kind)
         listed = cfg.database_stores if kind == "database" else cfg.backup_stores
         if mode == "disabled" or not (mode == "automatic" or any(
@@ -169,7 +181,17 @@ def _plan_stores(backend: Backend, root: str, cfg: rollup.RollupConfig, tags: se
         if kids:
             out.append(Target(root, rel, store.tag, f"store:{fmt.name}", False, sorted(kids),
                               {"format": fmt.name, "path": rel}))
-    return out
+    return out, untagged
+
+
+def _tag_store(backend: Backend, doc: Document) -> None:
+    """Write `probe.store_tag` on a store folder's record (re-read: a rollup may have changed it)."""
+    current = backend.get(doc["root"], doc["rel_path"]) or doc
+    found = _store_format(current)
+    if found is None:
+        return
+    current.setdefault("probe", {})["store_tag"] = "[DATABASE]" if found[1] == "database" else "[BACKUP]"
+    backend.put(current)
 
 
 def _match(name: str, pattern: str) -> bool:
@@ -316,12 +338,19 @@ def migrate(backend: Backend, options: ScanOptions, checkpoint: str, *, tag: str
     for root in chosen:
         plan_targets, plan = _plan_rules(backend, root, options, tags)
         claimed = [m for t in plan_targets for m in t.members]
-        targets = plan_targets + _plan_stores(backend, root, cfg, tags, claimed)
+        store_targets, untagged = _plan_stores(backend, root, cfg, tags, claimed)
+        targets = plan_targets + store_targets
         try:
             for target in targets:
                 result.targets += 1
                 _one(backend, root, target, plan, cfg, ck, result, say, dry_run, batch,
                      purged_redacted, purged_any)
+            for doc in untagged:
+                if not dry_run:
+                    _tag_store(backend, doc)
+                result.tagged += 1
+            if untagged:
+                say(f"{root}: {len(untagged)} store folders {'would be ' if dry_run else ''}tagged")
         finally:
             if plan.sticky is not None and not dry_run:
                 plan.sticky.finish()
@@ -497,6 +526,7 @@ def run(args: Any) -> int:
         print(f"skipped: {line}")
     verb = "would migrate" if args.dry_run else "migrated"
     print(f"rollups migrate: {verb} {result.migrated} of {result.targets} targets; {result.rows} rows summed "
-          f"({result.bytes} bytes), {result.deleted} rows deleted"
+          f"({result.bytes} bytes), {result.deleted} rows deleted, "
+          f"{result.tagged} store folders {'to tag' if args.dry_run else 'tagged'}"
           + (", resumed from a checkpoint" if result.resumed else ""))
     return 0

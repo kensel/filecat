@@ -210,6 +210,24 @@ def test_vmm_image_with_several_disks_is_numbered(fixture_dir):
     assert names == ["[VMM_IMAGE: 8ad92580] disk 1", "[VMM_IMAGE: 8ad92580] disk 2"]
 
 
+def test_virtual_dsm_disk_is_matched_to_its_vmm_vdisk(fixture_dir):
+    # Virtual DSM reports the uuid of its VMM vdisk as the disk's serial (NAS01 on nas3)
+    rec = copy_nas3(fixture_dir)
+    uuid = "FF8A106F-F063-439F-85E9-E21ABB402AE1"
+    for f in (rec / "files" / "etc" / "space").glob("space_history_*.xml"):
+        f.write_text(f.read_text(encoding="utf-8").replace("ZR6N3A04", uuid), encoding="utf-8")
+    t = collect(RecordedSource(rec), unc_server="\\\\nas01", name="nas01", now=NOW)
+    disk = t.nodes[f"disk:{uuid}"]
+    assert disk.virtual is True and disk.match == [f"vmmdisk:{uuid.lower()}"]
+    assert t.nodes["disk:ZR6N3A01"].virtual is not True and not t.nodes["disk:ZR6N3A01"].match
+    vdisk = topology.parse({"version": 1, "host": {"name": "nas3"}, "platform": "synology", "nodes": [
+        {"id": f"vdisk:{uuid.lower()}", "type": "vdisk", "name": "NAS01 disk 3", "parent": None,
+         "match": [f"uuid:{uuid.lower()}", f"vmmdisk:{uuid.lower()}"]}]})
+    res = topology.resolve([t, vdisk])
+    link, = [l for l in res.links if l.consumer == ("nas01", f"disk:{uuid}")]
+    assert link.provider == ("nas3", f"vdisk:{uuid.lower()}") and link.via == "vmmdisk~vmmdisk"
+
+
 def test_storage_show_labels_cache_group_volume_cache_and_disks():
     from filecat import storage_cmd
     t = nas3()
