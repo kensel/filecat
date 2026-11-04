@@ -689,6 +689,7 @@ function folderTree(tm, root, name, kind) {
       if (node.own.merged) { node.name = `${num(node.own.merged)} smaller folders`; node.merged = node.own.merged; }
     }
     if (node.own && node.own.rollup && !node.kids.length) { node.kind = "rollup"; node.rollup = node.own.rollup; }
+    if (node.own && node.own.store_tag) node.storeTag = node.own.store_tag;
     node.colorKey = colorKey;
     node.bytes = node.kids.length ? node.kids.reduce((a, k) => a + k.bytes, 0) : (node.own ? node.own.bytes : 0);
     node.files = node.kids.length ? node.kids.reduce((a, k) => a + k.files, 0) : (node.own ? node.own.files : 0);
@@ -967,6 +968,7 @@ async function viewGraph(params, force) {
       : `${n.root}\\${n.path.replaceAll("/", "\\")}`;
     const lines = [h("span", {class: "mono"}, where + (n.kind === "files" ? "  (files directly here)" : ""))];
     if (n.merged) lines.push(h("div", {}, `${num(n.merged)} smaller folders, merged`));
+    if (n.storeTag) lines.push(h("div", {}, h("span", {class: "badge"}, n.storeTag), " a backup or database store"));
     if (n.rollup) lines.push(h("div", {class: "muted"}, `${n.rollup.tag} rollup: ${num(n.rollup.total_dirs)} folders, ${num(n.rollup.matched)} folded in`
       + (n.rollup.newest_mtime_ns && n.rollup.tag !== "[REDACTED]" ? `, newest ${when(n.rollup.newest_mtime_ns)}` : "") + (n.rollup.partial ? " - a lower bound" : "")));
     lines.push(h("div", {}, h("b", {}, bytes(n.bytes)), ` in ${num(n.files)} files`));
@@ -1271,6 +1273,7 @@ async function viewRecords(params) {
   const rows = r.rows.map(d => h("tr", {class: "click", onclick: () => go("record", {root, rel_path: d.rel_path})},
     h("td", {class: "path"}, d.rel_path || "(root)", d.unreadable ? h("span", {class: "badge warn"}, "unreadable")
       : d.errors ? h("span", {class: "badge warn"}, `${d.errors} error${d.errors > 1 ? "s" : ""}`) : null,
+      d.store_tag ? h("span", {class: "badge", title: "a backup or database store"}, d.store_tag) : null,
       d.kind === "rollup" && d.rollup ? [h("span", {class: "badge", title: "a rollup: counted, not listed"}, d.rollup.tag),
         d.rollup.partial ? h("span", {class: "badge warn", title: "lower bound: some entries could not be read"}, "partial") : null,
         h("span", {class: "sub"}, `${num(d.rollup.total_files)} files, ${num(d.rollup.total_dirs)} folders, ${num(d.rollup.matched)} folded in`)] : null),
@@ -1313,7 +1316,8 @@ async function viewBrowse(params) {
       const path = parent ? parent + "/" + f.name : f.name;
       return h("tr", {class: "click", onclick: () => go("browse", {root, parent: path})},
         h("td", {class: "path"}, "📁 ", f.name, f.record ? null : h("span", {class: "badge", title: "no dir record yet (scan in progress, or imported without dirs)"}, "no record"),
-          f.rollup_bytes ? h("span", {class: "badge", title: `${bytes(f.rollup_bytes)} of this is in rollups (counted, not listed)`}, "rollups") : null),
+          f.rollup_bytes ? h("span", {class: "badge", title: `${bytes(f.rollup_bytes)} of this is in rollups (counted, not listed)`}, "rollups") : null,
+          f.record && f.record.store_tag ? h("span", {class: "badge", title: "a backup or database store"}, f.record.store_tag) : null),
         h("td", {class: "num"}, num(f.allFiles)), h("td", {class: "num", title: num(f.total) + " bytes"}, bytes(f.total)),
         pctCell(total ? f.total / total * 100 : 0),
         h("td", {class: "num"}, f.record ? h("a", {href: route("record", {root, rel_path: path}), onclick: e => e.stopPropagation()}, "record") : ""));
@@ -1440,7 +1444,9 @@ async function viewRecord(params) {
   const rollCard = d.kind === "rollup" ? await rollupCard(d, params, root) : null;
   show(h("div", {}, crumbs(root, d.rel_path, d.kind === "dir"), h("div", {class: "stack"},
     rollCard,
-    h("section", {class: "card"}, h("h2", {}, d.name || d.rel_path || root, h("small", {}, d.kind || "")), errs, facts),
+    h("section", {class: "card"}, h("h2", {}, d.name || d.rel_path || root,
+      probe.store_tag ? [" ", h("span", {class: "badge", title: "a backup or database store"}, probe.store_tag)] : null,
+      h("small", {}, d.kind || "")), errs, facts),
     membersCard,
     h("section", {class: "card"}, h("h2", {}, "Stored document"), h("div", {class: "json"}, jsonTree(d, null, 0))))));
   if (d.kind !== "dir" && d.kind !== "rollup") loadMembers(membersCard, root, d.rel_path, 0, null);
@@ -1653,6 +1659,19 @@ async function viewRollups(params) {
       h("td", {class: "muted"}, Object.entries(r.rules).map(([k, n]) => `${n} ${k}`).join(", ")),
       h("td", {}, red ? "" : h("a", {href: route("record", {root: r.root, rel_path: r.rel_path})}, "record")));
   });
+  const stores = d.stores || [];
+  const storeCard = stores.length ? h("section", {class: "card"}, h("h2", {}, "Tagged stores",
+      h("small", {}, `${num(stores.length)} backup and database store folders; ${num(stores.filter(s => !s.rolled).length)} keep their files listed`)),
+    h("div", {class: "scroll"}, h("table", {}, h("thead", {}, h("tr", {}, manyRoots ? h("th", {}, "root") : null,
+        h("th", {}, "tag"), h("th", {}, "folder"), h("th", {}, "format"), h("th", {}, ""), h("th", {}))),
+      h("tbody", {}, stores.map(x => h("tr", {},
+        manyRoots ? h("td", {class: "path"}, x.root) : null,
+        h("td", {}, h("span", {class: "badge"}, x.tag)),
+        h("td", {class: "path"}, h("a", {href: route("browse", {root: x.root, parent: x.rel_path})}, x.rel_path || "(the root)")),
+        h("td", {class: "muted"}, x.format || ""),
+        h("td", {}, x.rolled ? h("span", {class: "badge", title: "its bulk folders are a rollup inside it"}, "rolled up")
+          : h("span", {class: "badge", title: "tagged; its files stay listed (a Veeam job keeps its .vbk/.vib at its top)"}, "files listed")),
+        h("td", {}, h("a", {href: route("record", {root: x.root, rel_path: x.rel_path})}, "record")))))))) : null;
   fill(holder, h("div", {class: "toolbar"}, h("label", {}, "Root ", rootSel), h("label", {}, "Tag ", tagSel),
       p.root || p.tag ? h("button", {onclick: () => go("rollups", {})}, "Clear filters") : null,
       h("span", {class: "note"}, "from the rollup records; what `filecat rollups list` prints")),
@@ -1663,7 +1682,8 @@ async function viewRollups(params) {
         h("div", {class: "scroll"}, h("table", {}, h("thead", {}, head), h("tbody", {}, body)))))
       : h("section", {class: "card"}, h("div", {class: "empty"}, p.root || p.tag ? "No rollups match these filters."
         : "No rollups in this catalog: nothing was folded into a [TAG] record. Every rollup type is manual until "
-          + "[rollups] in filecat.toml sets it to \"automatic\"; `filecat rollups suggest` lists what the built-in rules would fold.")));
+          + "[rollups] in filecat.toml sets it to \"automatic\"; `filecat rollups suggest` lists what the built-in rules would fold.")),
+    storeCard);
 }
 
 // --- search (file names across every root; /api/search) --------------------------

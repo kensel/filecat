@@ -145,6 +145,16 @@ class Backend(ABC):
         from ..browse import size_rows
         return size_rows(self.list(root=root), prefix)
 
+    def store_folders(self, root: str | None = None, prefix: str = "") -> Iterator[Document]:
+        """{root, rel_path, store_tag, format} of every backup or database store folder (a dir
+        record with `probe.store_tag`, docs/rollups.md 4) of `root` (None = every root) beneath
+        folder `prefix`. Folders recorded before stores were tagged are not found until
+        `filecat rollups migrate` (or a rescan) tags them. This default reads every folder
+        record; a backend that can index the tag does."""
+        start = prefix + "/" if prefix else ""
+        for doc in self.list(kind="dir", root=root):
+            yield from _store_folder(doc, start)
+
     def rollups(self, root: str, prefix: str = "") -> Iterator[Document]:
         """The rollup records of `root` beneath folder `prefix` ("" = all),
         full documents. `kind` is an indexed column, so this reads only them."""
@@ -656,3 +666,14 @@ class Backend(ABC):
 
     def __exit__(self, *exc: object) -> None:
         self.close()
+
+
+def _store_folder(doc: Document, start: str) -> Iterator[Document]:
+    """The store_folders() row of a folder record, when it is a tagged store beneath `start`."""
+    probe = doc.get("probe") or {}
+    tag = probe.get("store_tag")
+    rel = doc.get("rel_path") or ""
+    if tag and rel.startswith(start):
+        yield {"root": doc.get("root"), "rel_path": rel, "store_tag": tag,
+               "format": (probe.get("backup") or {}).get("format") or (probe.get("database") or {}).get("engine")
+               or (probe.get("store_note") or "").split(":", 1)[0] or None}

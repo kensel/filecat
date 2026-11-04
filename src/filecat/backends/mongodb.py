@@ -107,6 +107,10 @@ class MongoBackend(Backend):
         if "sha256_1" not in self.files.index_information():
             # Only records that have one: listed-only data has no hash.
             self.files.create_index("sha256", partialFilterExpression={"sha256": {"$type": "string"}})
+        if "probe.store_tag_1" not in self.files.index_information():
+            # Only store folders have one (store_folders: the Graph and the Rollups page).
+            self.files.create_index("probe.store_tag",
+                                    partialFilterExpression={"probe.store_tag": {"$type": "string"}})
         self.files.create_index("size")     # list_sized: `filecat dupes` size bands
         self.files.create_index("kind")
         self.files.create_index("suffix")
@@ -406,6 +410,19 @@ class MongoBackend(Backend):
         return {m["root"]: {"total_files": m["total_files"], "total_bytes": m["total_bytes"],
                             "unreadable": m["unreadable"], "depth": m.get("depth"), "built_at": m.get("built_at")}
                 for m in self.agg_meta.find(meta_query, {"_id": 0})}
+
+    def store_folders(self, root: str | None = None, prefix: str = "") -> Iterator[Document]:
+        """Read through the partial index on probe.store_tag: only the store folders."""
+        from .base import _store_folder
+        self.flush()
+        query: dict[str, Any] = {"probe.store_tag": {"$type": "string"}}
+        if root is not None:
+            query["root_id"] = root_id(root)
+        fields = {"_id": 0, "root": 1, "rel_path": 1, "probe.store_tag": 1, "probe.backup.format": 1,
+                  "probe.database.engine": 1, "probe.store_note": 1}
+        start = prefix + "/" if prefix else ""
+        for doc in self.files.find(query, fields).hint("probe.store_tag_1"):
+            yield from _store_folder(doc, start)
 
     def summary_docs(self, root: str) -> Iterator[Document]:
         """Only the fields a summary reads, and no directory or rollup records."""

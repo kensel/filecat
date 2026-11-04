@@ -21,7 +21,7 @@ below a share.
 from __future__ import annotations
 
 from datetime import datetime, timezone
-from typing import Any
+from typing import Any, Iterable, MutableMapping
 
 from . import config, rootinfo, topology
 from .backends.base import Backend
@@ -103,8 +103,17 @@ def _node(topo: topology.Topology, n: topology.Node, ctx: dict[str, Any]) -> dic
     return out
 
 
-def build(backend: Backend, config_path: str | None = None, now: datetime | None = None) -> dict[str, Any]:
-    """The /api/topology document."""
+def build(backend: Backend, config_path: str | None = None, now: datetime | None = None, *,
+          extra_roots: Iterable[str] | None = None,
+          counts: MutableMapping[str, tuple[Any, Any, Any]] | None = None) -> dict[str, Any]:
+    """The /api/topology document.
+
+    `extra_roots` are the distinct roots of the records when the caller knows them (the viewer
+    keeps them, refreshed in the background); None lists them here, a pass over every record that
+    takes minutes on a big catalog. `counts` is a memo of the file and byte totals of roots that
+    have no stored summary (root -> (last scan, files, bytes)), read and filled here: a root is
+    counted again only when it has been scanned since, so a page load does not count every such
+    root again."""
     now = now or datetime.now(timezone.utc)
     try:
         cfg = config.load(config.find(config_path))
@@ -120,7 +129,7 @@ def build(backend: Backend, config_path: str | None = None, now: datetime | None
     guests = topology.guest_servers(snaps, res.links)
     by_unc = {_unc_key(t.unc_server): t for t in snaps}
 
-    roots = rootinfo.index(backend)
+    roots = rootinfo.index(backend, extra_roots=extra_roots)
     share_nodes = [(t, n) for t in snaps for n in t.of_type("share") if n.unc]
     matched: set[str] = set()
     share_roots: dict[topology.Key, dict[str, Any] | None] = {}
@@ -132,8 +141,8 @@ def build(backend: Backend, config_path: str | None = None, now: datetime | None
         if hits or below:
             share_roots[(topo.key, n.id)] = {
                 "root": hits[0]["root"] if hits else None,
-                **(_root_row(backend, hits[0]) if hits else {}),
-                "below": [{"root": r["root"], **_root_row(backend, r)} for r in below]}
+                **(_root_row(backend, hits[0], counts) if hits else {}),
+                "below": [{"root": r["root"], **_root_row(backend, r, counts)} for r in below]}
 
     consumers: dict[topology.Key, list[dict[str, Any]]] = {}
     providers: dict[topology.Key, dict[str, Any]] = {}
@@ -184,7 +193,7 @@ def build(backend: Backend, config_path: str | None = None, now: datetime | None
         "unresolved": [{**_ref(topos, u.node), "reason": u.reason, "wanted": u.wanted} for u in res.unresolved],
         "conflicts": len(res.conflicts),
         "physical_summary": topology.physical_summary(snaps, res.links, res.unresolved) if snaps else None,
-        "roots_not_in_topology": [{"root": r["root"], **_root_row(backend, r)} for r in unmatched],
+        "roots_not_in_topology": [{"root": r["root"], **_root_row(backend, r, counts)} for r in unmatched],
         "roots": len(roots),
         "now": now.isoformat(timespec="seconds"),
     }
@@ -200,19 +209,26 @@ def _pair(topos: dict[str, topology.Topology], link: topology.Link) -> dict[str,
     return {"consumer": _ref(topos, link.consumer), "provider": _ref(topos, link.provider)}
 
 
-def _root_row(backend: Backend, r: dict[str, Any]) -> dict[str, Any]:
-    """What a root contributes to the page: totals, state and last scan."""
+def _root_row(backend: Backend, r: dict[str, Any],
+              counts: MutableMapping[str, tuple[Any, Any, Any]] | None = None) -> dict[str, Any]:
+    """What a root contributes to the page: totals, state and last scan. A root without stored
+    summary totals is counted (one query), or taken from `counts` when it was counted before."""
     info = r.get("info") or {}
     last = info.get("last_scan") or {}
     summary = r.get("summary")
+    stamp = (last.get("finished_at") or last.get("started_at"), last.get("status"))
     files = bytes_ = None
     if summary and summary.get("total_files") is not None:
         files, bytes_ = summary["total_files"], summary.get("total_bytes")
+    elif counts is not None and counts.get(r["root"], (None,))[0] == stamp:
+        _, files, bytes_ = counts[r["root"]]
     else:
         try:
             from . import browse
             q = backend.query(browse.normalize({"root": r["root"], "files_only": "1", "limit": "1"}))
             files, bytes_ = q["total"], q["bytes"]
+            if counts is not None:
+                counts[r["root"]] = (stamp, files, bytes_)
         except Exception:     # a total is a convenience; the row still stands without it
             pass
     return {"files": files, "bytes": bytes_, "state": r.get("state"),

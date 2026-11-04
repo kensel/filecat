@@ -598,7 +598,7 @@ _RULES = (
     ("naa", "naa", _same_naa, LINK_TYPES, ("lun",)),          # initiator or cluster disk -> Synology LUN
     ("serial", "vmserial", _same_ci, ("disk",), ("vdisk",)),  # guest disk -> hypervisor vdisk
     ("volid", "volid", _same, ("vdisk",), ("disk", "lun")),   # VM disk -> cluster storage volume
-    ("vmmdisk", "vmmdisk", _same, ("disk",), ("vdisk",)),     # Virtual DSM disk -> VMM vdisk
+    ("vmmdisk", "vmmdisk", _same_ci, ("disk",), ("vdisk",)),  # Virtual DSM disk -> VMM vdisk
 )
 _CONSUMER_KINDS = {r[0] for r in _RULES}
 

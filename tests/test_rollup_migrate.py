@@ -293,3 +293,18 @@ def test_the_same_on_sqlite_with_a_kill_and_a_rerun(fixture_dir):
     assert not [r for r in docs if r.startswith(f"{HBK}/Pool")]
     assert backend.rollup_totals(str(root))[str(root)][0]["tag"] == "[BACKUP]"
     backend.close()
+
+
+def test_store_folders_scanned_before_tagging_get_their_tag(old):
+    # a catalog from before probe.store_tag: migrate tags every store folder, whatever the mode
+    root, backend = old
+    store = backend.get(str(root), HBK)
+    assert store["probe"]["store_tag"] == "[BACKUP]"          # a scan writes it now
+    del store["probe"]["store_tag"]
+    backend.put(store)
+    result, _ = migrate(backend, root, config({}), dry_run=True)
+    assert result.tagged == 1 and "store_tag" not in backend.get(str(root), HBK)["probe"]
+    result, _ = migrate(backend, root, config({}))             # backup is manual: nothing rolls up
+    assert result.tagged == 1 and result.targets == 0
+    assert backend.get(str(root), HBK)["probe"]["store_tag"] == "[BACKUP]"
+    assert migrate(backend, root, config({}))[0].tagged == 0

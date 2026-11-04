@@ -162,3 +162,26 @@ def test_the_document_carries_nothing_from_below_a_share(doc):
     text = json.dumps(doc)
     for name in ("f0.bin", "f1.bin", "f2.bin", "jdoe/f"):
         assert name not in text
+
+
+def test_known_roots_and_the_count_memo_spare_the_catalog(paths, monkeypatch):
+    # the viewer hands in the distinct roots it keeps (a pass over every record is minutes on a big
+    # catalog) and a memo of the counts of roots without a stored summary, kept until a rescan
+    from filecat import topology_view
+    db, cfg = paths
+    with SqliteBackend(db) as b:
+        known = set(b.roots())
+        monkeypatch.setattr(b, "roots", lambda: pytest.fail("listed every record"))
+        queries = []
+        query = b.query
+        monkeypatch.setattr(b, "query", lambda q: queries.append(q["root"]) or query(q))
+        counts: dict = {}
+        first = topology_view.build(b, cfg, extra_roots=known, counts=counts)
+        assert sorted(queries) == sorted(known) and set(counts) == known
+        queries.clear()
+        again = topology_view.build(b, cfg, extra_roots=known, counts=counts)
+        assert queries == [] and again["roots_not_in_topology"] == first["roots_not_in_topology"]
+        other = r"\\elsewhere\data"
+        counts[other] = (("2020-01-01T00:00:00Z", "ok"), 99, 99)   # counted before a rescan
+        topology_view.build(b, cfg, extra_roots=known, counts=counts)
+        assert queries == [other] and counts[other][1:] == (1, 100)

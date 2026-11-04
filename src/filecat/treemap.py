@@ -43,6 +43,9 @@ into one cell, the tag, and `"rollup": {"tag", "matched", "total_dirs",
 in, as a file would be, under its tag. The `files` and `bytes` totals include
 rollups, so a share's total matches `du`. A pin diff matches tiles by path,
 which is stable between snapshots, so it works on rollup tiles as on folders.
+`stores=` takes Backend.store_folders() beneath `prefix`: the folder entry of
+a backup or database store within `depth` says so with `"store_tag":
+"[BACKUP]"` (a Veeam job is tagged although nothing in it rolls up).
 """
 from __future__ import annotations
 
@@ -95,7 +98,7 @@ def _split(cells: dict[str, int], index: dict[str, int], other: int) -> list[lis
 
 
 def build(rows: Iterable[tuple[str, int, str, str]], prefix: str = "", depth: int = 2,
-          rollups: Iterable[Document] = ()) -> dict[str, Any]:
+          rollups: Iterable[Document] = (), stores: Iterable[Document] = ()) -> dict[str, Any]:
     prefix = prefix.strip("/")
     start = len(prefix) + 1 if prefix else 0
     folders: dict[str, list[Any]] = {}  # path -> [files, bytes, {suffix: bytes}, {mime: bytes}]
@@ -139,6 +142,12 @@ def build(rows: Iterable[tuple[str, int, str, str]], prefix: str = "", depth: in
         else:
             add(folder_of(rel, start, depth), files, size, tag, tag)
 
+    tagged: dict[str, str] = {}             # path -> store tag of a store folder's own entry
+    for doc in stores:
+        rel = doc.get("rel_path") or ""
+        if rel.startswith(prefix + "/" if prefix else "") and rel != prefix and len(rel[start:].split("/")) <= depth:
+            tagged[rel[start:]] = doc["store_tag"]
+
     keys: dict[str, list[dict[str, Any]]] = {}
     indexes: dict[str, dict[str, int]] = {}
     for table in ("suffix", "mime"):
@@ -167,6 +176,8 @@ def build(rows: Iterable[tuple[str, int, str, str]], prefix: str = "", depth: in
             row["merged"] = f[4]
         elif path in tiles:
             row["rollup"] = tiles[path]
+        if path in tagged:
+            row["store_tag"] = tagged[path]
         out_folders.append(row)
     return {"prefix": prefix, "depth": depth,
             "files": sum(f[0] for f in folders.values()), "bytes": sum(f[1] for f in folders.values()),

@@ -60,6 +60,9 @@ SECTOR = 512
 EXT4_DEVTYPE = 1                                # ext4 volumes: a directory per LUN in FILE (thick) or THIN
 DEVTYPE_DIRS = {5: "BLUN", 11: "BLUN_THICK", 7: "VDISK_BLUN"}
 _VOLUME = re.compile(r"^/volume(\d+)$")
+# A Virtual DSM disk's serial is the uuid of the VMM vdisk it is (seen on NAS01, a Virtual DSM
+# on nas3): no physical disk has a serial of this shape.
+_VDISK_SERIAL = re.compile(r"^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$", re.I)
 _DISK = re.compile(r"^(sata\d+|sas\d+|nvme\d+n\d+|sd[a-z]+)$")      # DSM names disks sataN, or sdX on older models
 _UNASKED = object()
 _PART = re.compile(r"^((?:sata|sas)\d+p\d+|nvme\d+n\d+p\d+|sd[a-z]+\d+)$")
@@ -271,6 +274,9 @@ class _Collector:
             node["size_bytes"] = sectors * SECTOR
         if serial:
             node["serial"] = serial
+            if _VDISK_SERIAL.match(serial):     # Virtual DSM: link to the VMM vdisk on its host
+                node["virtual"] = True
+                node["match"] = [f"vmmdisk:{serial.lower()}"]
         if model:
             node["model"] = model
         if dev.startswith("nvme"):

@@ -130,7 +130,7 @@ def refresh(backend: Backend, root: str, *, cancel: Callable[[], bool] | None = 
                 yield (rel, doc.get("size") or 0, doc.get("suffix") or "",
                        doc.get("mime") or doc.get("kind") or "unknown")
 
-    data = treemap.build(rows(), "", depth, rollups=backend.rollups(root, ""))
+    data = treemap.build(rows(), "", depth, rollups=backend.rollups(root, ""), stores=store_folders(backend, root, ""))
     stored = []
     try:
         meta = treemap.save(backend, root, data, built_at)
@@ -235,3 +235,11 @@ def run(args: Any) -> int:
         return 1 if counts["failed"] else 0
     finally:
         backend.close()
+
+
+def store_folders(backend: Backend, root: str, prefix: str) -> list[Document]:
+    """Backend.store_folders(), or none on a backend without the method."""
+    try:
+        return list(backend.store_folders(root, prefix))
+    except NotImplementedError:
+        return []

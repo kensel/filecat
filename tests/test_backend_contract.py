@@ -629,6 +629,31 @@ def test_rollups_do_not_count_as_files_and_are_read_back(backend, backend_name):
         backend.flush()
 
 
+def test_store_folders_are_the_tagged_store_dirs(backend, backend_name):
+    import uuid
+    root = rf"C:\store-contract-{uuid.uuid4().hex[:8]}"
+
+    def folder(rel, **probe):
+        return {"root_id": root_id(root), "root": root, "rel_path": rel, "name": rel.rsplit("/", 1)[-1],
+                "kind": "dir", "suffix": "", "probe": probe}
+    docs = [folder("Backup"), folder("Backup/Job PC1", store_tag="[BACKUP]", backup={"format": "veeam"}),
+            folder("db/pg", store_tag="[DATABASE]", database={"engine": "postgres"}),
+            folder("old/Job PC2", backup={"format": "veeam"})]          # recorded before stores were tagged
+    for d in docs:
+        backend.put(copy.deepcopy(d))
+    backend.flush()
+    try:
+        got = sorted((d["rel_path"], d["store_tag"], d["format"]) for d in backend.store_folders(root))
+        assert got == [("Backup/Job PC1", "[BACKUP]", "veeam"), ("db/pg", "[DATABASE]", "postgres")]
+        assert [d["rel_path"] for d in backend.store_folders(root, "Backup")] == ["Backup/Job PC1"]
+        assert all(d["root"] == root for d in backend.store_folders(root))
+        assert {d["rel_path"] for d in backend.store_folders() if d["root"] == root} == {"Backup/Job PC1", "db/pg"}
+    finally:
+        for d in docs:
+            backend.delete(root, d["rel_path"])
+        backend.flush()
+
+
 def test_delete_many_is_a_hard_delete_with_members(backend, backend_name):
     import uuid
     root = rf"C:\delete-many-{uuid.uuid4().hex[:8]}"

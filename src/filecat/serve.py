@@ -115,6 +115,8 @@ def _row(doc: dict[str, Any]) -> dict[str, Any]:
     probe = doc.get("probe") or {}
     if probe.get("child_count") is not None:
         row["child_count"] = probe["child_count"]
+    if probe.get("store_tag"):
+        row["store_tag"] = probe["store_tag"]     # a backup or database store's folder
     if doc.get("kind") == "rollup":
         row["rollup"] = {k: v for k, v in (probe.get("rollup") or {}).items() if k in ROLLUP_FIELDS}
     return row
@@ -221,6 +223,9 @@ class Catalog:
         self._stores: bool | None = None            # whether the backend stores snapshots (_stores_treemaps)
         self._distinct: set[str] | None = None      # the distinct roots of the records, refreshed in the background
         self._distinct_at: datetime | None = None
+        # file and byte totals of roots without a stored summary, counted for the Topology page and
+        # kept until the root is scanned again (topology_view.build)
+        self._root_counts: dict[str, tuple[Any, Any, Any]] = {}
         self.refresher = Refresher(lambda m: None if self.args.quiet else sys.stderr.write(f"filecat serve: {m}\n"))
         self._started = (self.args.backend, self.args.out, self.args.dsn)
         self.coordinator: Any = None    # set by `filecat server --serve`: the live agents and jobs
@@ -402,6 +407,7 @@ class Catalog:
             self._summaries = {}  # computed summaries belong to the old catalog
             self._treemaps = {}
             self._stores, self._distinct, self._distinct_at = None, None, None
+            self._root_counts = {}
         self._request_roots()
         return self.info({})
 
@@ -504,6 +510,7 @@ class Catalog:
         self._summaries = {k: v for k, v in self._summaries.items() if k[0] != root}
         self._treemaps = {k: v for k, v in self._treemaps.items() if k[0] != root}
         self._distinct = (self._distinct or set()) - {root}
+        self._root_counts.pop(root, None)
         self.coordinator.log(f"root {root} removed from the catalog (requested from {remote})")
         return 200, {"removed": removed}
 
@@ -673,7 +680,8 @@ class Catalog:
                 found = b.get_treemap(current["id"])
                 if found is not None:
                     return {**found[1], **found[0], "source": "stored"}
-            data = treemap.build(b.sizes(root, prefix), prefix, depth, rollups=b.rollups(root, prefix))
+            data = treemap.build(b.sizes(root, prefix), prefix, depth, rollups=b.rollups(root, prefix),
+                                 stores=summaries.store_folders(b, root, prefix))
             meta = treemap.save(b, root, data, datetime.now(timezone.utc).isoformat())
             return {**data, **meta, "source": "saved"}
 
@@ -686,7 +694,8 @@ class Catalog:
         cached = treemaps.get(key)
         if cached is not None and not refresh and treemap.age(cached, now) < max_age:
             return {**cached, "source": "memory"}
-        cached = {"root": root, **self.call(lambda b: treemap.build(b.sizes(root, prefix), prefix, depth, rollups=b.rollups(root, prefix))),
+        cached = {"root": root, **self.call(lambda b: treemap.build(b.sizes(root, prefix), prefix, depth, rollups=b.rollups(root, prefix),
+                                 stores=summaries.store_folders(b, root, prefix))),
                   "built_at": datetime.now(timezone.utc).isoformat(), "id": None, "pin": None, "can_pin": False,
                   "max_age": max_age.total_seconds()}
         treemaps.pop(key, None)
@@ -770,7 +779,12 @@ class Catalog:
         (topology_view.py); empty `hosts` when `filecat storage collect` has not run."""
         from . import topology_view
         path = getattr(self.args, "config", None)
-        return self.call(lambda b: topology_view.build(b, path))
+
+        def run(b: Any) -> dict[str, Any]:
+            # the distinct roots come from the background list (a pass over every record is minutes
+            # on a big catalog); a root without a stored summary is counted once per scan of it
+            return topology_view.build(b, path, extra_roots=self._known_roots(b), counts=self._root_counts)
+        return self.call(run)
 
     def rollups(self, p: dict[str, str]) -> dict[str, Any]:
         """The audit of `filecat rollups list` by root, tag and parent folder (rollups_view.py);

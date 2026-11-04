@@ -815,6 +815,9 @@ def walk_root(root: str, options: ScanOptions, backend: Backend, identifier: Any
         return info
 
     def _backup_summary(frame: _Frame, doc: dict[str, Any]) -> None:
+        # the store's own folder carries its tag whether or not its bulk folders roll up (a Veeam
+        # job keeps its files listed and is still a [BACKUP]); rollup_tags is for rolled children
+        doc.setdefault("probe", {})["store_tag"] = frame.store.tag
         names = (frame.store_names - frame.not_recorded) if frame.store_names else _recorded_names(frame)
         fs = backup.storefs.for_store(source, frame.abs_path, plan.cfg.manifest_cap)
         try:
