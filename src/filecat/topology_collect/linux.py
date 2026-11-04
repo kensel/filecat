@@ -33,6 +33,13 @@ def _lsblk(r: Reader) -> list[dict[str, Any]] | None:
     return None
 
 
+def _naa6(wwn: str | None) -> str | None:
+    """The 32 hex digits of an NAA type 6 (registered extended) WWN, as lsblk shows it
+    (`0x6001405...`), else None: local disks' type 5 WWNs are not LUNs of another host."""
+    h = re.sub(r"[^0-9a-f]", "", (wwn or "").lower().removeprefix("0x").removeprefix("naa."))
+    return h if len(h) == 32 and h.startswith("6") else None
+
+
 def _sysfs_disks(r: Reader) -> list[dict[str, Any]]:
     out = []
     for name in r.names("/sys/block") or []:
@@ -61,10 +68,19 @@ def collect(source: Source, *, name: str | None = None, unc_server: str | None =
 
     disks: list[dict[str, Any]] = []
     disk_id: dict[str, str] = {}
+    by_id: dict[str, dict[str, Any]] = {}
     for d in devices:
         if d.get("type") != "disk" or _SKIP_DISK.match(d["name"]):
             continue
         serial, wwn = d.get("serial"), d.get("wwn")
+        if serial or wwn:
+            did = f"disk:{serial}" if serial else f"disk:wwn.{wwn}"
+            same = by_id.get(did)
+            if same is not None:          # another path to the same LUN (multipath, or two iSCSI portals)
+                plat = same["platform"][PLATFORM]
+                plat.setdefault("paths", [plat["device"]]).append(f"/dev/{d['name']}")
+                disk_id[d.get("kname") or d["name"]] = did
+                continue
         plat: dict[str, Any] = {"device": f"/dev/{d['name']}"}
         if serial:
             did = f"disk:{serial}"
@@ -83,9 +99,17 @@ def collect(source: Source, *, name: str | None = None, unc_server: str | None =
         if d.get("model"):
             node["model"] = d["model"]
         node["media"] = "nvme" if d["name"].startswith("nvme") else "hdd" if d.get("rota") else "ssd"
+        naa = _naa6(wwn)
+        if naa:                           # a SAN LUN (e.g. a Synology iSCSI LUN): link to it by NAA id
+            node["match"] = [f"naa:{naa}"]
         node["platform"] = {PLATFORM: plat}
         disk_id[d.get("kname") or d["name"]] = did
+        by_id[did] = node
         disks.append(node)
+    for node in disks:
+        paths = node["platform"][PLATFORM].get("paths")
+        if paths:
+            r.note(f"{node['id']}: one disk seen on {len(paths)} paths ({', '.join(paths)})")
 
     def disk_of(kname: str) -> str | None:
         seen = set()

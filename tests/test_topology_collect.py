@@ -300,6 +300,31 @@ def test_generic_linux_collector(fixture_dir):
     assert linux.PLATFORM == "linux"
 
 
+def test_linux_collector_merges_paths_to_one_iscsi_lun(fixture_dir):
+    # pve2: LUN-3 of nas3 seen on two iSCSI paths, sdf and sdg, with one serial and WWN
+    rec = fixture_dir / "pve2"
+    (rec / "files" / "proc").mkdir(parents=True)
+    (rec / "files" / "proc" / "mounts").write_text("")
+    (rec / "run").mkdir()
+    lun = {"type": "disk", "size": 10_200_000_000_000, "rota": False, "model": "Storage",
+           "serial": "f48f1514-6072-4193-989e-9e7bfbe6d0e1", "wwn": "0x6001405f48f1514d6072d4193d989ed9"}
+    (rec / "run" / "lsblk_json.stdout").write_text(json.dumps({"blockdevices": [
+        {"name": "sda", "kname": "sda", "type": "disk", "size": 1000, "rota": False, "serial": "2013E7448710",
+         "wwn": "0x5001b444a76604f4"},
+        {"name": "sdf", "kname": "sdf", **lun, "children": [{"name": "sdf1", "kname": "sdf1", "type": "part"}]},
+        {"name": "sdg", "kname": "sdg", **lun, "children": [{"name": "sdg1", "kname": "sdg1", "type": "part"}]}]}))
+    (rec / "meta.json").write_text('{"hostname": "pve2"}')
+    t = collect(RecordedSource(rec), now=NOW)
+    sda, lun_disk = t.of_type("disk")
+    assert sda.match == []                              # a local disk's type 5 WWN is not a LUN
+    assert lun_disk.id == "disk:f48f1514-6072-4193-989e-9e7bfbe6d0e1"
+    assert lun_disk.platform["linux"]["paths"] == ["/dev/sdf", "/dev/sdg"]
+    assert lun_disk.match == ["naa:6001405f48f1514d6072d4193d989ed9"]
+    assert any("2 paths" in n for n in t.extra["collector"]["notes"])
+    links, _ = topology.resolve_links([nas3(), t])
+    assert {l.consumer: l.provider for l in links}[("pve2", lun_disk.id)] == ("nas3", LUN3)
+
+
 # --- the fake agent: read_file, statfs, run, capabilities, with the allowlist enforced -------
 @pytest.fixture
 def served(fixture_dir):
