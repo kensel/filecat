@@ -11,7 +11,7 @@ import tomllib
 
 import pytest
 
-from filecat import cli, config
+from filecat import cli, config, rollup
 
 
 def _write(path, text):
@@ -211,3 +211,34 @@ def test_config_verify_server(name, fixture_dir, capsys):
         capsys.readouterr().out
     out = capsys.readouterr().out
     assert out.startswith(f"ok   {name}") and "delete ok" in out
+
+
+def test_render_writes_every_section_in_order():
+    text = config.render()
+    cfg = tomllib.loads(text)
+    assert cfg["rollups"] == {name: "manual" for name in rollup.TYPES}   # the defaults, spelled out
+    found = config.suggestions(text, cfg)
+    assert found["missing"] == [] and found["entries"] == [] and found["order"] is None
+    assert found["unknown"] == []
+
+
+def test_suggestions():
+    text = ('backend = "sqlite"\n[ollama]\nurl = "http://o:1"\n[sqlite]\nout = "x"\n'
+            '# [postgres]\n[rollups]\ncache = "automatic"\n[typo]\nx = 1\n')
+    found = config.suggestions(text, tomllib.loads(text))
+    assert "postgres" not in found["missing"]                 # commented out counts as there
+    assert {"jsonl", "agents", "server", "storage"} <= set(found["missing"])
+    assert ("ollama", "model", "none; pass --model") in found["entries"]
+    assert ("rollups", "backup", "manual") in found["entries"]
+    assert found["order"] == ["", "ollama", "sqlite", "rollups"]
+    assert found["unknown"] == ["typo"]
+    assert found["notes"] == []                               # cache is automatic: something rolls up
+    bare = 'backend = "sqlite"\n'
+    assert "nothing rolls up" in config.suggestions(bare, tomllib.loads(bare))["notes"][0]
+
+
+def test_config_suggest_cli(fixture_dir, capsys):
+    cfg = _write(fixture_dir / "c.toml", 'backend = "sqlite"\n')
+    assert cli.main(["--config", str(cfg), "config", "suggest"]) == 0
+    out = capsys.readouterr().out
+    assert "# --- [rollups] ---" in out and "nothing rolls up" in out

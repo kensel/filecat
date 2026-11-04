@@ -12,6 +12,9 @@ when that value is used, so passwords can stay out of the file.
     init    write a commented filecat.toml; sections for database servers
             listening on 127.0.0.1 are filled in, the rest left commented
     show    the file in use and the effective settings, passwords masked
+    suggest how the file differs from what init writes: missing sections
+            (printed ready to paste), entries left at their default, section
+            order, names filecat does not read, and why nothing rolls up
     test    read-only: driver, connect, server version, database, user,
             whether filecat's tables exist
     verify  test, then open the backend as scan would (creating tables or
@@ -526,55 +529,128 @@ STORAGE_EXAMPLE = [
 ]
 
 
-def render(*, backend: str = "sqlite", dsns: dict[str, str] | None = None,
-           outs: dict[str, str] | None = None, model: str = DEFAULT_MODEL,
-           ollama_url: str = DEFAULT_OLLAMA_URL, notes: dict[str, str] | None = None) -> str:
-    """filecat.toml text. Server sections named in `dsns` are live; the rest
-    are written commented out with a local default."""
+AGENTS_EXAMPLE = [
+    "# filecat-agent on a NAS (docs/agent-protocol.md), one [[agents]] per host. The agent prints",
+    "# its cert_sha256 when it starts; the token is the one it was started with.",
+    "# [[agents]]",
+    '# name = "nas-main"',
+    '# host = "192.0.2.13"',
+    "# port = 9876",
+    '# cert_sha256 = "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"',
+    '# token = "${FILECAT_NAS_MAIN_TOKEN}"',
+    "# alias = '\\\\nas-main'      # the server SMB scans record it under (default \\\\NAME)",
+    "# [agents.shares]           # folders that are not /volume1/<share>",
+    "# '/volume2/Archive' = '\\\\nas-main\\Archive'",
+]
+
+ALIASES_EXAMPLE = [
+    "# Read PATH, record as ROOT: scans of \\\\192.0.2.13\\<share> land under \\\\nas-main\\<share>.",
+    "# [aliases]",
+    "# '\\\\192.0.2.13' = '\\\\nas-main'",
+]
+
+EVERYTHING_EXAMPLE = [
+    "# filecat scan-everything: every disk share of these servers, then these drives.",
+    "# [everything]",
+    '# servers = ["nas-main", "192.0.2.13"]',
+    '# drives = ["C:", "D:"]',
+    "# exclude = ['C:\\code\\filecat']        # whole roots or folders inside them",
+    "# [[everything.login]]                  # a server your account cannot list: connect as this account",
+    '# server = "192.0.2.13"',
+    "# user = 'nas-main\\admin'",
+]
+
+# Written live: the modes are the defaults (manual), spelled out so a reader sees there is a choice.
+ROLLUPS_EXAMPLE = [
+    "# Rollups (docs/rollups.md): folders the catalog counts but does not list, one [TAG] record each.",
+    "# A mode per type: automatic applies the built-in rules, manual only the [[rollups.rule]] tables",
+    "# and .filecat-<tag> marker files, disabled nothing. A type not written here is manual, so nothing",
+    "# rolls up until you choose; `filecat rollups suggest` lists what the built-in rules would fold.",
+    "# One scan: --rollup cache=automatic. Existing rows: rescan, or filecat rollups migrate.",
+    "[rollups]",
+    *(f"{name:8} = \"manual\"" + ("   # cannot be disabled" if name == "redacted" else "")
+      for name in rollup.TYPES),
+    '# store_resum  = "30d"      # a store\'s rollup is carried forward this long when unchanged',
+    '# manifest_cap = "256MiB"   # largest SQLite manifest copied through an agent',
+    "#",
+    "# [[rollups.rule]]",
+    '# tag   = "[CACHE]"',
+    '# match = ["node_modules", "**/AppData/Local/Temp"]',
+    '# type  = "dir"             # any (default), dir or file',
+    "#",
+    "# [[rollups.rule]]",
+    '# tag   = "[REDACTED]"      # counts only, never names',
+    "# match = ['\\\\nas-main\\homes\\jdoe\\private']",
+]
+
+SERVER_EXAMPLE = [
+    "# filecat server (docs/agent-server.md): agent health checks and scheduled jobs.",
+    "# [server]",
+    '# serve = "127.0.0.1:8765"    # the web viewer, as --serve',
+    "# max_concurrent = 1",
+    '# progress_interval = "10m"',
+    "# [[server.jobs]]",
+    '# name  = "nightly"',
+    '# kind  = "scan"              # storage-collect | scan | store-resum | summaries',
+    '# agent = "nas-main"          # an [[agents]] name, or "*" for one job per agent',
+    '# at    = "02:30"             # or: every = "24h"',
+    '# options = ["--hash", "auto"]',
+]
+
+# The sections of filecat.toml in the order `config init` writes them; "" is the top-level keys.
+SECTIONS = ("", *FILE_BACKENDS, *SERVER_BACKENDS, "ollama", "aliases", "everything", "agents",
+            "rollups", "server", "storage")
+TOP_LEVEL_KEYS = ("backend",)
+# Keys `config suggest` reports when their section is there but they are not: (key, default shown)
+ENTRIES = {
+    **{name: (("out", DEFAULT_OUT[name]),) for name in FILE_BACKENDS},
+    "ollama": (("url", DEFAULT_OLLAMA_URL), ("model", "none; pass --model")),
+    "rollups": tuple((name, "manual") for name in rollup.TYPES),
+}
+
+
+def sections(*, backend: str = "sqlite", dsns: dict[str, str] | None = None,
+             outs: dict[str, str] | None = None, model: str = DEFAULT_MODEL,
+             ollama_url: str = DEFAULT_OLLAMA_URL, notes: dict[str, str] | None = None) -> dict[str, list[str]]:
+    """The lines of each section of SECTIONS, as `config init` writes them. Server
+    sections named in `dsns` are live; the rest are written commented out with a local default."""
     dsns = dsns or {}
     outs = outs or {}
     notes = notes or {}
-    lines = [
+    out: dict[str, list[str]] = {"": [
         "# filecat configuration. Command-line flags override these settings;",
         "# FILECAT_DSN and OLLAMA_HOST override the dsn / url here.",
         "# ${NAME} is replaced from the environment when used, e.g.",
         "#   $env:FILECAT_PG_PASSWORD = '...'     (PowerShell)",
         "# Check with: filecat config show / filecat config test / filecat config verify",
+        "# Compare with what this version writes: filecat config suggest",
         "",
         "# Backend used when --backend is not given: " + " | ".join(BACKENDS),
         f"backend = {_toml_str(backend)}",
-        "",
-    ]
+    ]}
     for name in FILE_BACKENDS:
-        lines += [f"[{name}]", f"out = {_toml_str(outs.get(name, DEFAULT_OUT[name]))}", ""]
+        out[name] = [f"[{name}]", f"out = {_toml_str(outs.get(name, DEFAULT_OUT[name]))}"]
     for name in SERVER_BACKENDS:
-        if notes.get(name):
-            lines.append(f"# {notes[name]}")
+        lines = [f"# {notes[name]}"] if notes.get(name) else []
         if name in dsns:
-            lines += [f"[{name}]", f"dsn = {_toml_str(dsns[name])}", ""]
+            lines += [f"[{name}]", f"dsn = {_toml_str(dsns[name])}"]
         else:
-            lines += [f"# [{name}]", f"# dsn = {_toml_str(server_default(name))}", ""]
-    lines += [
-        "[ollama]",
-        f"url = {_toml_str(ollama_url)}",
-        f"model = {_toml_str(model)}",
-        "",
-        "# filecat-agent on a NAS (docs/agent-protocol.md), one [[agents]] per host. The agent prints",
-        "# its cert_sha256 when it starts; the token is the one it was started with.",
-        "# [[agents]]",
-        '# name = "nas-main"',
-        '# host = "192.0.2.13"',
-        "# port = 9876",
-        '# cert_sha256 = "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"',
-        '# token = "${FILECAT_NAS_MAIN_TOKEN}"',
-        "# alias = '\\\\nas-main'      # the server SMB scans record it under (default \\\\NAME)",
-        "# [agents.shares]           # folders that are not /volume1/<share>",
-        "# '/volume2/Archive' = '\\\\nas-main\\Archive'",
-        "",
-        *STORAGE_EXAMPLE,
-        "",
-    ]
-    return "\n".join(lines)
+            lines += [f"# [{name}]", f"# dsn = {_toml_str(server_default(name))}"]
+        out[name] = lines
+    out["ollama"] = ["[ollama]", f"url = {_toml_str(ollama_url)}", f"model = {_toml_str(model)}"]
+    out["aliases"] = ALIASES_EXAMPLE
+    out["everything"] = EVERYTHING_EXAMPLE
+    out["agents"] = AGENTS_EXAMPLE
+    out["rollups"] = ROLLUPS_EXAMPLE
+    out["server"] = SERVER_EXAMPLE
+    out["storage"] = STORAGE_EXAMPLE
+    return out
+
+
+def render(**kwargs: Any) -> str:
+    """filecat.toml text: every section of `sections`, in order."""
+    parts = sections(**kwargs)
+    return "\n\n".join("\n".join(parts[name]) for name in SECTIONS) + "\n"
 
 
 def cmd_init(args: Any) -> int:
@@ -658,6 +734,9 @@ def cmd_show(args: Any, path: Path | None, cfg: dict[str, Any]) -> int:
     if rollups.rules or modes:
         print(f"rollups:     {len(rollups.rules)} rules" + (f"; {modes}" if modes else "")
               + "  (filecat rollups rules)")
+    else:
+        print("rollups:     every type manual, no rules: only marker files fold anything "
+              "(filecat rollups suggest)")
     for line in rollups.warnings:
         print(f"  warning: {line}")
     for line in rollup.describe_rules(rollups):
@@ -674,6 +753,82 @@ def cmd_show(args: Any, path: Path | None, cfg: dict[str, Any]) -> int:
         print(f"  host {h.name:8} {h.unc_server}  {h.platform}, {len(h.nodes)} nodes")
     for link in storage.links:
         print(f"  link {link.from_ref} -> {link.to_ref}" + (f"   ({link.note})" if link.note else ""))
+    return 0
+
+
+# --- config suggest -----------------------------------------------------
+_HEADER = re.compile(r"^\s*\[\[?\s*([A-Za-z0-9_-]+)")
+_COMMENTED_HEADER = re.compile(r"^\s*#\s*\[\[?\s*([A-Za-z0-9_-]+)")
+
+
+def suggestions(text: str, cfg: dict[str, Any]) -> dict[str, Any]:
+    """How a filecat.toml differs from what `config init` writes: sections it has neither
+    live nor commented out, keys of a live section left at their default, sections in
+    another order, top-level names filecat does not read, and why nothing rolls up."""
+    order: list[str] = []
+    commented: set[str] = set()
+    for line in text.splitlines():
+        m = _HEADER.match(line)
+        if m and m.group(1) not in order:
+            order.append(m.group(1))
+        m = _COMMENTED_HEADER.match(line)
+        if m:
+            commented.add(m.group(1))
+    if any(not isinstance(v, dict) for v in cfg.values()):
+        order.insert(0, "")
+    known = [name for name in order if name in SECTIONS]
+    out: dict[str, Any] = {
+        "missing": [name for name in SECTIONS if name and name not in cfg and name not in commented],
+        "entries": [(name, key, default) for name, keys in ENTRIES.items()
+                    if isinstance(cfg.get(name), dict) for key, default in keys if key not in cfg[name]],
+        "order": known if known != sorted(known, key=SECTIONS.index) else None,
+        "unknown": [k for k, v in cfg.items()
+                    if (k not in SECTIONS if isinstance(v, (dict, list)) else k not in TOP_LEVEL_KEYS)],
+        "notes": [],
+    }
+    try:
+        rollups = load_rollups(cfg)
+    except ConfigError as exc:
+        out["notes"].append(f"rollups: invalid: {exc}")
+    else:
+        if not any(m == "automatic" for m in rollups.modes.values()) and not any(
+                r.tag for r in rollups.rules) and not rollups.backup_stores and not rollups.database_stores:
+            out["notes"].append(
+                "rollups: nothing rolls up: every type is manual and there are no [[rollups.rule]] or store "
+                "tables, so only .filecat-<tag> marker files fold anything. `filecat rollups suggest` lists "
+                "what the built-in rules would fold; set a type to \"automatic\" in [rollups] to fold it, then "
+                "rescan (or filecat rollups migrate)")
+    return out
+
+
+def cmd_suggest(args: Any, path: Path | None, cfg: dict[str, Any]) -> int:
+    if path is None:
+        print(f"no config file (searched ./{FILE_NAME}, {user_path()}); write one with: filecat config init")
+        return 1
+    found = suggestions(path.read_text(encoding="utf-8"), cfg)
+    template = sections(backend=cfg.get("backend") or "sqlite")
+    print(f"config file: {path}")
+    if found["missing"]:
+        print("\nmissing sections, as `filecat config init` writes them (paste where the order below puts them):")
+        for name in found["missing"]:
+            print(f"\n  # --- [{name}] ---")
+            for line in template[name]:
+                print(f"  {line}")
+    if found["entries"]:
+        print("\nentries not set (the default applies):")
+        for name, key, default in found["entries"]:
+            print(f"  [{name}] {key}: {default}")
+    if found["order"]:
+        print("\nsections out of order (cosmetic; filecat reads them in any order):")
+        print("  yours:   " + ", ".join(f"[{n}]" if n else "(top level)" for n in found["order"]))
+        print("  init's:  " + ", ".join(f"[{n}]" if n else "(top level)"
+                                         for n in sorted(found["order"], key=SECTIONS.index)))
+    if found["unknown"]:
+        print("\nnot read by filecat (a typo?): " + ", ".join(found["unknown"]))
+    for note in found["notes"]:
+        print(f"\n{note}")
+    if not any(found[k] for k in ("missing", "entries", "order", "unknown", "notes")):
+        print("nothing to suggest: every section is there, in order")
     return 0
 
 
@@ -852,6 +1007,8 @@ def run(args: Any) -> int:
             return cmd_init(args)
         if args.action == "show":
             return cmd_show(args, path, cfg)
+        if args.action == "suggest":
+            return cmd_suggest(args, path, cfg)
         return cmd_test(args, cfg, verify=args.action == "verify")
     except ConfigError as exc:
         print(f"filecat config: {exc}", file=sys.stderr)
