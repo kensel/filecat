@@ -1769,7 +1769,7 @@ async function viewSearch(params) {
         h("td", {class: "num"},
           h("button", {title: s.pinned ? "remove from the chips above" : "show as a chip above", onclick: () => savedCall("/api/searches/save", {id: s.id, pinned: !s.pinned})}, s.pinned ? "Unpin" : "Pin"), " ",
           h("button", {onclick: () => { const n = prompt("New name:", s.name); if (n && n.trim()) savedCall("/api/searches/save", {id: s.id, name: n.trim()}); }}, "Rename"), " ",
-          h("button", {onclick: () => { if (confirm(`Delete the saved search "${s.name}"?`)) savedCall("/api/searches/delete", {id: s.id}); }}, "Delete")))))
+          h("button", {onclick: () => { if (confirm(`Delete the saved search "${s.name}"?`)) savedCall("/api/searches/delete", {id: s.id}); }}, "Delete"))))))
         : h("div", {class: "muted"}, "None yet: run a search and press Save."));
     fill(saved, pinned.length ? h("div", {class: "toolbar"}, pinned.map(savedChip)) : null, list);
   }
