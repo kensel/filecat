@@ -121,7 +121,7 @@ connections on each agent. Labels and counters only: no path is ever in the log 
 
 ```sh
 /usr/local/filecat-agent/filecat-agent
-# filecat-agent 0.2.3 listening on 0.0.0.0:9876
+# filecat-agent 0.2.4 listening on 0.0.0.0:9876
 # cert_sha256 a436cafae7aa...
 # generated a new certificate: /usr/local/filecat-agent/filecat-agent.crt; paste cert_sha256 into filecat.toml
 # allowed_roots (default) /volume*:/proc:...
