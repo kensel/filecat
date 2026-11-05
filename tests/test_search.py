@@ -54,9 +54,13 @@ def names(result):
     return sorted(r["rel_path"] for r in result["rows"])
 
 
-def run(backend, text="", roots=None, **params):
+def run(backend, text="", roots=None, scope=False, **params):
+    """scope: with no root:/host: term, search only `roots` rather than every root (a shared
+    server database holds other tests' records too)."""
     spec = search.with_params(search.parse_query(text), params)
     resolved = search.resolve_roots(spec, roots if roots is not None else backend.roots())
+    if resolved is None and scope:
+        resolved = list(roots)
     q = search.to_query(spec, resolved, **{k: v for k, v in params.items()
                                             if k in ("sort", "desc", "offset", "limit")})
     return backend.search_names(q) if resolved != [] else {"rows": [], "more": False}
@@ -210,7 +214,7 @@ def be(backend_name, fixture_dir):
 
 def find(be, text="", **params):
     """The search over the three test roots (a server database may hold others)."""
-    return run(be, text, roots=params.pop("roots", [NAS, OLD, LOCAL]), **params)
+    return run(be, text, roots=params.pop("roots", [NAS, OLD, LOCAL]), scope=True, **params)
 
 
 def test_substring_and_case(be):
