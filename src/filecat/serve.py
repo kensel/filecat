@@ -852,6 +852,7 @@ RUN_PATH = re.compile(r"^/api/jobs/([A-Za-z0-9._@-]{1,128})/run$")      # POST o
 CONTROL_HEADER = "X-Filecat-Control"
 LOOPBACK_HOSTS = ("127.0.0.1", "localhost", "::1", "[::1]")
 MAX_BODY = 64 * 1024
+DRAIN_MAX = 1024 * 1024         # an oversized body up to this is read and dropped before the 400
 
 
 def make_handler(catalog: Catalog, page: bytes) -> type[BaseHTTPRequestHandler]:
@@ -944,10 +945,9 @@ def make_handler(catalog: Catalog, page: bytes) -> type[BaseHTTPRequestHandler]:
         def _body(self) -> dict[str, Any] | None:
             """The JSON object body (empty = {}); sends the 400 and returns None when it is not one."""
             try:
-                length = int(self.headers.get("Content-Length") or 0)
-                if not 0 <= length <= MAX_BODY:
+                if self._raw is None:
                     raise ValueError("body too large")
-                body = json.loads(self.rfile.read(length)) if length else {}
+                body = json.loads(self._raw) if self._raw else {}
                 if not isinstance(body, dict):
                     raise ValueError("body must be a JSON object")
                 return body
@@ -1034,7 +1034,24 @@ def make_handler(catalog: Catalog, page: bytes) -> type[BaseHTTPRequestHandler]:
                 return self._json(HTTPStatus.INTERNAL_SERVER_ERROR, {"error": f"{type(exc).__name__}: {exc}"})
             self._json(status, data)
 
+        def _read_raw(self) -> bytes | None:
+            """The whole request body, read before any answer (None when the length is bad or over
+            MAX_BODY; the connection then closes after the reply). A refusal sent with the body still
+            unread makes the close a reset on Windows, and the client loses the reply."""
+            try:
+                length = int(self.headers.get("Content-Length") or 0)
+            except ValueError:
+                length = -1
+            if not 0 <= length <= MAX_BODY:
+                self.close_connection = True
+                left = min(length, DRAIN_MAX)        # read and drop a modest excess too, for the same reason
+                while left > 0 and (chunk := self.rfile.read(min(left, 65536))):
+                    left -= len(chunk)
+                return None
+            return self.rfile.read(length) if length else b""
+
         def do_POST(self) -> None:
+            self._raw = self._read_raw()
             path = urlsplit(self.path).path
             run = RUN_PATH.match(path)
             if run:
@@ -1054,10 +1071,9 @@ def make_handler(catalog: Catalog, page: bytes) -> type[BaseHTTPRequestHandler]:
             if self.headers.get_content_type() != "application/json":
                 return self._json(HTTPStatus.UNSUPPORTED_MEDIA_TYPE, {"error": "send application/json"})
             try:
-                length = int(self.headers.get("Content-Length") or 0)
-                if not 0 < length <= MAX_BODY:
+                if not self._raw:
                     raise ValueError("body missing or too large")
-                params = json.loads(self.rfile.read(length))
+                params = json.loads(self._raw)
                 if not isinstance(params, dict):
                     raise ValueError("body must be a JSON object")
             except ValueError as exc:

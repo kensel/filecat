@@ -4,7 +4,9 @@ from __future__ import annotations
 import argparse
 import http.client
 import json
+import socket
 import threading
+import time
 from datetime import datetime, time as dtime, timedelta, timezone
 from pathlib import Path
 
@@ -267,6 +269,36 @@ def test_no_password_hash_disables_control_and_plain_serve_shows_jobs_read_only(
         assert "jobs.control.available" in page and "Run now" in page          # the button is disabled with the reason
     finally:
         viewer.stop()
+
+
+def test_a_refused_post_still_reads_its_body_so_the_reply_arrives(fixture_dir):
+    """Refusals (403 no password, 401 no session, 415) used to answer with the body unread; closing
+    the socket then was a reset on Windows and the client got WinError 10053 instead of the reply."""
+    r = Rig(fixture_dir, with_hash=False)
+    try:
+        big = {"root": "x" * (serve.MAX_BODY - 100)}
+        for _ in range(20):
+            status, body, _ = r.request("POST", "/api/roots/scan", big)
+            assert status == 403 and "set-password" in body["error"]
+            assert r.request("POST", "/api/jobs/nightly/run", big)[0] == 403
+        status, body, _ = r.request("POST", "/api/roots/scan", {"root": "x" * serve.MAX_BODY})
+        assert status == 403                    # over the limit: still answered, then closed
+        # deterministic form: the reply has arrived before the client reads it; an unread body made
+        # the server's close a reset, and a reset drops received data the client had not read yet
+        for size in (10, 4000, serve.MAX_BODY + 10):
+            payload = json.dumps({"root": "x" * size}).encode()
+            with socket.create_connection(("127.0.0.1", r.port), timeout=10) as s:
+                s.sendall(b"POST /api/roots/scan HTTP/1.1\r\nHost: 127.0.0.1\r\nContent-Type: application/json\r\n"
+                          b"X-Filecat-Control: run\r\nContent-Length: %d\r\n\r\n" % len(payload))
+                time.sleep(0.2)                 # headers and body apart, as http.client sends them
+                s.sendall(payload)
+                time.sleep(0.3)
+                reply = b""
+                while chunk := s.recv(65536):
+                    reply += chunk
+            assert reply.startswith(b"HTTP/1.0 403") or reply.startswith(b"HTTP/1.1 403"), (size, reply[:80])
+    finally:
+        r.close()
 
 
 def test_login_required_for_view_locks_the_apis_until_login(fixture_dir):

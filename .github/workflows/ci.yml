@@ -190,7 +190,7 @@ jobs:
         with:
           workspaces: agent
           key: arm-${{ matrix.target }}
-      - run: sudo apt-get update && sudo apt-get install -y gcc-arm-linux-gnueabihf gcc-aarch64-linux-gnu qemu-user-static
+      - run: sudo apt-get update && sudo apt-get install -y gcc-arm-linux-gnueabihf gcc-aarch64-linux-gnu qemu-user
       - run: ./build.sh test ${{ matrix.target }}
 
   agent-conformance:

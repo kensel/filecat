@@ -55,7 +55,7 @@ The binaries are fully static (no interpreter, no shared library), which matters
 ARM kernels and libc.
 
 Toolchain for the ARM targets (Debian/Ubuntu, root): `apt-get install gcc-arm-linux-gnueabihf
-gcc-aarch64-linux-gnu qemu-user-static`, `rustup target add armv7-unknown-linux-musleabihf
+gcc-aarch64-linux-gnu qemu-user` (`qemu-user-static` before Ubuntu 26.04), `rustup target add armv7-unknown-linux-musleabihf
 aarch64-unknown-linux-musl`. Why the GNU cross gcc: `ring` compiles a little C (it only needs
 `<string.h>`/`<stdint.h>`-level headers, so the glibc cross headers are fine) and gcc is also the
 link driver; rustc's self-contained musl `crt1.o` and `libc.a` make the result static and

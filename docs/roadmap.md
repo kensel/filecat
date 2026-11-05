@@ -321,7 +321,7 @@ After the v0.2.0 rollups (stages A and B of [rollups.md](rollups.md)):
 - Optional rollup measures: size by extension, age buckets, largest matched
   children (never for private rules).
 
-## v0.2.4: missing roots, TrueNAS, multipath
+## v0.2.4: missing roots, TrueNAS, multipath (done)
 
 - [x] **Every Synology shared folder is a root.** An NFS-only export of a
   top-level folder (`\\nas3\pve`) and a top-level folder no Samba file or export
@@ -343,6 +343,13 @@ After the v0.2.0 rollups (stages A and B of [rollups.md](rollups.md)):
 - [x] **Summaries flake**: a scan that writes nothing no longer stamps a root
   with no `changed_at` with its own start time (whole seconds); it keeps the
   previous scan's end, or `unknown`.
+- [x] **Refused POSTs on Windows**: the viewer read a POST body only after its
+  checks, so a refusal (403, 401, 415) closed the socket with the body unread,
+  which Windows turns into a reset and the client loses the reply (WinError
+  10053, the occasional `test_roots_actions.py` failure). The body is read
+  first now (an oversized one up to 1 MiB is read and dropped).
+- [x] **CI on Ubuntu 26.04**: no `qemu-user-static` there; CI installs
+  `qemu-user` and `build.sh` runs `qemu-ARCH-static` or else `qemu-ARCH`.
 
 ## v0.2.x: to do
 
@@ -381,7 +388,8 @@ After the v0.2.0 rollups (stages A and B of [rollups.md](rollups.md)):
   for nothing. Fix: no stamp newer than the records' last real change (leave
   it unset, or use a stamp no later than the stored summary's), and make the
   test deterministic. The other occasional Windows failures in
-  `test_summaries.py` and `test_roots_actions.py` may share the cause.
+  `test_summaries.py` may share the cause (`test_roots_actions.py`'s was the
+  refused-POST reset, fixed in v0.2.4).
 
 ## v0.2.5: file-name search
 

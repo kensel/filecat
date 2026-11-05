@@ -15,7 +15,7 @@
 # armv7-unknown-linux-musleabihf aarch64-unknown-linux-musl`). ring compiles a little C: x86_64 uses
 # the host gcc; the ARM targets use the Debian/Ubuntu cross compilers (`apt-get install
 # gcc-arm-linux-gnueabihf gcc-aarch64-linux-gnu`), which are also the linker driver (rustc supplies
-# the self-contained musl crt and libc.a, so the result is fully static). `qemu-user-static` runs the
+# the self-contained musl crt and libc.a, so the result is fully static). `qemu-user` (or `qemu-user-static`) runs the
 # ARM tests. Output goes to $CARGO_TARGET_DIR (default agent/target, which is gitignored; on WSL set it to a path
 # on the Linux filesystem, e.g. ~/.cache/filecat-agent-target, which is much faster than /mnt/c).
 # The conformance build goes to $CARGO_TARGET_DIR-conformance (agent/target-conformance, ignored too).
@@ -33,6 +33,10 @@ triple() {
   esac
 }
 
+# qemu-user for one arch: qemu-ARCH-static where installed (qemu-user-static, Ubuntu 24.04 and older),
+# else qemu-ARCH (Ubuntu 26.04 has no qemu-user-static; its qemu-user is static itself).
+qemu() { if command -v "qemu-$1-static" >/dev/null 2>&1; then echo "qemu-$1-static"; else echo "qemu-$1"; fi; }
+
 # Export CC / linker / runner variables for one short target name.
 setup() {
   case "$1" in
@@ -47,11 +51,11 @@ setup() {
       export CARGO_TARGET_ARMV7_UNKNOWN_LINUX_MUSLEABIHF_RUSTFLAGS="${CARGO_TARGET_ARMV7_UNKNOWN_LINUX_MUSLEABIHF_RUSTFLAGS:--C link-arg=-Wl,-z,max-page-size=0x10000}"
       export CC_armv7_unknown_linux_musleabihf="${CC_armv7_unknown_linux_musleabihf:-arm-linux-gnueabihf-gcc}"
       export CARGO_TARGET_ARMV7_UNKNOWN_LINUX_MUSLEABIHF_LINKER="${CARGO_TARGET_ARMV7_UNKNOWN_LINUX_MUSLEABIHF_LINKER:-arm-linux-gnueabihf-gcc}"
-      export CARGO_TARGET_ARMV7_UNKNOWN_LINUX_MUSLEABIHF_RUNNER="${CARGO_TARGET_ARMV7_UNKNOWN_LINUX_MUSLEABIHF_RUNNER:-qemu-arm-static}" ;;
+      export CARGO_TARGET_ARMV7_UNKNOWN_LINUX_MUSLEABIHF_RUNNER="${CARGO_TARGET_ARMV7_UNKNOWN_LINUX_MUSLEABIHF_RUNNER:-$(qemu arm)}" ;;
     aarch64)
       export CC_aarch64_unknown_linux_musl="${CC_aarch64_unknown_linux_musl:-aarch64-linux-gnu-gcc}"
       export CARGO_TARGET_AARCH64_UNKNOWN_LINUX_MUSL_LINKER="${CARGO_TARGET_AARCH64_UNKNOWN_LINUX_MUSL_LINKER:-aarch64-linux-gnu-gcc}"
-      export CARGO_TARGET_AARCH64_UNKNOWN_LINUX_MUSL_RUNNER="${CARGO_TARGET_AARCH64_UNKNOWN_LINUX_MUSL_RUNNER:-qemu-aarch64-static}" ;;
+      export CARGO_TARGET_AARCH64_UNKNOWN_LINUX_MUSL_RUNNER="${CARGO_TARGET_AARCH64_UNKNOWN_LINUX_MUSL_RUNNER:-$(qemu aarch64)}" ;;
   esac
 }
 
