@@ -23,6 +23,7 @@ from .base import Backend, Document, chunks
 
 BATCH_SIZE = 500
 BATCH_SECONDS = 2.0
+INDEX_AT_CONNECT_MAX_ROWS = 200_000   # a bigger table gets its name indexes from `filecat search reindex`
 SCHEMA_VERSION = 2     # 2: files.name_lc (see _migrate)
 log = logging.getLogger(__name__)
 
@@ -241,11 +242,44 @@ class PostgresBackend(Backend):
         the extension; without the privilege it is skipped with a warning."""
         with self.conn.cursor() as cur:
             cur.execute("ALTER TABLE files ADD COLUMN IF NOT EXISTS name_lc TEXT")
-            cur.execute("CREATE INDEX IF NOT EXISTS idx_files_name_lc ON files(name_lc text_pattern_ops)")
             cur.execute("INSERT INTO meta (key, value) VALUES ('schema_version', %s) "
                         "ON CONFLICT (key) DO UPDATE SET value = excluded.value", (str(SCHEMA_VERSION),))
         self.conn.commit()
+        n = self._files_estimate()
+        if n <= INDEX_AT_CONNECT_MAX_ROWS:
+            self._name_indexes()
+        elif not self._has_name_index():
+            log.warning("files.name_lc has no index yet (%s rows): run `filecat search reindex` "
+                        "to fill it and build the index; name searches scan until then", n)
+
+    def _files_estimate(self) -> int:
+        """Rows in files from the planner's statistics (-1: never analyzed, so count a bounded few)."""
+        with self.conn.cursor() as cur:
+            cur.execute("SELECT reltuples::bigint FROM pg_class WHERE oid = to_regclass('files')")
+            n = cur.fetchone()[0]
+            if n < 0:
+                cur.execute("SELECT COUNT(*) FROM (SELECT 1 FROM files LIMIT %s) t", (INDEX_AT_CONNECT_MAX_ROWS + 1,))
+                n = cur.fetchone()[0]
+        self.conn.commit()
+        return n
+
+    def _has_name_index(self) -> bool:
+        with self.conn.cursor() as cur:
+            cur.execute("SELECT 1 FROM pg_indexes WHERE tablename = 'files' AND indexname = 'idx_files_name_lc'")
+            found = cur.fetchone() is not None
+        self.conn.commit()
+        return found
+
+    def _name_indexes(self, say: Callable[[str], None] | None = None) -> None:
+        """The name_lc indexes (idempotent): the btree for prefixes and, where pg_trgm can be
+        had, the trigram index for substrings."""
+        say = say or (lambda text: None)
+        say("building index idx_files_name_lc")
+        with self.conn.cursor() as cur:
+            cur.execute("CREATE INDEX IF NOT EXISTS idx_files_name_lc ON files(name_lc text_pattern_ops)")
+        self.conn.commit()
         try:
+            say("building index idx_files_name_trgm (trigram; slow on a large catalog)")
             with self.conn.cursor() as cur:
                 cur.execute("CREATE EXTENSION IF NOT EXISTS pg_trgm")
                 cur.execute("CREATE INDEX IF NOT EXISTS idx_files_name_trgm "
@@ -265,7 +299,8 @@ class PostgresBackend(Backend):
             self.conn.commit()
         return self._names_ready
 
-    def reindex_names(self, progress: Callable[[int], None] | None = None, batch: int = 5000) -> int:
+    def reindex_names(self, progress: Callable[[int], None] | None = None, batch: int = 5000,
+                      say: Callable[[str], None] | None = None) -> int:
         self.flush()
         done = 0
         while True:
@@ -282,6 +317,7 @@ class PostgresBackend(Backend):
             if progress:
                 progress(done)
         self._names_ready = True
+        self._name_indexes(say)
         return done
 
     def _row(self, doc: Document) -> tuple:

@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import logging
 import time
 from typing import Any, Callable, Iterable, Iterator
 
@@ -227,6 +228,8 @@ ON DUPLICATE KEY UPDATE
 """
 
 
+INDEX_AT_CONNECT_MAX_ROWS = 200_000   # a bigger table gets its name indexes from `filecat search reindex`
+log = logging.getLogger(__name__)
 SCHEMA_VERSION = 2     # 2: files.name_lc (see MysqlBackend._migrate)
 
 
@@ -331,13 +334,33 @@ class MysqlBackend(Backend):
                         "AND table_name = 'files' AND column_name = 'name_lc'")
             if cur.fetchone() is None:
                 cur.execute("ALTER TABLE files ADD COLUMN name_lc VARCHAR(512)")
-            cur.execute("SELECT 1 FROM information_schema.statistics WHERE table_schema = DATABASE() "
-                        "AND table_name = 'files' AND index_name = 'idx_files_name_lc'")
-            if cur.fetchone() is None:
-                cur.execute("CREATE INDEX idx_files_name_lc ON files(name_lc)")
+            cur.execute("SELECT COALESCE(MAX(table_rows), 0) FROM information_schema.tables "
+                        "WHERE table_schema = DATABASE() AND table_name = 'files'")
+            n = int(cur.fetchone()[0])
             cur.execute("INSERT INTO meta (`key`, value) VALUES ('schema_version', %s) "
                         "ON DUPLICATE KEY UPDATE value = VALUES(value)", (str(SCHEMA_VERSION),))
         self.conn.commit()
+        if n <= INDEX_AT_CONNECT_MAX_ROWS:
+            self._name_indexes()
+        elif not self._has_name_index():
+            log.warning("files.name_lc has no index yet (%s rows): run `filecat search reindex` "
+                        "to fill it and build the index; name searches scan until then", n)
+
+    def _has_name_index(self) -> bool:
+        with self.conn.cursor() as cur:
+            cur.execute("SELECT 1 FROM information_schema.statistics WHERE table_schema = DATABASE() "
+                        "AND table_name = 'files' AND index_name = 'idx_files_name_lc'")
+            found = cur.fetchone() is not None
+        self.conn.commit()
+        return found
+
+    def _name_indexes(self, say: Callable[[str], None] | None = None) -> None:
+        if not self._has_name_index():
+            if say:
+                say("building index idx_files_name_lc")
+            with self.conn.cursor() as cur:
+                cur.execute("CREATE INDEX idx_files_name_lc ON files(name_lc)")
+            self.conn.commit()
 
     def _name_lc_ready(self) -> bool:
         """True once every row has a name_lc (cached: a put always fills it)."""
@@ -348,7 +371,8 @@ class MysqlBackend(Backend):
             self.conn.commit()
         return self._names_ready
 
-    def reindex_names(self, progress: Callable[[int], None] | None = None, batch: int = 5000) -> int:
+    def reindex_names(self, progress: Callable[[int], None] | None = None, batch: int = 5000,
+                      say: Callable[[str], None] | None = None) -> int:
         self.flush()
         done = 0
         while True:
@@ -365,6 +389,7 @@ class MysqlBackend(Backend):
             if progress:
                 progress(done)
         self._names_ready = True
+        self._name_indexes(say)
         return done
 
     def _row(self, doc: Document) -> tuple:

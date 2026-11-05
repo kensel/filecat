@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import logging
 import time
 from typing import Any, Callable, Iterable, Iterator
 
@@ -25,6 +26,8 @@ from .base import Backend, Document, chunks
 
 BATCH_SIZE = 500
 BATCH_SECONDS = 2.0
+INDEX_AT_CONNECT_MAX_ROWS = 200_000   # a bigger table gets its name indexes from `filecat search reindex`
+log = logging.getLogger(__name__)
 SCHEMA_VERSION = 2     # 2: files.name_lc (see MssqlBackend._init_schema)
 
 _TABLES = {
@@ -206,7 +209,6 @@ _INDEXES = [
     ("idx_files_kind", "files", "(kind)", False),
     ("idx_files_suffix", "files", "(suffix)", False),
     ("idx_files_mime", "files", "(mime)", False),
-    ("idx_files_name_lc", "files", "(name_lc)", False),
     ("idx_members_role", "members", "(role)", False),
     ("idx_dropped_at", "dropped", "(dropped_at)", False),
     ("idx_treemaps_root", "treemaps", "(root_id)", False),
@@ -299,8 +301,32 @@ class MssqlBackend(Backend):
         cur.execute("MERGE meta AS t USING (SELECT 'schema_version' AS [key]) AS s ON t.[key] = s.[key] "
                     "WHEN MATCHED THEN UPDATE SET value = ? WHEN NOT MATCHED THEN INSERT ([key], value) "
                     "VALUES ('schema_version', ?);", (str(SCHEMA_VERSION), str(SCHEMA_VERSION)))
+        cur.execute("SELECT COALESCE(SUM(rows), 0) FROM sys.partitions "
+                    "WHERE object_id = OBJECT_ID('files') AND index_id IN (0, 1)")
+        n = int(cur.fetchone()[0])
         self.conn.commit()
         self._names_ready = False
+        if n <= INDEX_AT_CONNECT_MAX_ROWS:
+            self._name_indexes()
+        elif not self._has_name_index():
+            log.warning("files.name_lc has no index yet (%s rows): run `filecat search reindex` "
+                        "to fill it and build the index; name searches scan until then", n)
+
+    def _has_name_index(self) -> bool:
+        cur = self.conn.cursor()
+        cur.execute("SELECT 1 FROM sys.indexes WHERE name = 'idx_files_name_lc'")
+        found = cur.fetchone() is not None
+        self.conn.commit()
+        return found
+
+    def _name_indexes(self, say: Callable[[str], None] | None = None) -> None:
+        cur = self.conn.cursor()
+        cur.execute("SELECT 1 FROM sys.indexes WHERE name = 'idx_files_name_lc'")
+        if cur.fetchone() is None:
+            if say:
+                say("building index idx_files_name_lc")
+            cur.execute("CREATE INDEX idx_files_name_lc ON files(name_lc)")
+        self.conn.commit()
 
     def _name_lc_ready(self) -> bool:
         """True once every row has a name_lc (cached: a put always fills it)."""
@@ -311,7 +337,8 @@ class MssqlBackend(Backend):
             self.conn.commit()
         return self._names_ready
 
-    def reindex_names(self, progress: Callable[[int], None] | None = None, batch: int = 5000) -> int:
+    def reindex_names(self, progress: Callable[[int], None] | None = None, batch: int = 5000,
+                      say: Callable[[str], None] | None = None) -> int:
         self.flush()
         done = 0
         while True:
@@ -327,6 +354,7 @@ class MssqlBackend(Backend):
             if progress:
                 progress(done)
         self._names_ready = True
+        self._name_indexes(say)
         return done
 
     def _row(self, doc: Document) -> tuple:

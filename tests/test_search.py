@@ -443,3 +443,29 @@ def test_search_reindex_command(fixture_dir, capsys):
     assert '"filled": 3' in capsys.readouterr().out
     assert search_cmd.run(args) == 0
     assert '"filled": 0' in capsys.readouterr().out
+
+
+def test_a_large_catalog_gets_its_name_index_from_reindex_not_from_connect(fixture_dir, monkeypatch, capsys):
+    from filecat import search_cmd
+    from filecat.backends import sqlite as sq
+    path = str(fixture_dir / "old.sqlite")
+    _old_catalog(path, catalog_docs()[:5])
+    monkeypatch.setattr(sq, "INDEX_AT_CONNECT_MAX_ROWS", 0)         # five rows count as large
+    b = SqliteBackend(path)
+    has = lambda: bool(b.conn.execute("SELECT 1 FROM sqlite_master WHERE name='idx_files_name_lc'").fetchone())
+    assert "name_lc" in {r[1] for r in b.conn.execute("PRAGMA table_info(files)")} and not has()
+    assert names(run(b, "EVE*", roots=[NAS])) == ["a/Eve-Online.exe", "a/eve.txt", "a/everything.EXE"]  # before backfill
+    said = []
+    assert b.reindex_names(say=said.append) == 5
+    assert has() and said == ["building index idx_files_name_lc"]
+    assert names(run(b, "EVE*", roots=[NAS])) == ["a/Eve-Online.exe", "a/eve.txt", "a/everything.EXE"]
+    said.clear()
+    assert b.reindex_names(say=said.append) == 0 and said == []     # idempotent
+    b.close()
+
+    path = str(fixture_dir / "old2.sqlite")
+    _old_catalog(path, catalog_docs()[:5])
+    sq.SqliteBackend(path).close()                                  # connect only: no index
+    args = SimpleNamespace(backend="sqlite", out=path, dsn=None, batch=2, json=False)
+    assert search_cmd.run(args) == 0
+    assert "building index idx_files_name_lc" in capsys.readouterr().err

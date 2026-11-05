@@ -27,6 +27,7 @@ at the requested `--depth` and computes the others with
 from __future__ import annotations
 
 import json
+import logging
 import sqlite3
 import time
 from datetime import datetime, timezone
@@ -38,6 +39,8 @@ from .base import Backend, Document, chunks, dropped_now
 
 BATCH_SIZE = 500
 BATCH_SECONDS = 2.0
+INDEX_AT_CONNECT_MAX_ROWS = 1 << 62   # sqlite is local: always (tests lower it)
+log = logging.getLogger(__name__)
 SCHEMA_VERSION = 2     # 2: files.name_lc (see _migrate)
 
 _SCHEMA = """
@@ -192,6 +195,9 @@ CREATE INDEX IF NOT EXISTS idx_set_members_role ON set_members(role);
 CREATE INDEX IF NOT EXISTS idx_set_members_path ON set_members(path);
 """
 
+# position of `document` in a _row_for() tuple (and so in _UPSERT_SQL's columns); the pending
+# rows in _buffer are read back through it, so keep it in step when a column is added
+_DOC_COL = 11
 _UPSERT_SQL = """
 INSERT INTO files (root_id, root, rel_path, name, size, mtime_ns, kind,
                     suffix, mime, sha256, sha256_partial, document, name_lc)
@@ -243,9 +249,25 @@ class SqliteBackend(Backend):
         predicate until no row lacks one."""
         if "name_lc" not in {r[1] for r in self.conn.execute("PRAGMA table_info(files)")}:
             self.conn.execute("ALTER TABLE files ADD COLUMN name_lc TEXT COLLATE NOCASE")
-        self.conn.execute("CREATE INDEX IF NOT EXISTS idx_files_name_lc ON files(name_lc)")
+        n = self.conn.execute("SELECT COALESCE(MAX(id), 0) FROM files").fetchone()[0]
+        if n <= INDEX_AT_CONNECT_MAX_ROWS:
+            self._name_indexes()
+        elif not self._has_name_index():
+            log.warning("files.name_lc has no index yet (%s rows): run `filecat search reindex` "
+                        "to fill it and build the index; name searches scan until then", n)
         self.conn.execute("INSERT OR REPLACE INTO meta(key, value) VALUES ('schema_version', ?)",
                           (str(SCHEMA_VERSION),))
+
+    def _has_name_index(self) -> bool:
+        return self.conn.execute("SELECT 1 FROM sqlite_master WHERE name = 'idx_files_name_lc'").fetchone() is not None
+
+    def _name_indexes(self, say: Callable[[str], None] | None = None) -> None:
+        if self._has_name_index():
+            return
+        if say:
+            say("building index idx_files_name_lc")
+        self.conn.execute("CREATE INDEX IF NOT EXISTS idx_files_name_lc ON files(name_lc)")
+        self.conn.commit()
 
     def _name_lc_ready(self) -> bool:
         """True once every row has a name_lc (cached: a put always fills it)."""
@@ -254,7 +276,8 @@ class SqliteBackend(Backend):
                 "SELECT 1 FROM files WHERE name_lc IS NULL LIMIT 1").fetchone() is None
         return self._names_ready
 
-    def reindex_names(self, progress: Callable[[int], None] | None = None, batch: int = 5000) -> int:
+    def reindex_names(self, progress: Callable[[int], None] | None = None, batch: int = 5000,
+                      say: Callable[[str], None] | None = None) -> int:
         self._flush_buffer()
         done = 0
         while True:
@@ -269,6 +292,7 @@ class SqliteBackend(Backend):
             if progress:
                 progress(done)
         self._names_ready = True
+        self._name_indexes(say)
         return done
 
     # --- documents -------------------------------------------------
@@ -304,7 +328,7 @@ class SqliteBackend(Backend):
         key = (root_id(root), rel_path)
         pending = self._buffer.get(key)
         if pending is not None:
-            return json.loads(pending[11])
+            return json.loads(pending[_DOC_COL])
         cur = self.conn.execute(
             "SELECT document FROM files WHERE root_id=? AND rel_path=?", key,
         )
@@ -322,7 +346,7 @@ class SqliteBackend(Backend):
         for p in rel_paths:     # buffered upserts, keyed like the table
             pending = self._buffer.get((rid, p))
             if pending is not None:
-                out[p] = json.loads(pending[11])
+                out[p] = json.loads(pending[_DOC_COL])
         return out
 
     def list(self, kind: str | None = None, root: str | None = None) -> Iterator[Document]:

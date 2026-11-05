@@ -115,10 +115,12 @@ class Backend(ABC):
         from ..browse import query_documents
         return query_documents(self.list(kind=q.get("kind"), root=q.get("root")), q)
 
-    def reindex_names(self, progress: Callable[[int], None] | None = None, batch: int = 5000) -> int:
+    def reindex_names(self, progress: Callable[[int], None] | None = None, batch: int = 5000,
+                      say: Callable[[str], None] | None = None) -> int:
         """Fill `name_lc` (the lower-cased name that name searches match on) for records stored
         before it existed, `batch` rows at a time; returns the rows filled. Safe to stop and
-        run again. Backends without the column have nothing to do."""
+        run again. Afterwards it builds the name indexes connect left out on a large catalog,
+        calling say(text) before each build. Backends without the column have nothing to do."""
         return 0
 
     def search_names(self, q: dict[str, Any]) -> dict[str, Any]:
