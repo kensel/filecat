@@ -302,18 +302,22 @@ class PostgresBackend(Backend):
     def reindex_names(self, progress: Callable[[int], None] | None = None, batch: int = 5000,
                       say: Callable[[str], None] | None = None) -> int:
         self.flush()
-        done = 0
+        # walk the table by id once: re-asking for 'name_lc IS NULL' rescans the filled rows
+        # on every batch when that column has no index yet (quadratic on a large catalog)
+        done, last = 0, -1
         while True:
             with self.conn.cursor() as cur:
-                cur.execute("SELECT id, name FROM files WHERE name_lc IS NULL LIMIT %s", (batch,))
+                cur.execute("SELECT id, name, name_lc FROM files WHERE id > %s ORDER BY id LIMIT %s",
+                            (last, batch))
                 rows = cur.fetchall()
-                if rows:
-                    cur.executemany("UPDATE files SET name_lc = %s WHERE id = %s",
-                                    [(name_lc(n), i) for i, n in rows])
+                todo = [(name_lc(n), i) for i, n, lc in rows if lc is None]
+                if todo:
+                    cur.executemany("UPDATE files SET name_lc = %s WHERE id = %s", todo)
             self.conn.commit()
             if not rows:
                 break
-            done += len(rows)
+            last = rows[-1][0]
+            done += len(todo)
             if progress:
                 progress(done)
         self._names_ready = True

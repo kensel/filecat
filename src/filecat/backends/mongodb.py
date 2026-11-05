@@ -261,14 +261,20 @@ class MongoBackend(Backend):
     def reindex_names(self, progress: Callable[[int], None] | None = None, batch: int = 5000,
                       say: Callable[[str], None] | None = None) -> int:
         self.flush()
-        done = 0
+        # walk the table by _id once: re-asking for 'name_lc IS NULL' rescans the filled rows
+        # on every batch when that column has no index yet (quadratic on a large catalog)
+        done, last = 0, None
         while True:
-            rows = list(self.files.find({"name_lc": None}, {"name": 1}).limit(batch))
+            query = {} if last is None else {"_id": {"$gt": last}}
+            rows = list(self.files.find(query, {"name": 1, "name_lc": 1}).sort("_id", 1).limit(batch))
             if not rows:
                 break
-            self.files.bulk_write([self._pymongo.UpdateOne({"_id": r["_id"]}, {"$set": {
-                "name_lc": name_lc(r.get("name"))}}) for r in rows], ordered=False)
-            done += len(rows)
+            last = rows[-1]["_id"]
+            todo = [self._pymongo.UpdateOne({"_id": r["_id"]}, {"$set": {"name_lc": name_lc(r.get("name"))}})
+                    for r in rows if r.get("name_lc") is None]
+            if todo:
+                self.files.bulk_write(todo, ordered=False)
+                done += len(todo)
             if progress:
                 progress(done)
         self._names_ready = True

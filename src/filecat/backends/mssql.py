@@ -340,17 +340,21 @@ class MssqlBackend(Backend):
     def reindex_names(self, progress: Callable[[int], None] | None = None, batch: int = 5000,
                       say: Callable[[str], None] | None = None) -> int:
         self.flush()
-        done = 0
+        # walk the table by id once: re-asking for 'name_lc IS NULL' rescans the filled rows
+        # on every batch when that column has no index yet (quadratic on a large catalog)
+        done, last = 0, -1
         while True:
             cur = self.conn.cursor()
-            cur.execute(f"SELECT TOP {int(batch)} id, name FROM files WHERE name_lc IS NULL")
+            cur.execute(f"SELECT TOP {int(batch)} id, name, name_lc FROM files WHERE id > ? ORDER BY id", last)
             rows = cur.fetchall()
-            if rows:
-                cur.executemany("UPDATE files SET name_lc = ? WHERE id = ?", [(name_lc(n), i) for i, n in rows])
+            todo = [(name_lc(n), i) for i, n, lc in rows if lc is None]
+            if todo:
+                cur.executemany("UPDATE files SET name_lc = ? WHERE id = ?", todo)
             self.conn.commit()
             if not rows:
                 break
-            done += len(rows)
+            last = rows[-1][0]
+            done += len(todo)
             if progress:
                 progress(done)
         self._names_ready = True
