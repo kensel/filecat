@@ -41,6 +41,7 @@ from datetime import datetime, timezone
 from typing import Any
 
 KEYS = ("ext", "size", "after", "before", "kind", "root", "host")
+SEARCH_FIELDS = ("q", "root", "host", "ext", "min_size", "max_size", "after", "before", "kind")   # the form's
 ESCAPE = "!"                    # the LIKE escape character
 DEFAULT_LIMIT = 100
 MAX_LIMIT = 1000

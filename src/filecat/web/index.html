@@ -117,6 +117,11 @@ button.danger { color: var(--warn); }
 .search-form .q input { flex: 1; min-width: 0; font-size: 15px; padding: 7px 10px; }
 .search-form .adv { display: flex; flex-wrap: wrap; gap: 8px 14px; align-items: center; }
 .search-form .adv label { display: inline-flex; gap: 5px; align-items: center; color: var(--muted); font-size: 12.5px; }
+.saved { display: flex; flex-direction: column; gap: 6px; }
+.saved .toolbar { margin-bottom: 0; }
+.saved-list summary { cursor: pointer; color: var(--muted); font-size: 12.5px; }
+.saved-list table { margin-top: 6px; }
+.pager .export { margin-left: auto; font-size: 12.5px; }
 .search-help code { background: var(--hover); border-radius: 4px; padding: 1px 5px; cursor: pointer; }
 .search-help ul { margin: 6px 0 0; padding-left: 18px; line-height: 1.8; }
 .swatch { display: inline-block; width: 12px; height: 12px; border-radius: 3px; vertical-align: -1px; margin-right: 6px; }
@@ -1707,6 +1712,11 @@ const SEARCH_EXAMPLES = [
   ["backup*.zip host:nas-main", "only the roots on that host (wildcards allowed; host:- is the local disk)"],
   ["kind:dir cache root:homes", "folders only (kind:file, kind:rollup, or a type like image); roots whose path contains the text"],
 ];
+function exportParams(p, format) {
+  const out = {format};
+  for (const f of [...SEARCH_FIELDS, "sort", "desc"]) if (p[f]) out[f] = p[f];
+  return out;
+}
 const SEARCH_FIELDS = ["q", "root", "host", "ext", "min_size", "max_size", "after", "before", "kind"];
 async function viewSearch(params) {
   const p = {...params};
@@ -1718,26 +1728,58 @@ async function viewSearch(params) {
   if (p.root && !INFO.roots.includes(p.root)) roots.append(h("option", {value: p.root, selected: true}, p.root));
   const kind = h("select", {name: "kind"}, [["", "files and folders"], ["file", "files only"], ["dir", "folders only"], ["rollup", "rollups only"]]
     .map(([v, t]) => h("option", {value: v, selected: (p.kind || "") === v}, t)));
-  const form = h("form", {class: "search-form", onsubmit: e => {
-      e.preventDefault();
-      const next = {};
-      for (const f of SEARCH_FIELDS) { const v = (form.elements[f] || {}).value; if (v && v.trim()) next[f] = v.trim(); }
-      if (p.sort) { next.sort = p.sort; if (p.desc) next.desc = p.desc; }
-      go("search", next);
-    }},
-    h("div", {class: "q"}, q, h("button", {type: "submit"}, "Search")),
+  const formParams = () => {
+    const next = {};
+    for (const f of SEARCH_FIELDS) { const v = (form.elements[f] || {}).value; if (v && v.trim()) next[f] = v.trim(); }
+    if (p.sort) { next.sort = p.sort; if (p.desc) next.desc = p.desc; }
+    return next;
+  };
+  const saved = h("section", {class: "saved"});
+  const form = h("form", {class: "search-form", onsubmit: e => { e.preventDefault(); go("search", formParams()); }},
+    h("div", {class: "q"}, q, h("button", {type: "submit"}, "Search"),
+      h("button", {type: "button", title: "keep this search for everyone who uses this viewer", onclick: async () => {
+        const params = formParams();
+        if (!SEARCH_FIELDS.some(f => params[f])) return alert("Type a search first.");
+        const name = prompt("Name for this saved search:", (params.q || "").slice(0, 60));
+        if (name == null || !name.trim()) return;
+        await savedCall("/api/searches/save", {name: name.trim(), params});
+      }}, "Save")),
     h("div", {class: "adv"},
       h("label", {}, "root ", roots), h("label", {}, "host ", input("host", {size: 12, placeholder: "nas-main"})),
       h("label", {}, "extension ", input("ext", {size: 10, placeholder: "exe;dll"})),
       h("label", {}, "size ", input("min_size", {size: 7, placeholder: "min 1mb"}), " – ", input("max_size", {size: 7, placeholder: "max 1gb"})),
       h("label", {}, "modified ", input("after", {type: "date"}), " – ", input("before", {type: "date"})),
       h("label", {}, "show ", kind)));
+  // saved searches: one server-side list shared by every browser (GET /api/searches)
+  let savedList = [];
+  const savedChip = s => h("span", {class: "chip"}, h("a", {href: route("search", s.params), title: s.name + ": " + (s.params.q || "")}, s.name));
+  async function savedCall(path, body) {
+    try { await post(path, body); } catch (e) {
+      return fill(saved, e.login ? loginForm(() => { loadSaved(); }) : h("div", {class: "error"}, e.message));
+    }
+    await loadSaved();
+  }
+  async function loadSaved() {
+    try { savedList = (await api("/api/searches")).searches; }
+    catch (e) { return fill(saved, e.login ? null : h("div", {class: "muted"}, "Saved searches unavailable: " + e.message)); }
+    const pinned = savedList.filter(s => s.pinned);
+    const list = h("details", {class: "saved-list"}, h("summary", {}, `Saved searches (${savedList.length})`),
+      savedList.length ? h("table", {}, h("tbody", {}, savedList.map(s => h("tr", {},
+        h("td", {}, h("a", {href: route("search", s.params)}, s.name), " ", h("span", {class: "muted"}, s.params.q || "")),
+        h("td", {class: "num"},
+          h("button", {title: s.pinned ? "remove from the chips above" : "show as a chip above", onclick: () => savedCall("/api/searches/save", {id: s.id, pinned: !s.pinned})}, s.pinned ? "Unpin" : "Pin"), " ",
+          h("button", {onclick: () => { const n = prompt("New name:", s.name); if (n && n.trim()) savedCall("/api/searches/save", {id: s.id, name: n.trim()}); }}, "Rename"), " ",
+          h("button", {onclick: () => { if (confirm(`Delete the saved search "${s.name}"?`)) savedCall("/api/searches/delete", {id: s.id}); }}, "Delete")))))
+        : h("div", {class: "muted"}, "None yet: run a search and press Save."));
+    fill(saved, pinned.length ? h("div", {class: "toolbar"}, pinned.map(savedChip)) : null, list);
+  }
   const holder = h("section", {class: "card"});
   const help = h("section", {class: "card search-help"}, h("h2", {}, "Search the names of every root"),
     h("div", {class: "note"}, "Case-insensitive, against the file or folder name only. All terms must match. "
       + "A folder that was rolled up ([CACHE], [BACKUP], [REDACTED]) is found by its own name; what is inside it is not listed anywhere."),
     h("ul", {}, SEARCH_EXAMPLES.map(([ex, why]) => h("li", {}, h("code", {title: "use this", onclick: () => { q.value = ex; q.focus(); }}, ex), " ", h("span", {class: "muted"}, why)))));
-  show(h("div", {class: "stack"}, form, holder));
+  show(h("div", {class: "stack"}, form, saved, holder));
+  loadSaved();
   if (!SEARCH_FIELDS.some(f => p[f])) return fill(holder, help);
   fill(holder, h("div", {class: "loading"}, "Searching…"));
   let r;
@@ -1764,7 +1806,9 @@ async function viewSearch(params) {
     : `No matching names · ${Math.round(r.elapsed_ms)} ms`);
   const pager = h("div", {class: "pager"},
     h("button", {disabled: r.offset <= 0, onclick: () => go("search", {...p, offset: Math.max(0, r.offset - r.limit)})}, "‹ Prev"),
-    h("button", {disabled: !r.more, onclick: () => go("search", {...p, offset: r.offset + r.limit})}, "Next ›"), status);
+    h("button", {disabled: !r.more, onclick: () => go("search", {...p, offset: r.offset + r.limit})}, "Next ›"), status,
+    h("span", {class: "export", title: "every match, not only this page"}, "Export: ",
+      ["csv", "jsonl"].map(f => h("a", {href: "/api/search/export?" + new URLSearchParams(exportParams(p, f)), download: ""}, f.toUpperCase())).flatMap((a, i) => i ? [" · ", a] : [a])));
   fill(holder, r.rows.length ? h("div", {class: "scroll"}, h("table", {},
     h("thead", {}, h("tr", {}, sortTh("name", "name"), sortTh("rel_path", "folder"), h("th", {class: "hide-sm"}, "root"),
       sortTh("size", "size", true), sortTh("mtime_ns", "modified", true), sortTh("kind", "kind"))),
