@@ -7,7 +7,7 @@ from __future__ import annotations
 
 from abc import ABC, abstractmethod
 from datetime import datetime, timezone
-from typing import Any, Iterable, Iterator
+from typing import Any, Callable, Iterable, Iterator
 
 from ..record import is_file_kind
 
@@ -114,6 +114,14 @@ class Backend(ABC):
         """
         from ..browse import query_documents
         return query_documents(self.list(kind=q.get("kind"), root=q.get("root")), q)
+
+    def reindex_names(self, progress: Callable[[int], None] | None = None, batch: int = 5000,
+                      say: Callable[[str], None] | None = None) -> int:
+        """Fill `name_lc` (the lower-cased name that name searches match on) for records stored
+        before it existed, `batch` rows at a time; returns the rows filled. Safe to stop and
+        run again. Afterwards it builds the name indexes connect left out on a large catalog,
+        calling say(text) before each build. Backends without the column have nothing to do."""
+        return 0
 
     def search_names(self, q: dict[str, Any]) -> dict[str, Any]:
         """File-name search for the viewer: records whose *name* matches (filecat.search).

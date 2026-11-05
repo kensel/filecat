@@ -321,3 +321,151 @@ def test_api_needs_a_criterion_and_rejects_bad_values(catalog):
         with pytest.raises(ValueError):
             catalog.search(params)
     assert catalog.search({"q": "x", "root": "nope"})["rows"] == []
+
+
+# --- the name_lc column and index ----------------------------------------------------------
+def test_sql_name_terms_match_the_lower_cased_column():
+    from filecat.browse import MSSQL, MYSQL, POSTGRES, SQLITE, sql_where
+    for d in (SQLITE, POSTGRES, MYSQL, MSSQL):
+        where, params = sql_where({"names": ["EVE*.exe", "Setup"]}, d, None, name_lc=True)
+        assert where.count(f"name_lc LIKE {d.ph} ESCAPE '!'") == 2 and "lower" not in where.lower()
+        # a literal prefix and no leading wildcard: an index range; plain text stays `%x%`
+        assert params == ["eve%.exe", "%setup%"]
+    assert sql_where({"names": ["[x]*"]}, MSSQL, None, name_lc=True)[1] == ["![x]%"]
+    assert sql_where({"names": ["100%"]}, SQLITE, None, name_lc=True)[1] == ["%100!%%"]
+    # until every row has name_lc: the old predicate on `name`
+    assert "name_lc" not in sql_where({"names": ["eve*"]}, SQLITE, None)[0]
+    assert "lower(name)" in sql_where({"names": ["eve*"]}, MYSQL, None)[0].lower()
+
+
+def test_mongo_name_terms_are_anchored_case_sensitive_regexes_on_name_lc():
+    from filecat.backends.mongodb import MongoBackend
+    q = {"names": ["EVE*.exe", "Setup"], "depth": 2}
+    assert MongoBackend._browse_filter(q, True) == {"$and": [
+        {"name_lc": {"$regex": r"^eve.*\.exe$", "$options": "s"}},
+        {"name_lc": {"$regex": "setup", "$options": "s"}}]}
+    assert MongoBackend._browse_filter(q)["$and"][0] == {"name": {"$regex": r"^EVE.*\.exe$", "$options": "is"}}
+
+
+def test_reindex_names_is_a_no_op_on_a_filled_catalog_and_searches_stay_right(be):
+    assert be.reindex_names() == 0
+    assert names(find(be, "EVE*.EXE")) == ["a/Eve-Online.exe", "a/evening.exe", "a/everything.EXE",
+                                            "eve.local.exe", "x/eve-old.exe"]
+    assert names(find(be, "*SETUP*", kind="file")) == ["a/Setup_100%.msi", "a/setup[1].msi"]
+    assert names(find(be, "100%")) == ["a/Setup_100%.msi"]
+
+
+def test_sqlite_fills_name_lc_on_put(fixture_dir):
+    b = SqliteBackend(str(fixture_dir / "c.sqlite"))
+    b.put(doc(NAS, "a/Eve-Online.EXE"))
+    b.put({k: v for k, v in doc(NAS, "a/x") .items() if k != "name"})      # no name at all
+    b.put(doc(NAS, "a/\u00c4rger.txt"))
+    b.flush()
+    got = dict(b.conn.execute("SELECT rel_path, name_lc FROM files"))
+    assert got == {"a/Eve-Online.EXE": "eve-online.exe", "a/x": "", "a/\u00c4rger.txt": "\u00e4rger.txt"}
+    b.put(doc(NAS, "a/Eve-Online.EXE", 99))                                 # an update refreshes it
+    assert b.search_names(search.to_query(search.parse_query("EVE-"), None))["rows"][0]["size"] == 99
+    b.close()
+
+
+def _old_catalog(path, rows):
+    """A catalog as filecat 0.2.4 left it: no name_lc column, schema_version 1."""
+    import json
+    import sqlite3
+    from filecat.backends import sqlite as sq
+    conn = sqlite3.connect(path)
+    conn.executescript(sq._SCHEMA.replace("    name_lc TEXT COLLATE NOCASE,\n", "")
+                       .replace("    name_lc TEXT COLLATE NOCASE,\r\n", ""))
+    conn.execute("INSERT INTO meta(key, value) VALUES ('schema_version', '1')")
+    for d in rows:
+        conn.execute("INSERT INTO files (root_id, root, rel_path, name, size, mtime_ns, kind, suffix, document) "
+                     "VALUES (?,?,?,?,?,?,?,?,?)", (d["root_id"], d["root"], d["rel_path"], d["name"], d["size"],
+                                                    d["mtime_ns"], d["kind"], d["suffix"], json.dumps(d)))
+    assert "name_lc" not in {r[1] for r in conn.execute("PRAGMA table_info(files)")}
+    conn.commit()
+    conn.close()
+
+
+def test_sqlite_adds_name_lc_to_an_old_catalog_and_reindex_fills_it(fixture_dir):
+    path = str(fixture_dir / "old.sqlite")
+    _old_catalog(path, catalog_docs()[:-1])
+    b = SqliteBackend(path)
+    cols = {r[1] for r in b.conn.execute("PRAGMA table_info(files)")}
+    assert "name_lc" in cols
+    assert b.conn.execute("SELECT value FROM meta WHERE key='schema_version'").fetchone()[0] == "2"
+    assert b.conn.execute("SELECT 1 FROM sqlite_master WHERE name='idx_files_name_lc'").fetchone()
+    assert b.conn.execute("SELECT COUNT(*) FROM files WHERE name_lc IS NULL").fetchone()[0] == 13
+
+    everything = [NAS, OLD, LOCAL]
+    want = ["a/Eve-Online.exe", "a/evening.exe", "a/everything.EXE", "x/eve-old.exe"]
+    assert names(run(b, "EVE*.exe", roots=everything)) == want      # the old predicate, still right
+    assert names(run(b, "100%", roots=everything)) == ["a/Setup_100%.msi"]
+    assert not b._name_lc_ready()
+
+    b.put(doc(LOCAL, "eve.local.exe", 300, kind="executable"))      # a new row has it, an old one not yet
+    b.flush()
+    assert b.conn.execute("SELECT COUNT(*) FROM files WHERE name_lc IS NULL").fetchone()[0] == 13
+    assert names(run(b, "EVE*.exe", roots=everything)) == sorted(want + ["eve.local.exe"])
+
+    seen = []
+    assert b.reindex_names(seen.append, batch=5) == 13
+    assert seen == [5, 10, 13]
+    assert b.conn.execute("SELECT COUNT(*) FROM files WHERE name_lc IS NULL").fetchone()[0] == 0
+    assert dict(b.conn.execute("SELECT rel_path, name_lc FROM files"))["a/Eve-Online.exe"] == "eve-online.exe"
+    assert b._name_lc_ready()
+    assert names(run(b, "EVE*.exe", roots=everything)) == sorted(want + ["eve.local.exe"])
+    assert names(run(b, "setup[1]*", roots=everything)) == ["a/setup[1].msi"]
+    assert b.reindex_names() == 0                                   # nothing left: safe to run again
+    b.close()
+
+    again = SqliteBackend(path)                                     # reopening a version 2 catalog
+    assert again._name_lc_ready() and names(run(again, "my file", roots=everything)) == ["a/my file.doc"]
+    again.close()
+
+
+def test_sqlite_prefix_search_uses_the_name_lc_index(fixture_dir):
+    from filecat.browse import SQLITE, sql_where
+    b = SqliteBackend(str(fixture_dir / "c.sqlite"))
+    for q, indexed in (({"names": ["eve*.exe"]}, True), ({"names": ["EVE*"]}, True),
+                       ({"names": ["a!b*"]}, True), ({"names": ["setup"]}, False)):
+        where, params = sql_where(q, SQLITE, None, name_lc=True)
+        plan = " ".join(r[3] for r in b.conn.execute(f"EXPLAIN QUERY PLAN SELECT document FROM files{where}", params))
+        assert ("idx_files_name_lc" in plan) is indexed, plan
+    b.close()
+
+
+def test_search_reindex_command(fixture_dir, capsys):
+    from filecat import search_cmd
+    path = str(fixture_dir / "old.sqlite")
+    _old_catalog(path, catalog_docs()[:3])
+    args = SimpleNamespace(backend="sqlite", out=path, dsn=None, batch=2, json=True)
+    assert search_cmd.run(args) == 0
+    assert '"filled": 3' in capsys.readouterr().out
+    assert search_cmd.run(args) == 0
+    assert '"filled": 0' in capsys.readouterr().out
+
+
+def test_a_large_catalog_gets_its_name_index_from_reindex_not_from_connect(fixture_dir, monkeypatch, capsys):
+    from filecat import search_cmd
+    from filecat.backends import sqlite as sq
+    path = str(fixture_dir / "old.sqlite")
+    _old_catalog(path, catalog_docs()[:5])
+    monkeypatch.setattr(sq, "INDEX_AT_CONNECT_MAX_ROWS", 0)         # five rows count as large
+    b = SqliteBackend(path)
+    has = lambda: bool(b.conn.execute("SELECT 1 FROM sqlite_master WHERE name='idx_files_name_lc'").fetchone())
+    assert "name_lc" in {r[1] for r in b.conn.execute("PRAGMA table_info(files)")} and not has()
+    assert names(run(b, "EVE*", roots=[NAS])) == ["a/Eve-Online.exe", "a/eve.txt", "a/everything.EXE"]  # before backfill
+    said = []
+    assert b.reindex_names(say=said.append) == 5
+    assert has() and said == ["building index idx_files_name_lc"]
+    assert names(run(b, "EVE*", roots=[NAS])) == ["a/Eve-Online.exe", "a/eve.txt", "a/everything.EXE"]
+    said.clear()
+    assert b.reindex_names(say=said.append) == 0 and said == []     # idempotent
+    b.close()
+
+    path = str(fixture_dir / "old2.sqlite")
+    _old_catalog(path, catalog_docs()[:5])
+    sq.SqliteBackend(path).close()                                  # connect only: no index
+    args = SimpleNamespace(backend="sqlite", out=path, dsn=None, batch=2, json=False)
+    assert search_cmd.run(args) == 0
+    assert "building index idx_files_name_lc" in capsys.readouterr().err

@@ -17,14 +17,18 @@ from __future__ import annotations
 
 import hashlib
 import json
+import logging
 import time
-from typing import Any, Iterable, Iterator
+from typing import Any, Callable, Iterable, Iterator
 
-from ..record import root_id
+from ..record import name_lc, root_id
 from .base import Backend, Document, chunks
 
 BATCH_SIZE = 500
 BATCH_SECONDS = 2.0
+INDEX_AT_CONNECT_MAX_ROWS = 200_000   # a bigger table gets its name indexes from `filecat search reindex`
+log = logging.getLogger(__name__)
+SCHEMA_VERSION = 2     # 2: files.name_lc (see MssqlBackend._init_schema)
 
 _TABLES = {
     "files": """
@@ -42,7 +46,14 @@ _TABLES = {
             mime VARCHAR(190),
             sha256 CHAR(64),
             sha256_partial VARCHAR(255),
-            document NVARCHAR(MAX) NOT NULL
+            document NVARCHAR(MAX) NOT NULL,
+            name_lc NVARCHAR(512)
+        )
+    """,
+    "meta": """
+        CREATE TABLE meta (
+            [key] VARCHAR(64) PRIMARY KEY,
+            value VARCHAR(255)
         )
     """,
     "programs": """
@@ -213,11 +224,11 @@ USING (SELECT ? AS root_id, ? AS rel_hash) AS src
     ON target.root_id = src.root_id AND target.rel_hash = src.rel_hash
 WHEN MATCHED THEN UPDATE SET
     root=?, rel_path=?, name=?, size=?, mtime_ns=?, kind=?, suffix=?, mime=?,
-    sha256=?, sha256_partial=?, document=?
+    sha256=?, sha256_partial=?, document=?, name_lc=?
 WHEN NOT MATCHED THEN INSERT
     (root_id, rel_hash, root, rel_path, name, size, mtime_ns, kind, suffix, mime,
-     sha256, sha256_partial, document)
-    VALUES (src.root_id, src.rel_hash, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?);
+     sha256, sha256_partial, document, name_lc)
+    VALUES (src.root_id, src.rel_hash, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?);
 """
 
 
@@ -277,6 +288,9 @@ class MssqlBackend(Backend):
         for name, ddl in _TABLES.items():
             guarded = f"IF OBJECT_ID('{name}', 'U') IS NULL BEGIN {ddl} END"
             cur.execute(guarded)
+        # version 2 added files.name_lc: a catalog made before has the table without it, and the
+        # index below needs it; reindex_names() (`filecat search reindex`) fills the values
+        cur.execute("IF COL_LENGTH('files', 'name_lc') IS NULL ALTER TABLE files ADD name_lc NVARCHAR(512) NULL")
         for idx_name, table, cols, unique in _INDEXES:
             kind = "UNIQUE " if unique else ""
             guarded = (
@@ -284,7 +298,64 @@ class MssqlBackend(Backend):
                 f"CREATE {kind}INDEX {idx_name} ON {table}{cols}"
             )
             cur.execute(guarded)
+        cur.execute("MERGE meta AS t USING (SELECT 'schema_version' AS [key]) AS s ON t.[key] = s.[key] "
+                    "WHEN MATCHED THEN UPDATE SET value = ? WHEN NOT MATCHED THEN INSERT ([key], value) "
+                    "VALUES ('schema_version', ?);", (str(SCHEMA_VERSION), str(SCHEMA_VERSION)))
+        cur.execute("SELECT COALESCE(SUM(rows), 0) FROM sys.partitions "
+                    "WHERE object_id = OBJECT_ID('files') AND index_id IN (0, 1)")
+        n = int(cur.fetchone()[0])
         self.conn.commit()
+        self._names_ready = False
+        if n <= INDEX_AT_CONNECT_MAX_ROWS:
+            self._name_indexes()
+        elif not self._has_name_index():
+            log.warning("files.name_lc has no index yet (%s rows): run `filecat search reindex` "
+                        "to fill it and build the index; name searches scan until then", n)
+
+    def _has_name_index(self) -> bool:
+        cur = self.conn.cursor()
+        cur.execute("SELECT 1 FROM sys.indexes WHERE name = 'idx_files_name_lc'")
+        found = cur.fetchone() is not None
+        self.conn.commit()
+        return found
+
+    def _name_indexes(self, say: Callable[[str], None] | None = None) -> None:
+        cur = self.conn.cursor()
+        cur.execute("SELECT 1 FROM sys.indexes WHERE name = 'idx_files_name_lc'")
+        if cur.fetchone() is None:
+            if say:
+                say("building index idx_files_name_lc")
+            cur.execute("CREATE INDEX idx_files_name_lc ON files(name_lc)")
+        self.conn.commit()
+
+    def _name_lc_ready(self) -> bool:
+        """True once every row has a name_lc (cached: a put always fills it)."""
+        if not self._names_ready:
+            cur = self.conn.cursor()
+            cur.execute("SELECT TOP 1 1 FROM files WHERE name_lc IS NULL")
+            self._names_ready = cur.fetchone() is None
+            self.conn.commit()
+        return self._names_ready
+
+    def reindex_names(self, progress: Callable[[int], None] | None = None, batch: int = 5000,
+                      say: Callable[[str], None] | None = None) -> int:
+        self.flush()
+        done = 0
+        while True:
+            cur = self.conn.cursor()
+            cur.execute(f"SELECT TOP {int(batch)} id, name FROM files WHERE name_lc IS NULL")
+            rows = cur.fetchall()
+            if rows:
+                cur.executemany("UPDATE files SET name_lc = ? WHERE id = ?", [(name_lc(n), i) for i, n in rows])
+            self.conn.commit()
+            if not rows:
+                break
+            done += len(rows)
+            if progress:
+                progress(done)
+        self._names_ready = True
+        self._name_indexes(say)
+        return done
 
     def _row(self, doc: Document) -> tuple:
         sha_partial = doc.get("sha256_partial")
@@ -294,7 +365,7 @@ class MssqlBackend(Backend):
         values = (
             doc["root"], rel_path, doc.get("name"), doc.get("size"), doc.get("mtime_ns"),
             doc.get("kind"), doc.get("suffix"), doc.get("mime"), doc.get("sha256"),
-            sha_partial, json.dumps(doc, ensure_ascii=False),
+            sha_partial, json.dumps(doc, ensure_ascii=False), name_lc(doc.get("name")),
         )
         # (root_id, rel_hash) for the USING clause, then the UPDATE SET values,
         # then the INSERT VALUES (same business values again).
@@ -378,7 +449,7 @@ class MssqlBackend(Backend):
         from ..browse import MSSQL, sql_order, sql_where
         self.flush()
         rid = root_id(q["root"]) if q.get("root") is not None else None
-        where, params = sql_where(q, MSSQL, rid)
+        where, params = sql_where(q, MSSQL, rid, self._name_lc_ready())
         cur = self.conn.cursor()
         cur.execute(f"SELECT document FROM files{where} ORDER BY {sql_order(q, MSSQL)} "
                     "OFFSET ? ROWS FETCH NEXT ? ROWS ONLY", [*params, q["offset"], q["limit"] + 1])

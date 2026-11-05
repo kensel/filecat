@@ -242,9 +242,11 @@ MSSQL = Dialect("?", lambda e, p: f"SUBSTRING({e}, {p}, 4000)", lambda e, n: f"S
                 brackets=True)
 
 
-def sql_where(q: Query, d: Dialect, root_id_value: str | None) -> tuple[str, list[Any]]:
+def sql_where(q: Query, d: Dialect, root_id_value: str | None,
+              name_lc: bool = False) -> tuple[str, list[Any]]:
     """WHERE clause (with leading ' WHERE ', or '') and its parameters, over
-    the `files` table columns every SQL backend shares."""
+    the `files` table columns every SQL backend shares. name_lc: the name_lc
+    column is filled for every row, so name terms use it (and its index)."""
     ph = d.ph
     clauses: list[str] = []
     params: list[Any] = []
@@ -303,16 +305,19 @@ def sql_where(q: Query, d: Dialect, root_id_value: str | None) -> tuple[str, lis
             no_slash_after(len(q["parent"]) + 2)
     if "q" in q:
         add(f"{d.instr(d.lower + '(rel_path)', d.lower + '(' + ph + ')')} > 0", q["q"])
-    _search_where(q, d, add)
+    _search_where(q, d, add, name_lc)
     return (" WHERE " + " AND ".join(clauses)) if clauses else "", params
 
 
-def _search_where(q: Query, d: Dialect, add: Callable[..., None]) -> None:
+def _search_where(q: Query, d: Dialect, add: Callable[..., None], name_lc: bool = False) -> None:
     """The file-name search keys of matches_search(), as SQL over the files columns."""
     from .search import like_of
     ph = d.ph
     for glob in q.get("names", ()):
-        add(d.name_like("name"), like_of(glob, d.brackets))
+        if name_lc:     # lower-cased pattern on the lower-cased column: a prefix LIKE uses the index
+            add(f"name_lc LIKE {ph} ESCAPE '!'", like_of(glob.lower(), d.brackets))
+        else:
+            add(d.name_like("name"), like_of(glob, d.brackets))
     if "exts" in q:
         add(f"suffix IN ({', '.join([ph] * len(q['exts']))})", *q["exts"])
     for key, sql in (("min_size", "size >= "), ("max_size", "size <= "),
