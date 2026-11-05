@@ -733,10 +733,18 @@ class _Collector:
         else:
             self.r.note(f"no Samba configuration found ({SMB_CONF}, {SMB_SHARES}): shares are the "
                         "top-level folders of each volume")
-            for m in volume_id:
-                for e in self.r.entries(m):
-                    if e.kind == "dir" and not e.name.startswith(("@", "#", "$", ".")) and e.name != "lost+found":
-                        found.append({"name": e.name, "path": f"{m}/{e.name}", "_guessed": "1"})
+        # Every shared folder of DSM is a top-level folder of a volume. One that is NFS-only, or
+        # whose SMB service is off, is not in smb.conf: the folder itself still makes it a share,
+        # so it gets a UNC root (\\nas3\pve) and scans through the agent like any other.
+        exported = set(exports)
+        listed = {(sh.get("path") or "").rstrip("/") for sh in found}
+        for m in volume_id:
+            for e in self.r.entries(m):
+                path = f"{m}/{e.name}"
+                if (e.kind == "dir" and not e.name.startswith(("@", "#", "$", ".")) and e.name != "lost+found"
+                        and path not in listed and path not in exported):
+                    # without any Samba file the folder is guessed to be an SMB share, as DSM's are
+                    found.append({"name": e.name, "path": path, "_guessed": "smb" if smb is None else ""})
         seen: set[str] = set()
         for sh in found:
             path = sh["path"].rstrip("/")
@@ -745,7 +753,7 @@ class _Collector:
             if mount is None or sid in seen:
                 continue
             seen.add(sid)
-            prot = ["smb"] + (["nfs"] if path in exports else [])
+            prot = ([] if sh.get("_guessed") == "" else ["smb"]) + (["nfs"] if path in exports else [])
             node = {"id": sid, "type": "share", "parent": volume_id[mount], "name": sh["name"]}
             if self.measure_shares:
                 try:
@@ -753,18 +761,30 @@ class _Collector:
                 except Exception as exc:
                     self.r.note(f"sum_subtree {path}: {exc}")
             node.update(path=path, unc=f"{self.unc_server}\\{sh['name']}", protocols=prot)
-            if sh.get("_guessed"):
+            if "_guessed" in sh:
                 node["platform"] = {PLATFORM: {"source": "folder"}}
             self.nodes["share"].append(node)
         for path in exports:                             # NFS-only exports
             mount = volume_of(path)
             if mount is None or path == mount or any(n["path"] == path for n in self.nodes["share"]):
                 continue
-            sid = "share:" + path.rsplit("/", 1)[-1].lower()
-            if sid not in seen:
-                seen.add(sid)
-                self.nodes["share"].append({"id": sid, "type": "share", "parent": volume_id[mount],
-                                            "name": path.rsplit("/", 1)[-1], "path": path, "protocols": ["nfs"]})
+            name = path.rsplit("/", 1)[-1]
+            sid = "share:" + name.lower()
+            if sid in seen:
+                continue
+            seen.add(sid)
+            node = {"id": sid, "type": "share", "parent": volume_id[mount], "name": name}
+            if self.measure_shares:
+                try:
+                    node["used_bytes"] = self.src.sum_subtree(path).total_size
+                except Exception as exc:
+                    self.r.note(f"sum_subtree {path}: {exc}")
+            # a top-level folder is a DSM shared folder: \\<host>\<name> reaches it through the agent;
+            # an export deeper in a share is part of that share's root already
+            if path.count("/") == mount.count("/") + 1:
+                node["unc"] = f"{self.unc_server}\\{name}"
+            node.update(path=path, protocols=["nfs"])
+            self.nodes["share"].append(node)
 
     # --- LUNs, VMM ---
     def lun_files(self, name: str, mounts: list[str], key: tuple[str, ...]

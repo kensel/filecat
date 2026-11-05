@@ -111,6 +111,7 @@ filecat summaries [--root R] [--all | --stale]             # rebuild the stored 
 filecat summaries status [--json]                         # what is stored, when built, when the root last changed
 filecat show "sub/dir/file.txt" --root D:\Games
 filecat roots                                             # last scan, in progress, newest file, last error
+filecat roots missing                                     # shares storage collect found that are not roots yet
 filecat roots case-check                                  # one share recorded as two roots (server\share case)?
 filecat roots remove ROOT [--force [--yes]] [--dry-run]   # forget a root with no records (typo); --force deletes its records too
 filecat dropped                                           # records of files that vanished (kept 90 days)

@@ -8,7 +8,7 @@ gets a note in the snapshot saying the layers are not collected.
 from __future__ import annotations
 
 import re
-from typing import Any
+from typing import Any, Callable
 
 from .. import topology
 from .common import Reader, finish
@@ -33,6 +33,13 @@ def _lsblk(r: Reader) -> list[dict[str, Any]] | None:
     return None
 
 
+def _naa6(wwn: str | None) -> str | None:
+    """The 32 hex digits of an NAA type 6 (registered extended) WWN, as lsblk shows it
+    (`0x6001405...`), else None: local disks' type 5 WWNs are not LUNs of another host."""
+    h = re.sub(r"[^0-9a-f]", "", (wwn or "").lower().removeprefix("0x").removeprefix("naa."))
+    return h if len(h) == 32 and h.startswith("6") else None
+
+
 def _sysfs_disks(r: Reader) -> list[dict[str, Any]]:
     out = []
     for name in r.names("/sys/block") or []:
@@ -49,22 +56,40 @@ def _sysfs_disks(r: Reader) -> list[dict[str, Any]]:
     return out
 
 
-def collect(source: Source, *, name: str | None = None, unc_server: str | None = None,
-            now: str | None = None, measure_shares: bool = False) -> topology.Topology:
-    r = Reader(source)
-    host_name = name or source.hostname
+# Models a hypervisor gives its guests' disks: their serial is the one the VM's config sets
+# (Proxmox `serial=`), so such a disk is virtual and links to the vdisk by `serial:`.
+VIRTUAL_MODELS = ("QEMU HARDDISK", "QEMU_HARDDISK", "VBOX HARDDISK", "Virtual disk", "Virtual Disk")
+
+
+def block_disks(r: Reader, platform: str = "linux"
+                ) -> tuple[list[dict[str, Any]], Callable[[str], str | None]]:
+    """The disk nodes of a Linux host (lsblk, else /sys/block) and `disk_of(kname)`, the disk id a
+    block device (a partition, a disk) sits on, or None. Paths to one LUN (one serial or WWN) are
+    one disk with `platform.<platform>.paths`; an NAA type 6 WWN is a `naa:` match (a SAN LUN), a
+    hypervisor's disk model makes the disk virtual with a `serial:` match. Shared by the Linux and
+    TrueNAS collectors."""
     devices = _lsblk(r)
     if devices is None:
         r.note("lsblk is not available: disks come from /sys/block")
         devices = _sysfs_disks(r)
     by_kname = {d.get("kname") or d["name"]: d for d in devices}
+    PLATFORM = platform                 # noqa: N806 - the key under node["platform"]
 
     disks: list[dict[str, Any]] = []
     disk_id: dict[str, str] = {}
+    by_id: dict[str, dict[str, Any]] = {}
     for d in devices:
         if d.get("type") != "disk" or _SKIP_DISK.match(d["name"]):
             continue
         serial, wwn = d.get("serial"), d.get("wwn")
+        if serial or wwn:
+            did = f"disk:{serial}" if serial else f"disk:wwn.{wwn}"
+            same = by_id.get(did)
+            if same is not None:          # another path to the same LUN (multipath, or two iSCSI portals)
+                plat = same["platform"][PLATFORM]
+                plat.setdefault("paths", [plat["device"]]).append(f"/dev/{d['name']}")
+                disk_id[d.get("kname") or d["name"]] = did
+                continue
         plat: dict[str, Any] = {"device": f"/dev/{d['name']}"}
         if serial:
             did = f"disk:{serial}"
@@ -83,9 +108,20 @@ def collect(source: Source, *, name: str | None = None, unc_server: str | None =
         if d.get("model"):
             node["model"] = d["model"]
         node["media"] = "nvme" if d["name"].startswith("nvme") else "hdd" if d.get("rota") else "ssd"
+        naa = _naa6(wwn)
+        if naa:                           # a SAN LUN (e.g. a Synology iSCSI LUN): link to it by NAA id
+            node["match"] = [f"naa:{naa}"]
+        elif serial and (d.get("model") or "").strip() in VIRTUAL_MODELS:
+            node["virtual"] = True        # a VM's disk: its bytes are the hypervisor's
+            node["match"] = [f"serial:{serial}"]
         node["platform"] = {PLATFORM: plat}
         disk_id[d.get("kname") or d["name"]] = did
+        by_id[did] = node
         disks.append(node)
+    for node in disks:
+        paths = node["platform"][PLATFORM].get("paths")
+        if paths:
+            r.note(f"{node['id']}: one disk seen on {len(paths)} paths ({', '.join(paths)})")
 
     def disk_of(kname: str) -> str | None:
         seen = set()
@@ -95,6 +131,14 @@ def collect(source: Source, *, name: str | None = None, unc_server: str | None =
                 return disk_id[kname]
             kname = (by_kname.get(kname) or {}).get("pkname")
         return None
+    return disks, disk_of
+
+
+def collect(source: Source, *, name: str | None = None, unc_server: str | None = None,
+            now: str | None = None, measure_shares: bool = False) -> topology.Topology:
+    r = Reader(source)
+    host_name = name or source.hostname
+    disks, disk_of = block_disks(r)
 
     uuids: dict[str, str] = {}                      # kernel name -> file system uuid
     for entry in r.entries("/dev/disk/by-uuid"):

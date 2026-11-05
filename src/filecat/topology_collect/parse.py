@@ -356,6 +356,105 @@ def parse_exports(text: str) -> list[str]:
     return out
 
 
+# --- ZFS (docs/agent-allowlist.md section 5; TrueNAS, Proxmox) -----------------------------------
+def _zint(value: str) -> int | None:
+    """A `-p` number; `-`, `none` and anything else that is not one are None."""
+    value = value.strip()
+    return int(value) if value.isdigit() else None
+
+
+def parse_zfs_list(text: str) -> list[dict[str, Any]]:
+    """`zfs list -H -p -t filesystem,volume -o name,type,used,avail,refer,volsize,refreservation,
+    mountpoint,guid`: one dict per dataset, numbers as int (None for `-`), `mountpoint` None
+    unless it is a path (`legacy`, `none`, `-`)."""
+    out = []
+    for line in text.splitlines():
+        cols = line.split("\t")
+        if len(cols) < 9:
+            continue
+        name, kind, used, avail, refer, volsize, refres, mount, guid = cols[:9]
+        out.append({"name": name, "type": kind, "used": _zint(used), "avail": _zint(avail),
+                    "refer": _zint(refer), "volsize": _zint(volsize),
+                    "refreservation": _zint(refres) if refres.strip() not in ("none", "-") else 0,
+                    "mountpoint": mount if mount.startswith("/") else None, "guid": guid.strip()})
+    return out
+
+
+def parse_zpool_list(text: str) -> dict[str, dict[str, Any]]:
+    """`zpool list -H -p [-v]`: the pools (lines that do not start with white space; `-v` adds the
+    vdevs, indented), {name: {size, alloc, free, frag, cap, dedup, health}}."""
+    out: dict[str, dict[str, Any]] = {}
+    for line in text.splitlines():
+        if not line or line[0].isspace():
+            continue
+        cols = line.split("\t")
+        if len(cols) < 10:
+            continue
+        out[cols[0]] = {"size": _zint(cols[1]), "alloc": _zint(cols[2]), "free": _zint(cols[3]),
+                        "frag": _zint(cols[6].rstrip("%")), "cap": _zint(cols[7].rstrip("%")),
+                        "dedup": cols[8].strip(), "health": cols[9].strip()}
+    return out
+
+
+def parse_zpool_get(text: str) -> dict[str, dict[str, str]]:
+    """`zpool get -H -p all`: {pool: {property: value}}."""
+    out: dict[str, dict[str, str]] = {}
+    for line in text.splitlines():
+        cols = line.split("\t")
+        if len(cols) >= 3:
+            out.setdefault(cols[0], {})[cols[1]] = cols[2]
+    return out
+
+
+ZPOOL_SECTIONS = {"logs": "log", "cache": "cache", "spares": "spare", "special": "special", "dedup": "dedup"}
+
+
+def parse_zpool_status(text: str) -> dict[str, dict[str, Any]]:
+    """`zpool status -P [-p]`: {pool: {"state", "vdevs": [...]}}. Each vdev is
+    {"name", "state", "role", "leaves": [{"path", "state"}]}: the top-level vdevs of the data
+    section and of `logs`, `cache`, `spares`, `special`, `dedup` (role log/cache/spare/special/
+    dedup). A device that is a top-level vdev on its own is a vdev of one leaf named by its path."""
+    pools: dict[str, dict[str, Any]] = {}
+    pool: dict[str, Any] | None = None
+    in_config = False
+    role = "data"
+    vdev: dict[str, Any] | None = None
+    for raw in text.splitlines():
+        stripped = raw.strip()
+        key, sep, value = stripped.partition(":")
+        if sep and key in ("pool", "state", "config", "errors") and not raw.startswith("\t"):
+            if key == "pool":
+                pool = pools.setdefault(value.strip(), {"state": None, "vdevs": []})
+                in_config, role, vdev = False, "data", None
+            elif key == "state" and pool is not None:
+                pool["state"] = value.strip()
+            elif key == "config":
+                in_config = True
+            else:
+                in_config = False
+            continue
+        if not in_config or pool is None or not raw.startswith("\t") or not stripped:
+            continue
+        body = raw[1:]
+        depth = (len(body) - len(body.lstrip(" "))) // 2
+        cols = body.split()
+        name, state = cols[0], (cols[1] if len(cols) > 1 else None)
+        if name == "NAME":
+            continue
+        if depth == 0:
+            role = ZPOOL_SECTIONS.get(name, "data")     # the pool's own line, or a section heading
+            vdev = None
+        elif depth == 1:
+            vdev = {"name": name, "state": state, "role": role, "leaves": []}
+            pool["vdevs"].append(vdev)
+            if name.startswith("/"):                     # a device on its own
+                vdev["leaves"].append({"path": name, "state": state})
+        elif vdev is not None:                           # a leaf (or a replacing/spare child) of the vdev
+            if name.startswith("/"):
+                vdev["leaves"].append({"path": name, "state": state})
+    return pools
+
+
 # --- file systems ---------------------------------------------------------------------------
 # f_type of statfs(2): the magic numbers that matter for storage
 FS_MAGIC = {

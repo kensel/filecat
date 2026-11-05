@@ -1,0 +1,4 @@
+{
+ "/dev/disk/by-partuuid/2f6c1a3e-8d47-4b0e-9a51-7c3d2e1f0a99": "../../sdb1",
+ "/dev/disk/by-partuuid/0a0a0a0a-1111-2222-3333-444444444444": "../../sda3"
+}

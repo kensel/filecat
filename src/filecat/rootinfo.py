@@ -77,12 +77,18 @@ def parse(text: Any) -> datetime | None:
     return at if at.tzinfo else at.replace(tzinfo=timezone.utc)
 
 
+# `changed_at` of a root whose records have not changed since the index has known it, and whose
+# last change before that is unknown (imported, or scanned before the stamp existed): no stamp.
+UNKNOWN_CHANGE = "unknown"
+
+
 def changed_stamp(info: Document | None) -> datetime | None:
     """When the root's records last changed, as far as its index entry says: `changed_at`; for an
-    entry written before that existed, the end of its last scan. A "running" attempt (a scan in
-    progress, or one that was killed) counts from its last heartbeat, since it writes as it goes."""
+    entry written before that existed, the end of its last scan; None for UNKNOWN_CHANGE. A
+    "running" attempt (a scan in progress, or one that was killed) counts from its last heartbeat,
+    since it writes as it goes."""
     info = info or {}
-    stamps = [parse(info.get("changed_at"))]
+    stamps = [None if info.get("changed_at") == UNKNOWN_CHANGE else parse(info.get("changed_at"))]
     if info.get("changed_at") is None:
         stamps.append(parse((info.get("last_scan") or {}).get("finished_at")))
     attempt = info.get("last_attempt") or {}
@@ -279,8 +285,11 @@ def finish(backend: Backend, root: str, attempt: dict[str, Any], tracker: ScanTr
     info = _load(backend, root)
     if tracker.changed:
         info["changed_at"] = now_precise()
-    elif info.get("changed_at") is None:    # an entry from before the stamp: its last scan is the stamp
-        info["changed_at"] = (info.get("last_scan") or {}).get("finished_at") or attempt["started_at"]
+    elif info.get("changed_at") is None:
+        # An entry from before the stamp, and this scan wrote nothing: the records last changed no
+        # later than the previous scan's end, or before the index knew the root at all. Never this
+        # attempt's own time: a summary built a moment before it would look stale for nothing.
+        info["changed_at"] = (info.get("last_scan") or {}).get("finished_at") or UNKNOWN_CHANGE
     info["last_attempt"] = attempt
     info["updated_at"] = finished
     if exc is None:
@@ -338,6 +347,38 @@ def index(backend: Backend, extra_roots: Iterable[str] | None = None) -> list[di
         info = infos.get(root)
         out.append({"root": root, "info": info, "state": state(info), "summary": totals})
     return out
+
+
+def missing(backend: Backend, known: Iterable[str] | None = None) -> list[dict[str, Any]]:
+    """The roots `filecat storage collect` found that the catalog does not hold yet: every
+    `unc_roots` entry of the stored host snapshots (each SMB, NFS-only or folder-only share an
+    agent reported) with no root of that spelling, ignoring case, among `known`. Each is
+    {"root", "host", "platform"}, sorted by root.
+
+    `known` is the catalog's roots when the caller has them (the viewer does). Without it the
+    root index and stored totals stand in, and a candidate is then looked up for records of its
+    own (one row), so an imported root with no index entry is not reported: no pass over every
+    record either way."""
+    try:
+        docs = list(backend.topologies())
+    except NotImplementedError:
+        return []
+    if known is None:
+        have = {r["root"].lower() for r in index(backend, extra_roots=())}
+    else:
+        have = {r.lower() for r in known}
+    out: dict[str, dict[str, Any]] = {}
+    for doc in docs:
+        for root in doc.get("unc_roots") or []:
+            key = root.lower()
+            if key in have or key in out:
+                continue
+            if known is None:
+                from .root_remove import has_records
+                if has_records(backend, root):
+                    continue
+            out[key] = {"root": root, "host": doc.get("host"), "platform": doc.get("platform")}
+    return sorted(out.values(), key=lambda r: r["root"].lower())
 
 
 def names(backend: Backend, extra_roots: Iterable[str] | None = None) -> list[str]:

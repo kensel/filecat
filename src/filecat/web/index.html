@@ -320,19 +320,28 @@ async function viewRoots() {
   const building = data.roots.some(r => r.refreshing);
   const control = data.control || {available: false, reason: ""};
   control.stores = data.stores;
-  fill(card, h("h2", {}, "Roots", h("small", {}, `${num(data.roots.length)} in this catalog`
+  const found = data.roots.filter(r => r.found).length;
+  const typed = h("input", {type: "text", class: "mono", size: 40, placeholder: "\\\\nas3\\share",
+    title: "a root a configured agent covers; its first scan adds it to the catalog"});
+  const addRoot = h("form", {class: "inline", onsubmit: ev => { ev.preventDefault(); if (typed.value.trim()) rootAction("scan", typed.value.trim()); }},
+    "Scan a new root: ", typed, " ", h("button", {type: "submit", disabled: !control.available,
+      title: control.available ? "queue its first scan through the agent that covers it" : control.reason}, "Scan"));
+  fill(card, h("h2", {}, "Roots", h("small", {}, `${num(data.roots.length - found)} in this catalog`
+      + (found ? `, ${num(found)} found by storage collect and not scanned yet` : "")
       + (building ? " · summaries are being rebuilt, refreshing every 8s" : live ? " · refreshing every 30s while a scan runs" : ""))),
     h("div", {class: "scroll"}, h("table", {},
       h("thead", {}, h("tr", {}, h("th", {}, "root"), h("th", {}, "scan"), h("th", {class: "num"}, "files"),
         h("th", {class: "num"}, "size"), h("th", {}, "newest file"), h("th", {}, "last error"), h("th", {}, ""))),
       h("tbody", {}, data.roots.map(r => rootRow(r, now, control))))),
+    addRoot,
     h("div", {id: "roots-msg", class: "muted"}, rootsNote || (control.available ? "" : control.reason)));
   card.id = "roots-card";
   const y = window.scrollY;
   fill($main, card);
   window.scrollTo(0, y);
   // not while the login form is open: a refresh would wipe what is being typed
-  if (live || building) rootsTimer = setTimeout(() => { if (parseHash().view === "roots" && !document.querySelector("#roots-msg input")) viewRoots(); }, building ? 8000 : 30000);
+  if (live || building) rootsTimer = setTimeout(() => { if (parseHash().view === "roots" && !document.querySelector("#roots-msg input")
+    && !(document.activeElement && document.activeElement.closest && document.activeElement.closest("#roots-card form"))) viewRoots(); }, building ? 8000 : 30000);
 }
 function rootRow(r, now, control) {
   const root = r.root, info = r.info || {}, a = info.last_attempt || {}, last = info.last_scan;
@@ -352,6 +361,9 @@ function rootRow(r, now, control) {
     scan.push(h("span", {class: scan.length ? "sub" : ""}, `last: ${stamp(last.started_at)} → ${stamp(last.finished_at)}`),
       h("span", {class: "sub"}, `${duration(last.seconds)} on ${last.host || "?"} · ${ago(last.finished_at, now)} · `
         + `${num(last.files)} files written, ${num(last.errors)} with errors`));
+  } else if (r.found) {
+    scan.push(h("span", {class: "muted"}, "not in the catalog yet"),
+      h("span", {class: "sub"}, `a share of ${r.found.host || "?"} (storage collect); Scan adds it`));
   } else if (!scan.length) {
     scan.push(h("span", {class: "muted"}, "none recorded"), h("span", {class: "sub"}, "imported, or scanned before the root index existed"));
   }
@@ -359,7 +371,7 @@ function rootRow(r, now, control) {
   const showNewest = (f, note) => fill(newest, h("a", {href: route("record", {root, rel_path: f.rel_path})}, when(f.mtime_ns)),
     h("span", {class: "sub mono"}, f.rel_path), note ? h("span", {class: "sub"}, note) : null);
   if (info.newest_file) showNewest(info.newest_file);
-  else api("/api/records", {root, files_only: 1, sort: "mtime_ns", desc: 1, limit: 1})
+  else if (!r.found) api("/api/records", {root, files_only: 1, sort: "mtime_ns", desc: 1, limit: 1})
     .then(res => res.rows[0] && res.rows[0].mtime_ns != null ? showNewest(res.rows[0], "from the records") : null).catch(() => {});
   const err = info.last_error;
   const errCell = h("td", {class: "wide"}, err ? [
@@ -395,7 +407,7 @@ function rootButtons(r, control) {
     h("button", {disabled: !ok || scanning,
       title: !ok ? (control && control.reason) : r.busy ? r.busy : scanning ? "a scan is running" : "scan exactly this root now",
       onclick: () => rootAction("scan", r.root)}, r.busy && r.busy.includes("queued") ? "Queued" : "Scan"),
-    control && control.stores ? h("button", {disabled: !ok || !!r.refreshing,
+    control && control.stores && !r.found ? h("button", {disabled: !ok || !!r.refreshing,
       title: !ok ? (control && control.reason) : r.refreshing ? "being rebuilt" : "rebuild this root's summary and treemap now",
       onclick: () => rootAction("refresh", r.root)}, r.refreshing ? "Refreshing" : "Refresh") : null,
     r.removable ? h("button", {class: "danger", disabled: !ok, title: ok ? "forget this root: it has no records" : control && control.reason,

@@ -4,7 +4,9 @@ Read-only. Serves one page (filecat/web/index.html) and a JSON API:
 
     GET /api/info                      backend, location, roots
     GET /api/roots                     the root index (rootinfo.index): scans, state, stored totals and how
-                                       current each root's summary is; no query per root
+                                       current each root's summary is; no query per root. Then the shares
+                                       `storage collect` found that the catalog does not hold yet
+                                       (state "never", `found: {host, platform}`; rootinfo.missing)
     GET /api/summary?root=&depth=&rebuild=   stored aggregates for one root; at depth 2 the stored summary
                                        (summaries.py), stale or "building" while one is rebuilt
     GET /api/records?<browse query>    Backend.query(), rows trimmed for a table
@@ -34,7 +36,8 @@ Read-only. Serves one page (filecat/web/index.html) and a JSON API:
     POST /api/login {"password": ...}  filecat server --serve only: a session cookie (docs/agent-server.md)
     POST /api/logout                   end the session
     POST /api/jobs/<name>/run          start a job now (needs the session, custom header, same origin)
-    POST /api/roots/scan {"root": ...} queue an ad-hoc scan of exactly that root (same guards as run now)
+    POST /api/roots/scan {"root": ...} queue an ad-hoc scan of exactly that root (same guards as run now):
+                                       a catalog root, one storage collect found, or a new root an agent covers
     POST /api/roots/remove {"root": ..., "confirm": <root>}
                                        remove a root that has no records (same guards; 409 otherwise)
     POST /api/summaries/refresh {"root": ...}
@@ -455,7 +458,7 @@ class Catalog:
         rebuilt), whether the viewer may remove it (`removable`, judged from the counts the row
         already has; remove_root checks the records itself) and, with a coordinator, why a scan of it
         is already running or queued here (`busy`); `control` is what jobs() reports."""
-        rows = self.call(lambda b: rootinfo.index(b, extra_roots=self._known_roots(b)))
+        rows = self.call(self._root_rows)
         for r in rows:
             r["busy"] = self.coordinator.scanning(r["root"]) if self.coordinator is not None else None
             r["removable"] = self._removable(r) and not r["busy"]
@@ -479,17 +482,31 @@ class Catalog:
         return not any(last.get(k) for k in ("files", "dirs", "rollups"))
 
     # --- the Roots page actions (docs/agent-server.md section 7): behind the same guards as run now ---
+    def _root_rows(self, b: Any) -> list[dict[str, Any]]:
+        """The root index, then the roots `storage collect` found that the catalog does not hold
+        yet (rootinfo.missing): state "never", no info or summary, and `found` naming the host whose
+        snapshot lists the share, so the page can offer their first scan."""
+        rows = rootinfo.index(b, extra_roots=self._known_roots(b))
+        for m in rootinfo.missing(b, known=[r["root"] for r in rows]):
+            rows.append({"root": m["root"], "info": None, "state": "never", "summary": None,
+                         "found": {"host": m["host"], "platform": m["platform"]}})
+        return rows
+
     def _root_row(self, root: Any) -> dict[str, Any] | None:
-        from . import rootinfo
         if not isinstance(root, str) or not root:
             raise ValueError("root must be a root path")
-        return next((r for r in self.call(lambda b: rootinfo.index(b, extra_roots=self._known_roots(b)))
-                     if r["root"] == root), None)
+        return next((r for r in self.call(self._root_rows) if r["root"] == root), None)
 
     def scan_root(self, root: Any, remote: str) -> tuple[int, dict[str, Any]]:
-        """POST /api/roots/scan: queue an ad-hoc scan of exactly this root (Coordinator.request_scan)."""
-        if self._root_row(root) is None:
-            return 404, {"error": f"no such root {root!r}"}
+        """POST /api/roots/scan: queue an ad-hoc scan of exactly this root (Coordinator.request_scan):
+        a root of the catalog, one `storage collect` found, or a new root typed in the page that a
+        configured agent covers (its first scan adds it)."""
+        if not isinstance(root, str) or not root.strip():
+            return 400, {"error": "root must be a root path"}
+        root = root.strip()
+        if self._root_row(root) is None and self.coordinator.scan_agent(root) is None:
+            return 404, {"error": f"no such root {root!r}, and no agent in [[agents]] covers it: "
+                                  "scan it once with `filecat scan`, or add the agent"}
         return self.coordinator.request_scan(root, remote)
 
     def remove_root(self, root: Any, confirm: Any, remote: str) -> tuple[int, dict[str, Any]]:
@@ -516,8 +533,9 @@ class Catalog:
 
     def refresh_summary(self, root: Any, remote: str) -> tuple[int, dict[str, Any]]:
         """POST /api/summaries/refresh: queue a rebuild of the stored summary of this root."""
-        if self._root_row(root) is None:
-            return 404, {"error": f"no such root {root!r}"}
+        row = self._root_row(root)
+        if row is None or row.get("found"):
+            return 404, {"error": f"no such root {root!r}" + (" in the catalog yet: scan it first" if row else "")}
         if not self.call(self._stores_treemaps):
             return 409, {"error": "summaries are not stored (--no-save, or the backend cannot store them)"}
         queued = self._queue_refresh(root)

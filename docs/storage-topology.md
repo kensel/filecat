@@ -155,7 +155,7 @@ a device before the agent relies on them.
 | group | the space history's `<raid>` (`level` raid1/raid5/raid6/raid10, member partitions); `/proc/mdstat`, `mdadm --detail --scan` (UUID) and `/sys/block/mdX/size` for sizes and health. Without the history: mdstat alone | `[UUU_]` gives `degraded`; SHR with unequal disks gives several groups (md2, md3, ...) in one pool, each with its own level. An SSD cache space (`reference="@shared_cache"`) is a group with `role: cache` under the pool of the volume it caches; a cache of one SSD is reported as raid1 and is not degraded for that |
 | pool | the space history's `<space>` (its LVM uuid is the VG id of `/etc/lvm/backup/vgN`); without it the LVM VG over the md arrays, or the md array itself | one array: the pool's `level` is that array's (raid10 on nas3, raid5 on NAS2); several arrays in one LVM: `shr` (with the history the group nodes keep each array's real level; without it `shr` is a guess from the array count); name "Storage Pool 1" is not stable, so it is a field |
 | volume | `/proc/mounts` lines under `/volumeN`; `statvfs`; `blkid` | `device` is `/dev/mapper/cachedev_0` when SSD cache is on; `vg1/volume_1` in `platform` |
-| share | `/etc/samba/smb.share.conf` (DSM 7: the share stanzas, loaded by Samba without any `include`; always read), `/etc/samba/smb.conf` and the files its `include =` lines name (read when inside the allowed roots; one outside, such as `/var/tmp/nginx/smb.netbios.aliases.conf`, is skipped silently), `/etc/exports` for NFS | skip `@*`, `#*`; `unc = \\<host>\<name>`; `path = /volumeN/<name>` |
+| share | `/etc/samba/smb.share.conf` (DSM 7: the share stanzas, loaded by Samba without any `include`; always read), `/etc/samba/smb.conf` and the files its `include =` lines name (read when inside the allowed roots; one outside, such as `/var/tmp/nginx/smb.netbios.aliases.conf`, is skipped silently), `/etc/exports` for NFS, and the top-level folders of each volume | skip `@*`, `#*`, `$*`, `.*`, `lost+found`; `unc = \\<host>\<name>`; `path = /volumeN/<name>`. Every shared folder is a root: an NFS-only export of a top-level folder gets a `unc` too (`protocols: ["nfs"]`), and a top-level folder nothing names is a share with `protocols: []` and `platform.synology.source = "folder"`. An export deeper inside a share has no `unc` (its share's root covers it) |
 | lun | `/usr/syno/etc/iscsi_lun.conf` stanzas (`rootpath` = the volume), `devtype` 5 (BLUN, thin) and 11 (BLUN_THICK) on btrfs volumes; 1 on ext4 (NAS2, `FILE` and `THIN` directories) | `kind: iscsi`; `thin` = devtype 5, or `pre_alloc=no` where there is no BLUN directory; `size_bytes` = `bytes=`; `detail` = the admin's `description`; `allocated_bytes` = sum of `st_blocks * 512` in the UUID directory (never `st_size`: the 512 GiB `ROD` sparse file); `path` = `@iSCSI/LUN/BLUN[_THICK]/<uuid>`. An ext4 LUN (devtype 1) is a directory named by its uuid: `<rootpath>/@iSCSI/LUN/FILE/<uuid>` when `pre_alloc=yes` (thick), else `.../THIN/<uuid>`, the other tried when it is missing (a note when neither is); `path` and `allocated_bytes` (sum_subtree `total_allocated_size`; files can be sparse) as for BLUN. What the directory holds is not read |
 | vdisk | `devtype` 7 (VDISK_BLUN); `name=vdisk.<vm>.<vdisk>.<bus>.<unit>` attached, `name=image.<image>.<vol>...` template | attached: `vm` from `@Repository/<vm_uuid>/vguest.conf`, `attached: true`; image: `attached: false`, no `vm`; vCPU, RAM, `is_meta_disk`, `is_general_vm` go in `platform.synology` |
 | vm | `@Repository/<vm_uuid>/vguest.conf` | `vm:<uuid>`, name, vCPU and RAM in `platform.synology`; Virtual DSM has `is_general_vm: false` |
@@ -231,16 +231,19 @@ and NAA id are the real ones; the other LUN uuids, the serials and nas3's pool
 layout are invented, with every LUN's NAA id derived from its uuid by the rule
 above. The sizes, names and targets are the lab's.
 
-### TrueNAS (fixture `tests/data/truenas_tank.json`)
+### TrueNAS (collector `topology_collect/truenas.py`, recorded `tests/data/raw/truenas2`; shape `tests/data/truenas_tank.json`)
+
+Detected where the agent can run `midclt`. Every source is an allowlisted read-only command, so
+no agent rebuild was needed.
 
 | Node | Source | Notes |
 |---|---|---|
-| disk | `zpool status -P` plus `lsblk`/`smartctl` | serial key; `media` from rotation |
-| group | `zpool status -P` / `zpool list -v -p`: each top-level vdev | `role` data/log/cache/spare/special/dedup straight from the vdev class; `level` mirror/raidz1..3/draid/single |
-| pool | `zpool list -p`, `zpool get guid` | `size_bytes`, `allocated_bytes`, `free_bytes`; `ashift`, fragmentation in `platform` |
-| volume | `zfs list -p -t filesystem` | a dataset; `parent` is the parent dataset or the pool; `mount`, `device = tank/media` |
-| share | `midclt call sharing.smb.query` / `sharing.nfs.query`, or `smb.conf` and `/etc/exports` | `path` is the dataset mount or a folder in it |
-| lun | `zfs list -p -t volume` (zvol), `iscsi.extent.query`, targets | `kind: zvol`, `thin` from `refreservation`; the iSCSI target/extent is in `platform.truenas` (no second node for the extent) |
+| disk | `lsblk` (the Linux collector's `block_disks`) | serial key; `media` from rotation; health from the leaf's state in `zpool status`. A QEMU/VirtualBox/Hyper-V disk model makes it `virtual` with `match: ["serial:<serial>"]` (the Proxmox `serial=`; open question 1c) |
+| group | `zpool status -P -p`: each top-level vdev | `group:<pool guid>/<vdev>`; `role` data/log/cache/spare/special/dedup from the section; `level` mirror/raidz1..3/draid. Log, cache and spare devices on their own are one group per section, `level: single`. A leaf path (`/dev/disk/by-partuuid/...`, `/dev/sdb1`) resolves through `/dev/disk/by-*` and lsblk to its disk |
+| pool | `zpool list -H -p -v`, `zpool get -H -p all` | `pool:<guid>`; `size_bytes`, `allocated_bytes`, `free_bytes`, health; `ashift`, fragmentation, dedup ratio in `platform`. Data devices that are top-level vdevs on their own are the pool's `members` (`level: single`, `stripe` for several) |
+| volume | `zfs list -H -p -t filesystem,volume` | `vol:<guid>`, a dataset; `parent` the parent dataset or the pool; `used_bytes`, `free_bytes` (avail), `size_bytes` on the pool's root dataset only; `mount`, `device = tank/media`. Left out: `.system`, `ix-applications`, `ix-apps`, `.ix-virt` and `boot-pool`'s children |
+| share | `midclt call sharing.smb.query` / `sharing.nfs.query` (`path` or `paths`), else `/etc/exports` | disabled shares left out; `unc = \\<host>\<name>` for SMB and NFS alike (NFS: the folder's name); `used_bytes` the dataset's `used` when the share is its mount point, or sum_subtree under `--measure-shares` |
+| lun | zvols from the same `zfs list`; `midclt call iscsi.extent.query` | `lun:<guid>`, `kind: zvol`, measured from ZFS, never read: `size_bytes = volsize`, `allocated_bytes = referenced`, `thin` when `refreservation` is 0; `used` and `refreservation` in `platform.truenas`. The extent's name and serial go in `platform.truenas`, its NAA id is the zvol's `naa:` match (an initiator's disk links to it) |
 
 The vdev layer is needed here and is an ordinary `group`. Cache and spare
 vdevs hold no data; they are groups with their own `role` and contribute no
@@ -285,7 +288,7 @@ parent rule the seven types do not have.
 
 The agent does no parsing. A **collector** is a function `collect(source, ...)
 -> Topology` in `src/filecat/topology_collect/`, one module per platform
-(`synology.py`, `linux.py`; TrueNAS and Proxmox follow the same pattern). It
+(`synology.py`, `truenas.py`, `linux.py`; Proxmox follows the same pattern). It
 reads through a small **source fetcher** interface (`Source`: `read_file`,
 `list_dir`, `statfs`, `sum_subtree`, `run`, `has`):
 
@@ -298,7 +301,16 @@ reads through a small **source fetcher** interface (`Source`: `read_file`,
 A source that cannot be read leaves its nodes or fields out and adds a note
 to the snapshot (`collector.notes`); a collection never fails for a missing
 tool. `collect()` picks the collector by `detect_platform` (a DSM host has
-`/etc/VERSION` with a `productversion`) or `--platform`.
+`/etc/VERSION` with a `productversion`; a TrueNAS host can run `midclt`; anything else is
+generic Linux) or `--platform`.
+
+**Linux disks** (`linux.block_disks`, used by the generic Linux and the TrueNAS collectors): lsblk,
+else `/sys/block`. Paths to one LUN (one serial, or one WWN when there is no serial) are one disk:
+pve2 sees nas3's LUN-3 as `sdf` and `sdg`, two iSCSI paths, and gets one
+`disk:f48f1514-...` with `platform.linux.paths` and a note. A WWN of NAA type 6 (`0x6...`,
+a SAN LUN; a local disk's is type 5) becomes `match: ["naa:<32 hex digits>"]`, so the disk links
+to the Synology LUN (or TrueNAS zvol) it is. A disk with a hypervisor's model (`QEMU HARDDISK`,
+...) and a serial is `virtual` with `match: ["serial:<serial>"]`.
 
 **Synology sources** (the code is `topology_collect/synology.py`):
 
@@ -309,7 +321,7 @@ tool. `collect()` picks the collector by `detect_platform` (a DSM host has
 | group | the space history's raids (level, members); `/proc/mdstat`, `mdadm --detail --scan` (`mdadm_detail_scan`), `/sys/block/mdN/size`, member partition sizes | md0 (system) and md1 (swap) are skipped: only arrays under a pool or a mounted volume count; `[UU_]` or `(F)` is `degraded`; a `@shared_cache` space is a `role: cache` group, attached to the pool of the volume its `<cache reference>` names (the volume's uuid in the pool's `<volumes>`; else a pool that mentions it, else the VG that owns that LV, else the only pool, with a note) |
 | pool | the space history's pools (LVM uuid, `total_size`, `free_size`, RAID level of each array); `/etc/lvm/backup/vgN` (VG id, PVs, LVs) for volumes' LV names and when there is no history | no LVM: the array is its own pool. One array: its level; several arrays in one LVM: `shr`. Order of the spaces in the file and `device_type` mean nothing (nas3 and NAS2 differ) |
 | volume | `/proc/mounts` (`/volumeN`), `statfs`, the device-mapper chain (`/sys/block/dm-*/dm/name`, `slaves/`) from `cachedev_0` to the LV to the array, file system uuid from `/sys/fs/btrfs/<uuid>/devices` (else `/dev/disk/by-uuid`, else `blkid`) | `used` is `total - free`, `free` is `avail`; `ro` mount is `warning` |
-| share | `/etc/samba/smb.share.conf`, `/etc/samba/smb.conf` and its includes; `/etc/exports` for NFS | Fallback, flagged in the notes, when neither file can be read: every top-level folder of the volume not starting with `@`, `#`, `$` or `.`. `used_bytes` only with `--measure-shares` (`sum_subtree`, minutes on a big share) |
+| share | `/etc/samba/smb.share.conf`, `/etc/samba/smb.conf` and its includes; `/etc/exports` for NFS; the top-level folders of each volume | Every top-level folder not starting with `@`, `#`, `$` or `.` is a share: the Samba files and exports say which protocols it has. A folder they do not name is `platform.synology.source = "folder"`: `protocols: []`, or `["smb"]` when no Samba file could be read at all (flagged in the notes). `used_bytes` only with `--measure-shares` (`sum_subtree`, minutes on a big share) |
 | lun, vdisk | `/usr/syno/etc/iscsi_lun.conf`, `iscsi_lun_acl.conf`, `iscsi_target.conf`, `iscsi_mapping.conf`; the per-volume copies as fallback and comparison | the NAA id is `topology.naa_from_unit_serial`; `target` and `platform.synology.targets` as above |
 | lun/vdisk `allocated_bytes` | `sum_subtree` of `<volume>/@iSCSI/LUN/<BLUN|BLUN_THICK|VDISK_BLUN>/<uuid>`, `total_allocated_size` | `st_blocks * 512`, never `total_size`: the sparse `ROD` file in each directory is 512 GiB |
 | vm | `<volume>/@Repository/<vm>/vguest.conf`, `vdisk.conf` | a vdisk naming a VM that has no folder gets a `[ORPHANED_VDISK]` vm |
@@ -502,8 +514,8 @@ reported on the link as `initiator_ok`, a hint and not a requirement.
 
 ### Written by hand: hosts and links in filecat.toml
 
-Nothing here needs an agent. A host no agent reports (truenas2 until a TrueNAS reader
-exists), and a link no rule can find, are written in `filecat.toml`:
+Nothing here needs an agent. A host no agent reports (truenas2 until its agent runs the
+TrueNAS collector), and a link no rule can find, are written in `filecat.toml`:
 
 ```toml
 [[storage.hosts]]

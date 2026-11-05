@@ -454,7 +454,15 @@ Two more actions use exactly the guards above: only inside `filecat server --ser
 a scan of it is running or queued here) and `removable` (see below), so the buttons are disabled
 with the reason, or absent.
 
-* **Scan** is `POST /api/roots/scan {"root": ...}`. The root must be in the root index (404). The
+* **Roots not in the catalog yet.** After the root index, `GET /api/roots` lists every share of the
+  stored storage snapshots (`unc_roots`: SMB, NFS-only and plain top-level folders) that no root of
+  the catalog spells, ignoring case (`rootinfo.missing`): state `never`, no totals, and
+  `found: {host, platform}`. The page shows them as "not in the catalog yet" with Scan only, and
+  has a "Scan a new root" field for a root nobody listed. Shell equivalent:
+  `filecat roots missing [--json]` (exit 1 when there are some; prints the `filecat scan ... --agent`
+  line for each host). A scan job with no `roots` takes them already.
+* **Scan** is `POST /api/roots/scan {"root": ...}`. The root must be in the root index, be one of
+  the roots above, or be covered by an `[[agents]]` entry (its first scan adds it); 404 otherwise. The
   coordinator's `request_scan(root, remote)` queues an ad-hoc job named `scan:<root>`, kind
   `scan-root`, for exactly that root. The agent is the one `filecat scan` would choose: the
   `[[agents]]` entry with the longest alias or share match (`config.agent_for`), run as `scan ROOT

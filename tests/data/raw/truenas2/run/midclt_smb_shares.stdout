@@ -1,0 +1,1 @@
+[{"id": 1, "purpose": "DEFAULT_SHARE", "path": "/mnt/tank/migrated", "name": "migrated", "enabled": true}, {"id": 2, "path": "/mnt/tank/old", "name": "old", "enabled": false}]

@@ -245,9 +245,13 @@ server keeps store detection, manifest verification, probing and Ollama.
     filecat.toml, which win over automatic matches and report conflicts;
     `filecat storage links [--snapshot FILE ...]` checks them. Shaped for a
     later catalog store edited in the web viewer (config entries read-only).
-  - [ ] Still to verify: what the ACL `authority` values mean (0 and 3 seen),
-    and whether Virtual DSM sees its VMM vdisk uuid. Then Proxmox and TrueNAS
-    readers, so truenas2's hand-written entry can go.
+  - [ ] Still to verify: what the ACL `authority` values mean (0 and 3 seen).
+    Virtual DSM sees its VMM vdisk uuid (answered on NAS01). A TrueNAS
+    collector exists (v0.2.4, `topology_collect/truenas.py`, recorded
+    `tests/data/raw/truenas2`); still to do on the real truenas2: run
+    `storage collect --agent truenas2`, confirm its disks report the Proxmox
+    `serial=` (storage-topology.md open question 1c), then drop its
+    hand-written `[[storage.hosts]]` / `[[storage.links]]`. Then Proxmox.
   - [x] Topology moves to Python: the agent keeps no parser. Protocol additions
     `read_file`, `statfs`, `run` (hardcoded allowlist, validated argument kinds),
     `capabilities`, `wmi` (Windows); `storage_topology` removed from the agent and
@@ -317,10 +321,33 @@ After the v0.2.0 rollups (stages A and B of [rollups.md](rollups.md)):
 - Optional rollup measures: size by extension, age buckets, largest matched
   children (never for private rules).
 
+## v0.2.4: missing roots, TrueNAS, multipath
+
+- [x] **Every Synology shared folder is a root.** An NFS-only export of a
+  top-level folder (`\\nas3\pve`) and a top-level folder no Samba file or export
+  names get `\\<host>\<name>`, so they are in the snapshot's `unc_roots`, in the
+  agent's share map and in every scan job with no `roots`.
+- [x] **Roots the catalog does not hold yet**: `filecat roots missing [--json]`
+  lists the shares `storage collect` found with no root (exit 1 when there are
+  some) and the scan command for each host; the viewer's Roots page lists them as
+  "not in the catalog yet" with Scan, and takes a typed root that an agent
+  covers (its first scan adds it).
+- [x] **TrueNAS collector**: ZFS pools and vdevs (`zpool status -P`, `list`,
+  `get`), datasets as volumes (system datasets left out), zvols measured from
+  ZFS (`volsize`, `referenced`, thin from `refreservation`), SMB/NFS shares and
+  iSCSI extents (`midclt`, `/etc/exports`), the extent's NAA id as the zvol's
+  `naa:` match. QEMU disks are virtual with a `serial:` match.
+- [x] **Linux collector**: one disk for a LUN seen on several paths (pve2's
+  LUN-3 on sdf and sdg failed with "duplicate id"), and an NAA type 6 WWN as a
+  `naa:` match, so an iSCSI initiator links to the Synology LUN.
+- [x] **Summaries flake**: a scan that writes nothing no longer stamps a root
+  with no `changed_at` with its own start time (whole seconds); it keeps the
+  previous scan's end, or `unknown`.
+
 ## v0.2.x: to do
 
-- **Scan roots that are not in the catalog yet**, and Synology shared folders
-  that are not SMB shares (an NFS-only folder such as `\\nas3\pve`):
+- **Scan roots that are not in the catalog yet**: done in v0.2.4 (above), except
+  `filecat roots add`; the original notes:
   - Today the Roots page's Scan needs a root already in the root index
     (`POST /api/roots/scan` answers 404), and a `scan` job with no `roots`
     covers the catalog's roots plus the topology's `unc_roots`, which holds
@@ -342,7 +369,9 @@ After the v0.2.0 rollups (stages A and B of [rollups.md](rollups.md)):
   `/usr/local/etc/rc.d/filecat-agent.sh` start/stop script, or a systemd unit
   on DSM 7 (`/etc/systemd/system`, which DSM updates may reset). Document the
   chosen one in agent-deploy.md, with where its output goes (the status log).
-- **Summaries: a scan that writes nothing can stamp a root changed** (flaky
+- **Summaries: a scan that writes nothing can stamp a root changed** (fixed in
+  v0.2.4: `rootinfo.UNKNOWN_CHANGE`; the other occasional Windows failures below
+  are still to look at) (flaky
   `test_summaries.py::test_an_unchanged_root_is_not_rebuilt_however_old_the_graph_max_age`,
   about 1 run in 8 locally, once in CI on the v0.2.2 commit). In
   `rootinfo.finish()`, a root with no `changed_at` and an unchanged scan gets

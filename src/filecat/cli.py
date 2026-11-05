@@ -306,8 +306,11 @@ def build_parser() -> argparse.ArgumentParser:
     p = sub.add_parser("roots", help="root index: last scan, scan in progress, newest file, last error; "
                                      "case-check / case-merge for one share recorded as two roots; "
                                      "remove for a root that should not be there")
-    p.add_argument("action", nargs="?", choices=("list", "case-check", "case-merge", "remove"), default="list",
-                   help="list (default); case-check: find roots that differ only in the case of "
+    p.add_argument("action", nargs="?", choices=("list", "missing", "case-check", "case-merge", "remove"),
+                   default="list",
+                   help="list (default); missing: the shares `storage collect` found (SMB, NFS-only and "
+                        "plain top-level folders) that the catalog has no root for yet, with the scan "
+                        "command for each; case-check: find roots that differ only in the case of "
                         "server\\share and verify a sample of files; case-merge [OLD NEW]: move OLD "
                         "into NEW (NEW's spelling is kept; with no names, every pair whose NAS "
                         "spelling is known); remove ROOT: forget a root that has no records (a typo, "
@@ -471,7 +474,7 @@ def build_parser() -> argparse.ArgumentParser:
                                         "topology in Python and store it in the catalog (a history row "
                                         "when the structure changed); exit 1 if an agent fails")
     s.add_argument("--agent", metavar="NAME", help="only this [[agents]] host")
-    s.add_argument("--platform", choices=("synology", "linux"),
+    s.add_argument("--platform", choices=("synology", "truenas", "linux"),
                    help="collector to use (default: detected from the host)")
     s.add_argument("--measure-shares", dest="measure_shares", action="store_true",
                    help="also sum each share with the agent for its used bytes (minutes on a big share)")
