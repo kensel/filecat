@@ -439,12 +439,13 @@ Everything does for one PC (e.g. `eve*.exe` on all NAS shares at once).
   `filecat search reindex` (resumable); searches stay correct until it is done.
 - [ ] **Substring on PostgreSQL**: `pg_trgm` and a GIN trigram index on
   `name_lc`, skipped with a warning when the extension cannot be created.
-- [ ] **Saved and pinned searches**: stored server-side in the catalog (one list
+- [x] **Saved and pinned searches**: stored server-side in the catalog (one list
   for everyone until RBAC), `GET /api/searches`, `POST /api/searches/save` and
   `/delete`; pinned ones show as chips on the Search page.
-- [ ] **Export**: `GET /api/search/export?format=csv|jsonl` with the search's
+- [x] **Export**: `GET /api/search/export?format=csv|jsonl` with the search's
   parameters, every match (not one page) streamed, capped by
-  `search_export_max_rows` (default 1,000,000), behind the same login.
+  `search_export_max_rows` (default 1,000,000), behind the same login. CSV cells
+  that would start a formula get a leading `'`; `[REDACTED]` rollups are left out.
 - [x] **Cleanup**: `ScanServer.ps1` moved to `scripts/`,
   `file-catalog-requirements.md` to `docs/`, `docs/TODO.md` folded into the
   backlog below, the draft `docs/research/rust-agent/` sources removed.
