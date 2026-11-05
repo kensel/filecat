@@ -853,7 +853,7 @@ class Catalog:
         from . import search as srch
         started = time.perf_counter()
         spec, query_roots, q = self._search_query(p)
-        found ={"rows": [], "more": False} if query_roots == [] else self.call(lambda b: b.search_names(q))
+        found = {"rows": [], "more": False} if query_roots == [] else self.call(lambda b: b.search_names(q))
         rows = []
         for doc in found["rows"]:
             row = _row(doc)
@@ -958,7 +958,7 @@ def make_handler(catalog: Catalog, page: bytes) -> type[BaseHTTPRequestHandler]:
                 rows = iter(()) if empty else search_saved.export_rows(catalog.call, q, cap)
                 for row in rows:
                     if fmt == "csv":
-                        writer.writerow(["" if row[c] is None else row[c] for c in cols])
+                        writer.writerow([search_saved.csv_cell(row[c]) for c in cols])
                     else:
                         buf.write(json.dumps(row, ensure_ascii=False) + "\n")
                     pending += 1

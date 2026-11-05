@@ -138,6 +138,17 @@ def full_path(root: str, rel: str) -> str:
     return root.rstrip("/\\") + sep + (rel.replace("/", sep) if sep == "\\" else rel)
 
 
+FORMULA_START = ("=", "+", "-", "@", "\t", "\r")
+
+
+def csv_cell(value: Any) -> Any:
+    """A CSV cell that a spreadsheet will not run as a formula: text starting with = + - @ or a
+    tab/CR gets a leading apostrophe (OWASP "CSV injection"). Numbers are left as they are."""
+    if isinstance(value, str) and value.startswith(FORMULA_START):
+        return "'" + value
+    return "" if value is None else value
+
+
 def export_row(doc: dict[str, Any]) -> dict[str, Any]:
     root, rel = doc.get("root") or "", doc.get("rel_path") or ""
     ns = doc.get("mtime_ns")

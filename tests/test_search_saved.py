@@ -212,6 +212,13 @@ def test_csv_header_rows_and_quoting(v):
     assert b'"say ""hi"", ok.pdf"' in raw                         # doubled quotes, quoted field
 
 
+def test_a_csv_cell_never_starts_a_formula():
+    from filecat.search_saved import csv_cell
+    for text in ("=cmd|' /C calc'!A0", "+1", "-x.txt", "@sum", "\tx", "\rx"):
+        assert csv_cell(text) == "'" + text
+    assert csv_cell("a=b.txt") == "a=b.txt" and csv_cell(5) == 5 and csv_cell(None) == ""
+
+
 def test_jsonl_and_sha256(v):
     status, raw, headers = export(v, "jsonl", q="report00.pdf")
     assert status == 200 and "ndjson" in headers["Content-Type"] and headers["Content-Disposition"].endswith('.jsonl"')
