@@ -14,14 +14,17 @@ table is streamed rather than materialized client-side.
 from __future__ import annotations
 
 import json
+import logging
 import time
-from typing import Any, Iterable, Iterator
+from typing import Any, Callable, Iterable, Iterator
 
-from ..record import root_id
+from ..record import name_lc, root_id
 from .base import Backend, Document, chunks
 
 BATCH_SIZE = 500
 BATCH_SECONDS = 2.0
+SCHEMA_VERSION = 2     # 2: files.name_lc (see _migrate)
+log = logging.getLogger(__name__)
 
 _SCHEMA = """
 CREATE TABLE IF NOT EXISTS files (
@@ -38,6 +41,7 @@ CREATE TABLE IF NOT EXISTS files (
     sha256 TEXT,
     sha256_partial TEXT,
     document JSONB NOT NULL,
+    name_lc TEXT,
     UNIQUE (root_id, rel_path)
 );
 CREATE INDEX IF NOT EXISTS idx_files_root_id ON files(root_id);
@@ -46,6 +50,11 @@ CREATE INDEX IF NOT EXISTS idx_files_sha256 ON files(sha256);
 CREATE INDEX IF NOT EXISTS idx_files_kind ON files(kind);
 CREATE INDEX IF NOT EXISTS idx_files_suffix ON files(suffix);
 CREATE INDEX IF NOT EXISTS idx_files_mime ON files(mime);
+
+CREATE TABLE IF NOT EXISTS meta (
+    key TEXT PRIMARY KEY,
+    value TEXT
+);
 
 CREATE TABLE IF NOT EXISTS programs (
     program_id TEXT PRIMARY KEY,
@@ -171,13 +180,14 @@ CREATE TABLE IF NOT EXISTS server_state (
 
 _UPSERT_SQL = """
 INSERT INTO files (root_id, root, rel_path, name, size, mtime_ns, kind,
-                    suffix, mime, sha256, sha256_partial, document)
-VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s::jsonb)
+                    suffix, mime, sha256, sha256_partial, document, name_lc)
+VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s::jsonb,%s)
 ON CONFLICT (root_id, rel_path) DO UPDATE SET
     root=excluded.root, name=excluded.name, size=excluded.size,
     mtime_ns=excluded.mtime_ns, kind=excluded.kind, suffix=excluded.suffix,
     mime=excluded.mime, sha256=excluded.sha256,
-    sha256_partial=excluded.sha256_partial, document=excluded.document
+    sha256_partial=excluded.sha256_partial, document=excluded.document,
+    name_lc=excluded.name_lc
 """
 
 
@@ -218,8 +228,61 @@ class PostgresBackend(Backend):
         with self.conn.cursor() as cur:
             cur.execute(_SCHEMA)
         self.conn.commit()
+        self._migrate()
+        self._names_ready = False
         self._buffer: list[Document] = []
         self._last_flush = time.monotonic()
+
+    def _migrate(self) -> None:
+        """Bring a catalog made by an older filecat up to SCHEMA_VERSION. Version 2 adds
+        files.name_lc: the column and its indexes appear here at once, the values are
+        filled by reindex_names() (`filecat search reindex`), and name searches use the old
+        predicate until no row lacks one. The trigram index (pg_trgm, for `%setup%`) needs
+        the extension; without the privilege it is skipped with a warning."""
+        with self.conn.cursor() as cur:
+            cur.execute("ALTER TABLE files ADD COLUMN IF NOT EXISTS name_lc TEXT")
+            cur.execute("CREATE INDEX IF NOT EXISTS idx_files_name_lc ON files(name_lc text_pattern_ops)")
+            cur.execute("INSERT INTO meta (key, value) VALUES ('schema_version', %s) "
+                        "ON CONFLICT (key) DO UPDATE SET value = excluded.value", (str(SCHEMA_VERSION),))
+        self.conn.commit()
+        try:
+            with self.conn.cursor() as cur:
+                cur.execute("CREATE EXTENSION IF NOT EXISTS pg_trgm")
+                cur.execute("CREATE INDEX IF NOT EXISTS idx_files_name_trgm "
+                            "ON files USING gin (name_lc gin_trgm_ops)")
+            self.conn.commit()
+        except self._psycopg.Error as exc:
+            self.conn.rollback()
+            log.warning("no trigram index on files.name_lc (%s); substring name searches "
+                        "will scan the table", str(exc).strip().splitlines()[0])
+
+    def _name_lc_ready(self) -> bool:
+        """True once every row has a name_lc (cached: a put always fills it)."""
+        if not self._names_ready:
+            with self.conn.cursor() as cur:
+                cur.execute("SELECT 1 FROM files WHERE name_lc IS NULL LIMIT 1")
+                self._names_ready = cur.fetchone() is None
+            self.conn.commit()
+        return self._names_ready
+
+    def reindex_names(self, progress: Callable[[int], None] | None = None, batch: int = 5000) -> int:
+        self.flush()
+        done = 0
+        while True:
+            with self.conn.cursor() as cur:
+                cur.execute("SELECT id, name FROM files WHERE name_lc IS NULL LIMIT %s", (batch,))
+                rows = cur.fetchall()
+                if rows:
+                    cur.executemany("UPDATE files SET name_lc = %s WHERE id = %s",
+                                    [(name_lc(n), i) for i, n in rows])
+            self.conn.commit()
+            if not rows:
+                break
+            done += len(rows)
+            if progress:
+                progress(done)
+        self._names_ready = True
+        return done
 
     def _row(self, doc: Document) -> tuple:
         sha_partial = doc.get("sha256_partial")
@@ -229,7 +292,7 @@ class PostgresBackend(Backend):
             doc["root_id"], doc["root"], doc["rel_path"], doc.get("name"),
             doc.get("size"), doc.get("mtime_ns"), doc.get("kind"),
             doc.get("suffix"), doc.get("mime"), doc.get("sha256"), sha_partial,
-            json.dumps(doc, ensure_ascii=False),
+            json.dumps(doc, ensure_ascii=False), name_lc(doc.get("name")),
         )
 
     def put(self, document: Document) -> None:
@@ -303,7 +366,7 @@ class PostgresBackend(Backend):
         from ..browse import POSTGRES, sql_order, sql_where
         self.flush()
         rid = root_id(q["root"]) if q.get("root") is not None else None
-        where, params = sql_where(q, POSTGRES, rid)
+        where, params = sql_where(q, POSTGRES, rid, self._name_lc_ready())
         with self.conn.cursor() as cur:
             cur.execute(f"SELECT document FROM files{where} ORDER BY {sql_order(q, POSTGRES)} "
                         "LIMIT %s OFFSET %s", [*params, q["limit"] + 1, q["offset"]])

@@ -31,14 +31,14 @@ import sqlite3
 import time
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Iterable, Iterator
+from typing import Any, Callable, Iterable, Iterator
 
-from ..record import root_id
+from ..record import name_lc, root_id
 from .base import Backend, Document, chunks, dropped_now
 
 BATCH_SIZE = 500
 BATCH_SECONDS = 2.0
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2     # 2: files.name_lc (see _migrate)
 
 _SCHEMA = """
 CREATE TABLE IF NOT EXISTS files (
@@ -55,6 +55,7 @@ CREATE TABLE IF NOT EXISTS files (
     sha256 TEXT,
     sha256_partial TEXT,
     document TEXT NOT NULL,
+    name_lc TEXT COLLATE NOCASE,
     UNIQUE (root_id, rel_path)
 );
 CREATE INDEX IF NOT EXISTS idx_files_root_id ON files(root_id);
@@ -193,13 +194,14 @@ CREATE INDEX IF NOT EXISTS idx_set_members_path ON set_members(path);
 
 _UPSERT_SQL = """
 INSERT INTO files (root_id, root, rel_path, name, size, mtime_ns, kind,
-                    suffix, mime, sha256, sha256_partial, document)
-VALUES (?,?,?,?,?,?,?,?,?,?,?,?)
+                    suffix, mime, sha256, sha256_partial, document, name_lc)
+VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)
 ON CONFLICT (root_id, rel_path) DO UPDATE SET
     root=excluded.root, name=excluded.name, size=excluded.size,
     mtime_ns=excluded.mtime_ns, kind=excluded.kind, suffix=excluded.suffix,
     mime=excluded.mime, sha256=excluded.sha256,
-    sha256_partial=excluded.sha256_partial, document=excluded.document
+    sha256_partial=excluded.sha256_partial, document=excluded.document,
+    name_lc=excluded.name_lc
 """
 
 
@@ -225,16 +227,49 @@ class SqliteBackend(Backend):
         self.conn.execute("PRAGMA secure_delete=ON")
         self.conn.create_function("dirkey", 2, _dirkey_sql, deterministic=True)
         self.conn.executescript(_SCHEMA)
-        self.conn.execute(
-            "INSERT OR IGNORE INTO meta(key, value) VALUES ('schema_version', ?)",
-            (str(SCHEMA_VERSION),),
-        )
+        self._migrate()
         self.conn.commit()
+        self._names_ready = False
         # Pending upserts keyed by (root_id, rel_path); a later put of the same
         # key replaces the earlier one. get() reads from here first so a
         # get/put loop does not commit once per record.
         self._buffer: dict[tuple[str, str], tuple] = {}
         self._last_flush = time.monotonic()
+
+    def _migrate(self) -> None:
+        """Bring a catalog made by an older filecat up to SCHEMA_VERSION. Version 2 adds
+        files.name_lc: the column and its index appear here at once, the values are filled
+        by reindex_names() (`filecat search reindex`), and name searches use the old
+        predicate until no row lacks one."""
+        if "name_lc" not in {r[1] for r in self.conn.execute("PRAGMA table_info(files)")}:
+            self.conn.execute("ALTER TABLE files ADD COLUMN name_lc TEXT COLLATE NOCASE")
+        self.conn.execute("CREATE INDEX IF NOT EXISTS idx_files_name_lc ON files(name_lc)")
+        self.conn.execute("INSERT OR REPLACE INTO meta(key, value) VALUES ('schema_version', ?)",
+                          (str(SCHEMA_VERSION),))
+
+    def _name_lc_ready(self) -> bool:
+        """True once every row has a name_lc (cached: a put always fills it)."""
+        if not self._names_ready:
+            self._names_ready = self.conn.execute(
+                "SELECT 1 FROM files WHERE name_lc IS NULL LIMIT 1").fetchone() is None
+        return self._names_ready
+
+    def reindex_names(self, progress: Callable[[int], None] | None = None, batch: int = 5000) -> int:
+        self._flush_buffer()
+        done = 0
+        while True:
+            rows = self.conn.execute(
+                "SELECT id, name FROM files WHERE name_lc IS NULL LIMIT ?", (batch,)).fetchall()
+            if not rows:
+                break
+            self.conn.executemany("UPDATE files SET name_lc = ? WHERE id = ?",
+                                  [(name_lc(n), i) for i, n in rows])
+            self.conn.commit()
+            done += len(rows)
+            if progress:
+                progress(done)
+        self._names_ready = True
+        return done
 
     # --- documents -------------------------------------------------
     def _row_for(self, document: Document) -> tuple:
@@ -246,7 +281,7 @@ class SqliteBackend(Backend):
             document.get("name"), document.get("size"), document.get("mtime_ns"),
             document.get("kind"), document.get("suffix"), document.get("mime"),
             document.get("sha256"), sha_partial,
-            json.dumps(document, ensure_ascii=False),
+            json.dumps(document, ensure_ascii=False), name_lc(document.get("name")),
         )
 
     def put(self, document: Document) -> None:
@@ -269,7 +304,7 @@ class SqliteBackend(Backend):
         key = (root_id(root), rel_path)
         pending = self._buffer.get(key)
         if pending is not None:
-            return json.loads(pending[-1])
+            return json.loads(pending[11])
         cur = self.conn.execute(
             "SELECT document FROM files WHERE root_id=? AND rel_path=?", key,
         )
@@ -287,7 +322,7 @@ class SqliteBackend(Backend):
         for p in rel_paths:     # buffered upserts, keyed like the table
             pending = self._buffer.get((rid, p))
             if pending is not None:
-                out[p] = json.loads(pending[-1])
+                out[p] = json.loads(pending[11])
         return out
 
     def list(self, kind: str | None = None, root: str | None = None) -> Iterator[Document]:
@@ -326,7 +361,7 @@ class SqliteBackend(Backend):
         from ..browse import SQLITE, sql_order, sql_where
         self._flush_buffer()
         rid = root_id(q["root"]) if q.get("root") is not None else None
-        where, params = sql_where(q, SQLITE, rid)
+        where, params = sql_where(q, SQLITE, rid, self._name_lc_ready())
         rows = self.conn.execute(
             f"SELECT document FROM files{where} ORDER BY {sql_order(q)} LIMIT ? OFFSET ?",
             [*params, q["limit"] + 1, q["offset"]]).fetchall()

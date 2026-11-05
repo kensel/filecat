@@ -19,9 +19,9 @@ from __future__ import annotations
 import hashlib
 import json
 import time
-from typing import Any, Iterable, Iterator
+from typing import Any, Callable, Iterable, Iterator
 
-from ..record import root_id
+from ..record import name_lc, root_id
 from .base import Backend, Document, chunks
 
 BATCH_SIZE = 500
@@ -44,12 +44,19 @@ _SCHEMA = [
         sha256 CHAR(64),
         sha256_partial VARCHAR(255),
         document JSON NOT NULL,
+        name_lc VARCHAR(512),
         UNIQUE KEY uq_files_root_relhash (root_id, rel_hash),
         KEY idx_files_root_id (root_id),
         KEY idx_files_sha256 (sha256),
         KEY idx_files_kind (kind),
         KEY idx_files_suffix (suffix),
         KEY idx_files_mime (mime)
+    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
+    """,
+    """
+    CREATE TABLE IF NOT EXISTS meta (
+        `key` VARCHAR(64) PRIMARY KEY,
+        value VARCHAR(255)
     ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
     """,
     """
@@ -209,14 +216,18 @@ _SCHEMA = [
 
 _UPSERT_SQL = """
 INSERT INTO files (root_id, root, rel_path, rel_hash, name, size, mtime_ns, kind,
-                    suffix, mime, sha256, sha256_partial, document)
-VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
+                    suffix, mime, sha256, sha256_partial, document, name_lc)
+VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
 ON DUPLICATE KEY UPDATE
     root=VALUES(root), rel_path=VALUES(rel_path), name=VALUES(name),
     size=VALUES(size), mtime_ns=VALUES(mtime_ns), kind=VALUES(kind),
     suffix=VALUES(suffix), mime=VALUES(mime), sha256=VALUES(sha256),
-    sha256_partial=VALUES(sha256_partial), document=VALUES(document)
+    sha256_partial=VALUES(sha256_partial), document=VALUES(document),
+    name_lc=VALUES(name_lc)
 """
+
+
+SCHEMA_VERSION = 2     # 2: files.name_lc (see MysqlBackend._migrate)
 
 
 def _rel_hash(rel_path: str) -> str:
@@ -305,8 +316,56 @@ class MysqlBackend(Backend):
             for stmt in _SCHEMA:
                 cur.execute(stmt)
         self.conn.commit()
+        self._migrate()
+        self._names_ready = False
         self._buffer: list[Document] = []
         self._last_flush = time.monotonic()
+
+    def _migrate(self) -> None:
+        """Bring a catalog made by an older filecat up to SCHEMA_VERSION. Version 2 adds
+        files.name_lc: the column and its index appear here at once, the values are filled
+        by reindex_names() (`filecat search reindex`), and name searches use the old
+        predicate until no row lacks one."""
+        with self.conn.cursor() as cur:
+            cur.execute("SELECT 1 FROM information_schema.columns WHERE table_schema = DATABASE() "
+                        "AND table_name = 'files' AND column_name = 'name_lc'")
+            if cur.fetchone() is None:
+                cur.execute("ALTER TABLE files ADD COLUMN name_lc VARCHAR(512)")
+            cur.execute("SELECT 1 FROM information_schema.statistics WHERE table_schema = DATABASE() "
+                        "AND table_name = 'files' AND index_name = 'idx_files_name_lc'")
+            if cur.fetchone() is None:
+                cur.execute("CREATE INDEX idx_files_name_lc ON files(name_lc)")
+            cur.execute("INSERT INTO meta (`key`, value) VALUES ('schema_version', %s) "
+                        "ON DUPLICATE KEY UPDATE value = VALUES(value)", (str(SCHEMA_VERSION),))
+        self.conn.commit()
+
+    def _name_lc_ready(self) -> bool:
+        """True once every row has a name_lc (cached: a put always fills it)."""
+        if not self._names_ready:
+            with self.conn.cursor() as cur:
+                cur.execute("SELECT 1 FROM files WHERE name_lc IS NULL LIMIT 1")
+                self._names_ready = cur.fetchone() is None
+            self.conn.commit()
+        return self._names_ready
+
+    def reindex_names(self, progress: Callable[[int], None] | None = None, batch: int = 5000) -> int:
+        self.flush()
+        done = 0
+        while True:
+            with self.conn.cursor() as cur:
+                cur.execute("SELECT id, name FROM files WHERE name_lc IS NULL LIMIT %s", (batch,))
+                rows = cur.fetchall()
+                if rows:
+                    cur.executemany("UPDATE files SET name_lc = %s WHERE id = %s",
+                                    [(name_lc(n), i) for i, n in rows])
+            self.conn.commit()
+            if not rows:
+                break
+            done += len(rows)
+            if progress:
+                progress(done)
+        self._names_ready = True
+        return done
 
     def _row(self, doc: Document) -> tuple:
         sha_partial = doc.get("sha256_partial")
@@ -317,7 +376,7 @@ class MysqlBackend(Backend):
             doc["root_id"], doc["root"], rel_path, _rel_hash(rel_path), doc.get("name"),
             doc.get("size"), doc.get("mtime_ns"), doc.get("kind"),
             doc.get("suffix"), doc.get("mime"), doc.get("sha256"), sha_partial,
-            json.dumps(doc, ensure_ascii=False),
+            json.dumps(doc, ensure_ascii=False), name_lc(doc.get("name")),
         )
 
     def put(self, document: Document) -> None:
@@ -392,7 +451,7 @@ class MysqlBackend(Backend):
         from ..browse import MYSQL, sql_order, sql_where
         self.flush()
         rid = root_id(q["root"]) if q.get("root") is not None else None
-        where, params = sql_where(q, MYSQL, rid)
+        where, params = sql_where(q, MYSQL, rid, self._name_lc_ready())
         with self.conn.cursor() as cur:
             cur.execute(f"SELECT document FROM files{where} ORDER BY {sql_order(q, MYSQL)} "
                         "LIMIT %s OFFSET %s", [*params, q["limit"] + 1, q["offset"]])

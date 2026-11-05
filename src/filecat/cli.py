@@ -33,6 +33,7 @@ COMMANDS = {
     "scan-everything": "filecat.everything",
     "agents": "filecat.agents_cmd",
     "rollups": "filecat.rollups_cmd",
+    "search": "filecat.search_cmd",
     "storage": "filecat.storage_cmd",
 }
 
@@ -420,6 +421,15 @@ def build_parser() -> argparse.ArgumentParser:
     a = asub.add_parser("fingerprint", help="print the certificate fingerprint the agent at HOST[:PORT] presents")
     a.add_argument("target", metavar="HOST[:PORT]")
     a.add_argument("--timeout", type=float, default=5.0, help="seconds to connect")
+
+    p = sub.add_parser("search", help="file-name search upkeep")
+    ssub = p.add_subparsers(dest="action", required=True)
+    r = ssub.add_parser("reindex", help="fill the lower-cased name column that name searches use, for "
+                                        "records stored before it existed; safe to stop and run again "
+                                        "(searches stay correct meanwhile, but scan every record)")
+    _storage(r)
+    r.add_argument("--batch", type=int, default=5000, metavar="N", help="rows per update (default 5000)")
+    r.add_argument("--json", action="store_true", help="one JSON object")
 
     p = sub.add_parser("rollups", help="rollup groups: the rules and modes in force, what the catalog "
                                        "holds, what a scan would suggest, and the sticky redactions")

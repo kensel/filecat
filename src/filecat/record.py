@@ -38,6 +38,12 @@ def root_id(root: str) -> str:
     return hashlib.sha256(root.encode("utf-8")).hexdigest()[:16]
 
 
+def name_lc(name: str | None) -> str:
+    """The lower-cased name every backend stores as `name_lc` (indexed, for name search).
+    Queries lower their pattern the same way."""
+    return (name or "").lower()
+
+
 def suffix_of(name: str) -> str:
     """Extension in lower case without the dot; empty when the name has none.
 

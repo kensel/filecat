@@ -21,13 +21,14 @@ from __future__ import annotations
 
 import json
 import time
-from typing import Any, Iterable, Iterator
+from typing import Any, Callable, Iterable, Iterator
 
-from ..record import NON_FILE_KINDS, root_id
+from ..record import NON_FILE_KINDS, name_lc, root_id
 from .base import Backend, Document, chunks
 
 BATCH_SIZE = 500
 BATCH_SECONDS = 2.0
+_HIDE = {"_id": 0, "name_lc": 0}      # projection: a document as put, without the derived field
 DEFAULT_DB = "filecat"     # when the DSN names no database (mongodb://host:27017/)
 
 
@@ -115,6 +116,10 @@ class MongoBackend(Backend):
         self.files.create_index("kind")
         self.files.create_index("suffix")
         self.files.create_index("mime")
+        # lower-cased name, for the file-name search; documents stored before it existed
+        # get it from reindex_names() (`filecat search reindex`)
+        self.files.create_index("name_lc")
+        self._names_ready = False
         self.members.create_index(
             [("root_id", 1), ("archive_rel_path", 1), ("index", 1)], unique=True)
         self.members.create_index("role")
@@ -160,7 +165,7 @@ class MongoBackend(Backend):
         ops = [
             self._ReplaceOne(
                 {"root_id": doc["root_id"], "rel_path": doc["rel_path"]},
-                _bson_safe(doc), upsert=True,
+                {**_bson_safe(doc), "name_lc": name_lc(doc.get("name"))}, upsert=True,
             )
             for doc in self._buffer
         ]
@@ -170,7 +175,7 @@ class MongoBackend(Backend):
 
     def get(self, root: str, rel_path: str) -> Document | None:
         self.flush()
-        doc = self.files.find_one({"root_id": root_id(root), "rel_path": rel_path}, {"_id": 0})
+        doc = self.files.find_one({"root_id": root_id(root), "rel_path": rel_path}, _HIDE)
         return doc
 
     # What a rescan compares (Backend.get_stats); the rest of a record can be large.
@@ -192,7 +197,7 @@ class MongoBackend(Backend):
             query["kind"] = kind
         if root is not None:
             query["root_id"] = root_id(root)
-        for doc in self.files.find(query, {"_id": 0}):
+        for doc in self.files.find(query, _HIDE):
             yield doc
 
     def query(self, q: dict[str, Any]) -> dict[str, Any]:
@@ -230,8 +235,29 @@ class MongoBackend(Backend):
         yield from self.files.find(
             query, {"_id": 0, "root": 1, "rel_path": 1, "size": 1, "kind": 1, "probe.backup_data": 1})
 
+    def _name_lc_ready(self) -> bool:
+        """True once every document has a name_lc (cached: a put always fills it)."""
+        if not self._names_ready:
+            self._names_ready = self.files.find_one({"name_lc": None}, {"_id": 1}) is None
+        return self._names_ready
+
+    def reindex_names(self, progress: Callable[[int], None] | None = None, batch: int = 5000) -> int:
+        self.flush()
+        done = 0
+        while True:
+            rows = list(self.files.find({"name_lc": None}, {"name": 1}).limit(batch))
+            if not rows:
+                break
+            self.files.bulk_write([self._pymongo.UpdateOne({"_id": r["_id"]}, {"$set": {
+                "name_lc": name_lc(r.get("name"))}}) for r in rows], ordered=False)
+            done += len(rows)
+            if progress:
+                progress(done)
+        self._names_ready = True
+        return done
+
     @staticmethod
-    def _browse_filter(q: dict[str, Any]) -> dict[str, Any]:
+    def _browse_filter(q: dict[str, Any], name_lc: bool = False) -> dict[str, Any]:
         import re
         blank = [None, ""]
         has_errors = {"errors": {"$exists": True, "$nin": [None, [], "", {}]}}
@@ -276,10 +302,15 @@ class MongoBackend(Backend):
         if "q" in q:
             and_.append({"rel_path": {"$regex": re.escape(q["q"]), "$options": "i"}})
         # file-name search (filecat.search): the regex is anchored at the ends the pattern is,
-        # so `eve*.exe` is ^eve.*\.exe$ and plain text is an unanchored literal
+        # so `eve*.exe` is ^eve.*\.exe$ and plain text is an unanchored literal. With name_lc
+        # filled it is a case-sensitive regex on the lower-cased pattern: a prefix like `^eve`
+        # is then a range scan of the name_lc index
         from ..search import regex_of
         for glob in q.get("names", ()):
-            and_.append({"name": {"$regex": regex_of(glob), "$options": "is"}})
+            if name_lc:
+                and_.append({"name_lc": {"$regex": regex_of(glob.lower()), "$options": "s"}})
+            else:
+                and_.append({"name": {"$regex": regex_of(glob), "$options": "is"}})
         if "exts" in q:
             and_.append({"suffix": {"$in": list(q["exts"])}})
         for key, op, field in (("min_size", "$gte", "size"), ("max_size", "$lte", "size"),
@@ -298,7 +329,8 @@ class MongoBackend(Backend):
         sort = {q["sort"]: -1 if q["desc"] else 1}
         if q["sort"] != "rel_path":
             sort["rel_path"] = 1
-        rows = list(self.files.find(self._browse_filter(q), {"_id": 0}).sort(list(sort.items()))
+        rows = list(self.files.find(self._browse_filter(q, self._name_lc_ready()), _HIDE)
+                    .sort(list(sort.items()))
                     .skip(q["offset"]).limit(q["limit"] + 1))
         return {"rows": rows[:q["limit"]], "more": len(rows) > q["limit"]}
 
@@ -577,7 +609,7 @@ class MongoBackend(Backend):
         from bson import ObjectId
         self.flush()
         query = {} if after is None else {"_id": {"$gt": ObjectId(after)}}
-        docs = list(self.files.find(query).sort("_id", 1).limit(limit))
+        docs = list(self.files.find(query, {"name_lc": 0}).sort("_id", 1).limit(limit))
         if not docs:
             return [], after
         last = str(docs[-1]["_id"])
