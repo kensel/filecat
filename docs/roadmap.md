@@ -431,13 +431,15 @@ Everything does for one PC (e.g. `eve*.exe` on all NAS shares at once).
 
 **v0.2.5 scope** (decided 2026-11-05):
 
-- [ ] **Index**: `name_lc` with an ordinary index on SQLite, PostgreSQL, MySQL,
+- [x] **Index**: `name_lc` with an ordinary index on SQLite, PostgreSQL, MySQL,
   SQL Server and MongoDB, filled where each backend builds its row. A literal
   prefix (`eve*.exe`) becomes `name_lc LIKE 'eve%.exe'` (an anchored regex in
   MongoDB) so the index serves it; no more `LOWER(name)` on MySQL and SQL Server.
   Existing catalogs get the column at connect and are backfilled in batches by
   `filecat search reindex` (resumable); searches stay correct until it is done.
-- [ ] **Substring on PostgreSQL**: `pg_trgm` and a GIN trigram index on
+  On a catalog over 200,000 records the indexes are built by `reindex`, not at
+  connect, so the first command after upgrading does not stall.
+- [x] **Substring on PostgreSQL**: `pg_trgm` and a GIN trigram index on
   `name_lc`, skipped with a warning when the extension cannot be created.
 - [x] **Saved and pinned searches**: stored server-side in the catalog (one list
   for everyone until RBAC), `GET /api/searches`, `POST /api/searches/save` and
