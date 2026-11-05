@@ -1,4 +1,4 @@
-"""JPEG/PNG/GIF dims, DDS, TGA. See file-catalog-requirements.md fixture table
+"""JPEG/PNG/GIF dims, DDS, TGA. See docs/file-catalog-requirements.md fixture table
 and 'Archives, images, models, data'.
 """
 from __future__ import annotations

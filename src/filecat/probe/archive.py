@@ -2,7 +2,7 @@
 gzip_xored / bzip2 / xz: unwrap + classify, plus a streamed tar listing when
 the decompressed body turns out to be a tar.
 
-See file-catalog-requirements.md, "Probe order" steps 5-6 and
+See docs/file-catalog-requirements.md, "Probe order" steps 5-6 and
 "Archives, images, models, data".
 """
 from __future__ import annotations

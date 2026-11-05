@@ -1,4 +1,4 @@
-"""Hash policy. See file-catalog-requirements.md, "How a large or remote
+"""Hash policy. See docs/file-catalog-requirements.md, "How a large or remote
 tree is walked" (the hash-policy table).
 
 | size              | policy auto          | --hash full | --hash none |

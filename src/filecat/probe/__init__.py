@@ -2,7 +2,7 @@
 newlines and sample for a regular, non-empty file.
 
 dir / link / empty are decided by the walker before this is called.
-See file-catalog-requirements.md, "Probe order" and the sections after it.
+See docs/file-catalog-requirements.md, "Probe order" and the sections after it.
 """
 from __future__ import annotations
 

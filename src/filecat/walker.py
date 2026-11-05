@@ -1,4 +1,4 @@
-"""Iterative directory walk. See file-catalog-requirements.md, "How a large
+"""Iterative directory walk. See docs/file-catalog-requirements.md, "How a large
 or remote tree is walked" and "Resume/rerun" (the rerun rule lives in
 scan.py's docstring and here, since the walk is where it is enforced).
 

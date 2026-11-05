@@ -1,7 +1,7 @@
 """`filecat summary` CLI test: three files, two suffixes, known sizes ->
 `--by extension` totals equal the sum of those sizes. Drives
 filecat.cli.main([...]) and captures stdout, per
-file-catalog-requirements.md's Tests table.
+docs/file-catalog-requirements.md's Tests table.
 """
 from __future__ import annotations
 

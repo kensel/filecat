@@ -1,6 +1,6 @@
 """`filecat members`: print the archive member rows recorded for one record.
 
-See file-catalog-requirements.md and backends/base.py's "archive members"
+See docs/file-catalog-requirements.md and backends/base.py's "archive members"
 section -- member rows are stored apart from the document itself
 (`Backend.put_members` / `list_members`).
 """

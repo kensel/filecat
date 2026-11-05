@@ -6,7 +6,7 @@ encodings, image and texture sizes, PE headers and toolchain, archive listings,
 and freedesktop/libmagic types. Optional Ollama summaries for a bounded set of
 files. The `programs` command inventories the software installed on this PC.
 
-The requirements are in [`file-catalog-requirements.md`](file-catalog-requirements.md).
+The requirements are in [`docs/file-catalog-requirements.md`](docs/file-catalog-requirements.md).
 That note is the specification; this README covers installing and running the tool.
 
 ## Install

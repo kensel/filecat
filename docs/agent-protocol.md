@@ -2,8 +2,8 @@
 
 The contract between `filecat` (the Python client, `src/filecat/agent_client.py`)
 and `filecat-agent`, the Rust daemon that runs on a NAS (research note
-[02](research/02-rust-agent-architecture.md), draft sources in
-[research/rust-agent](research/rust-agent/)). The draft `main.rs` came first
+[02](research/02-rust-agent-architecture.md); the draft sources it had were
+removed in v0.2.5, the agent is [agent/](../agent/)). The draft `main.rs` came first
 and has gaps; this page settles them, and the agent is to be brought into
 line with it ([the differences](#differences-from-the-draft-mainrs) are
 listed at the end). Where this page and the draft disagree, this page wins.
@@ -212,7 +212,7 @@ of shares. Design: [rollups.md](rollups.md).
   channel). Per `roots` entry: `root` (the catalog's root id), `base` (the
   root's absolute path on this host), `hashes` and `inodes`. For each child
   **directory** at or beneath `base`, the agent computes
-  `HMAC-SHA256(key, "filecat-redact-v1 " + root + " " + rel)` (NUL bytes) where `rel`
+  `HMAC-SHA256(key, "filecat-redact-v1\0" + root + "\0" + rel)` (NUL bytes) where `rel`
   is the child's path relative to `base`, `/`-separated, no leading or trailing
   `/`, in the catalog's name form (a byte that is not valid UTF-8 is the
   character U+F700 + byte, UTF-8 encoded), no case folding and no Unicode

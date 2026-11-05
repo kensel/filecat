@@ -1,6 +1,6 @@
 """ZIP listing, OOXML -> document, gzip and gzip_xored + inflate-and-classify.
 
-See file-catalog-requirements.md 'Probe order' steps 5-6 and the fixture table.
+See docs/file-catalog-requirements.md 'Probe order' steps 5-6 and the fixture table.
 """
 from __future__ import annotations
 

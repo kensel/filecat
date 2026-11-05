@@ -62,7 +62,7 @@ exclude = [
 
 ## 4. Catalog Record Schema for Synthetic Rollups
 
-When Python receives a kind: "rollup" entry from the Rust agent (see handle_list_dir in rust-agent/main.rs), it writes the following document into the records collection:
+When Python receives a kind: "rollup" entry from the Rust agent (see `agent/src/walk.rs`), it writes the following document into the records collection:
 
 ```json
 {

@@ -1,6 +1,6 @@
 """The catalog document: one per file or directory, shared by every backend.
 
-See file-catalog-requirements.md, section "Record".
+See docs/file-catalog-requirements.md, section "Record".
 """
 from __future__ import annotations
 

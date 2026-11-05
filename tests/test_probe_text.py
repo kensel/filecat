@@ -1,5 +1,5 @@
 """Encoding, newlines, sample, CSV/semicolon, XML-declared-encoding, scene-text,
-lang.dat. See file-catalog-requirements.md 'Encoding and newlines' and the
+lang.dat. See docs/file-catalog-requirements.md 'Encoding and newlines' and the
 fixture table.
 """
 from __future__ import annotations

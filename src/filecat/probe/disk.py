@@ -8,7 +8,7 @@ virtual disks. Partitions become member rows (role "volume"); ISO files become
 member rows by name. Based on the disk_inspector v2.1 reference script
 (contrib/disk_inspector), with its container-layout bugs fixed.
 
-See file-catalog-requirements.md, "Probe order" step 4b.
+See docs/file-catalog-requirements.md, "Probe order" step 4b.
 """
 from __future__ import annotations
 

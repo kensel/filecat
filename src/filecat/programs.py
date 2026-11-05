@@ -1,6 +1,6 @@
 """`filecat programs`: inventory installed software.
 
-See file-catalog-requirements.md, section "Installed programs".
+See docs/file-catalog-requirements.md, section "Installed programs".
 
 Sources, each producing zero or more program records:
 

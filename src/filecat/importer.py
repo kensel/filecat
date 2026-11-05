@@ -1,7 +1,7 @@
 """filecat import: load PowerShell `Get-ChildItem | ConvertTo-Json` exports (one JSON
 object per line) or filecat's own jsonl output into a catalog backend.
 
-See file-catalog-requirements.md, "Record" and "How a large or remote tree is walked",
+See docs/file-catalog-requirements.md, "Record" and "How a large or remote tree is walked",
 plus the task note this module was built from for the exact field mapping.
 
 Public API:

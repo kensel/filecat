@@ -1,7 +1,7 @@
 """PE executable measurements via pefile: header fields, sections, imports,
 VERSIONINFO, the Rich header / toolchain, and a simple packed-image heuristic.
 
-See file-catalog-requirements.md, "Executables" and "Rich header and toolchain".
+See docs/file-catalog-requirements.md, "Executables" and "Rich header and toolchain".
 """
 from __future__ import annotations
 

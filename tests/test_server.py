@@ -677,5 +677,5 @@ def test_server_documents_in_each_backend(kind, fixture_dir):
 
 
 def test_scan_server_ps1_is_marked_legacy():
-    text = (Path(__file__).parent.parent / "ScanServer.ps1").read_text(encoding="utf-8")
+    text = (Path(__file__).parent.parent / "scripts" / "ScanServer.ps1").read_text(encoding="utf-8")
     assert "Legacy" in text and "filecat server" in text

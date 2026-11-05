@@ -1,7 +1,7 @@
 """Type identification: freedesktop glob names for every file, libmagic on
 bytes when asked, and the optional PRONOM / TrID / Magika identifiers.
 
-See file-catalog-requirements.md, "Type identification".
+See docs/file-catalog-requirements.md, "Type identification".
 """
 from __future__ import annotations
 

@@ -18,7 +18,7 @@ protocol, `capabilities`), [agent-deploy.md](agent-deploy.md) (the NAS side),
 | `filecat agents status [NAME..]` | new: hello + capabilities, and whether the agent is the build this filecat expects |
 | `filecat server` | new: the coordinator (health checks, scheduled jobs, job history, optional viewer) |
 | `filecat serve` | existing: the read-only web viewer. `filecat server --serve` runs it in the same process |
-| `ScanServer.ps1` | existing PowerShell script: SMB-only, see section 9 |
+| `scripts/ScanServer.ps1` | existing PowerShell script: SMB-only, see section 9 |
 
 `filecat serve` stays a viewer: it never starts a scan, never needs agents and has no state of its
 own. `filecat server` is the process that does things.
@@ -625,13 +625,13 @@ its usual progress lines to stderr (redaction-safe by their own rules, rollups.m
 interval to 60 s. Each scan job keeps its own resume file next to the catalog
 (`<catalog>.<job>.resume.json`), so jobs that run side by side do not overwrite each other's.
 
-## 9. ScanServer.ps1
+## 9. scripts/ScanServer.ps1
 
 Kept, as **legacy**, not replaced: it solves a different problem. It discovers the disk shares of a
 Windows or SMB server with `net view`, maps credentials with `net use`, and scans them over SMB on
 a machine that has no agent, once, by hand or from Task Scheduler. `filecat server` knows nothing
 about `net use` or share discovery: it works with agents (a NAS) and with roots you name. Use
-`ScanServer.ps1` for an SMB-only server with no agent; use `[[agents]]` plus `[[server.jobs]]` for
+`scripts/ScanServer.ps1` for an SMB-only server with no agent; use `[[agents]]` plus `[[server.jobs]]` for
 anything that runs an agent. The roadmap item "Windows agent" is what would retire it. The script's
 header now says so.
 
@@ -647,7 +647,7 @@ expected-hash tests.
 
 ## 11. Open questions
 
-* `ScanServer.ps1`: retire it with the Windows agent, or fold `net view` share discovery into a
+* `scripts/ScanServer.ps1`: retire it with the Windows agent, or fold `net view` share discovery into a
   `scan` job kind (`shares = "discover"`)?
 * The login is for one admin (one password). Per-user accounts and persisted sessions/counters are
   not designed. (TLS in the viewer itself is done: section 7, "TLS".)
