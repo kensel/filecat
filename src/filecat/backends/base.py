@@ -138,6 +138,30 @@ class Backend(ABC):
         res = self.query({**q, "limit": q["limit"] + 1})
         return {"rows": res["rows"][:q["limit"]], "more": len(res["rows"]) > q["limit"]}
 
+    def _facet_error(self, q: dict[str, Any], by: str) -> dict[str, Any] | None:
+        """None when search_facets(q, by) can run, else its answer: an empty one with an `error`
+        (a folder break-down is only meaningful inside one root). ValueError for a bad `by`."""
+        from ..browse import FACET_BY, facet_result
+        if by not in FACET_BY:
+            raise ValueError(f"cannot break down by {by!r} (use {', '.join(FACET_BY)})")
+        if by == "folder" and len(q["roots"] if q.get("roots") is not None else self.roots()) > 1:
+            return {**facet_result([]), "error": "pick a root first: a folder break-down works within one root"}
+        return None
+
+    def search_facets(self, q: dict[str, Any], by: str, limit: int = 20) -> dict[str, Any]:
+        """Break down the matches of a search_names() query (offset / limit / sort ignored) by
+        `by`: "ext" (suffix, "" for none), "root", or "folder" (the path segment just below
+        q["path"], the top one without it; "" for records directly in that folder; one root only).
+        Returns {"buckets": [{"key", "count", "bytes"}] (top `limit` by count, then key),
+        "other": {"count", "bytes", "buckets"} for the rest, "total": {"count", "bytes"}}, plus
+        an "error" and no buckets when a folder break-down spans several roots. This default
+        scans list(); SQL backends and MongoDB group in the server."""
+        from ..browse import facet_documents, facet_result, matches
+        if (err := self._facet_error(q, by)) is not None:
+            return err
+        groups = facet_documents((d for d in self.list() if matches(d, q)), by, q.get("path"))
+        return facet_result(((k, c, b) for k, (c, b) in groups.items()), limit)
+
     def subtree(self, root: str, parent: str) -> list[dict[str, Any]]:
         """Child folders of `parent` ("" = the root) with the readable files
         and bytes anywhere beneath each: [{"name", "files", "bytes"}],

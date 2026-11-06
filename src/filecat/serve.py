@@ -16,7 +16,10 @@ Read-only. Serves one page (filecat/web/index.html) and a JSON API:
                                        on demand and reused for --graph-max-age
     GET /api/treemap?id=               one stored snapshot (a pinned one, say)
     GET /api/pins?root=&prefix=&depth= the pinned snapshots of that view, grouped by pin
-    GET /api/search?q=&root=&host=&ext=&min_size=&max_size=&after=&before=&kind=&sort=&limit=&offset=
+    GET /api/search/facets?<the search parameters>&by=ext|root|folder&limit=
+                                       a break-down of all the matches (counts and bytes per extension,
+                                       root or folder)
+    GET /api/search?q=&root=&host=&ext=&min_size=&max_size=&after=&before=&kind=&path=&sort=&limit=&offset=
                                        file-name search, Everything-style (filecat/search.py); a page of
                                        rows and `more`, never anything inside a rollup
     GET /api/record?root=&rel_path=    the full stored document
@@ -864,6 +867,34 @@ class Catalog:
                 "limit": q["limit"], "sort": q["sort"], "desc": q["desc"],
                 "elapsed_ms": round((time.perf_counter() - started) * 1000, 1)}
 
+    def search_facets(self, p: dict[str, str]) -> dict[str, Any]:
+        """GET /api/search/facets?<the /api/search parameters>&by=ext|root|folder&limit=20
+
+        A break-down of everything the search matches (not one page): {"by", "buckets": [{"key",
+        "count", "bytes"}] (roots also carry "host"), "other": {"count", "bytes", "buckets"} for
+        what the top `limit` leave out, "total", "elapsed_ms"}. "folder" groups by the path
+        segment below `path:` and needs one root: with several, "error" says to pick one
+        (key "" is the records directly in the folder). Counts are the search's own."""
+        from . import search as srch
+        started = time.perf_counter()
+        by = (p.get("by") or "ext").strip().lower()
+        try:
+            limit = min(200, max(1, int(p.get("limit") or 20)))
+        except ValueError:
+            raise ValueError("limit must be a number") from None
+        spec, query_roots, q = self._search_query(p)
+        if query_roots == []:
+            from .browse import FACET_BY, facet_result
+            if by not in FACET_BY:
+                raise ValueError(f"cannot break down by {by!r} (use {', '.join(FACET_BY)})")
+            found = facet_result([])
+        else:
+            found = self.call(lambda b: b.search_facets(q, by, limit))
+        if by == "root":
+            for bucket in found["buckets"]:
+                bucket["host"] = srch.host_of(bucket["key"])
+        return {"by": by, **found, "elapsed_ms": round((time.perf_counter() - started) * 1000, 1)}
+
 
 ROUTES = {"/api/info": "info", "/api/roots": "roots", "/api/summary": "summary", "/api/records": "records",
           "/api/subtree": "subtree", "/api/treemap": "treemap", "/api/record": "record", "/api/members": "members",
@@ -871,6 +902,7 @@ ROUTES = {"/api/info": "info", "/api/roots": "roots", "/api/summary": "summary",
           "/api/search": "search"}
 ROUTES.update({"/api/topology": "topology", "/api/rollups": "rollups"})
 ROUTES["/api/searches"] = "searches"
+ROUTES["/api/search/facets"] = "search_facets"
 SHARED_WRITES = ("search_save", "search_delete")    # need a session (and the CSRF checks) once a password is set
 EXPORT_PATH = "/api/search/export"      # streamed by the handler (Handler._export), not a Catalog method
 POST_ROUTES = {"/api/backend": "select", "/api/pin": "pin", "/api/unpin": "unpin",

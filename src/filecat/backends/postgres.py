@@ -414,6 +414,18 @@ class PostgresBackend(Backend):
         self.conn.commit()
         return {"rows": rows[:q["limit"]], "more": len(rows) > q["limit"]}
 
+    def search_facets(self, q: dict[str, Any], by: str, limit: int = 20) -> dict[str, Any]:
+        from ..browse import POSTGRES, facet_result, sql_facets
+        if (err := self._facet_error(q, by)) is not None:
+            return err
+        self.flush()
+        sql, params = sql_facets(q, by, POSTGRES, self._name_lc_ready())
+        with self.conn.cursor() as cur:
+            cur.execute(sql, params)
+            rows = cur.fetchall()
+        self.conn.commit()
+        return facet_result(rows, limit)
+
     def subtree(self, root: str, parent: str) -> list[dict[str, Any]]:
         from ..browse import POSTGRES, sql_subtree
         self.flush()

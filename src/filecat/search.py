@@ -16,6 +16,8 @@ match (AND), and a term is either a name pattern or a `key:value` filter.
                         rollup, or any stored kind (image, text, ...)
     root:homes          roots whose path contains the text (case-insensitive);
                         an exact root string is taken as is
+    path:photos/2024    records in that folder or below it (not a sibling like
+                        `photos/2024-old`); either slash as separator
     host:nas-*          roots on that host (the host of `\\\\host\\share`
                         or `//host/share`; wildcards allowed); local roots have
                         host "" and are chosen with `host:-`
@@ -40,8 +42,8 @@ import re
 from datetime import datetime, timezone
 from typing import Any
 
-KEYS = ("ext", "size", "after", "before", "kind", "root", "host")
-SEARCH_FIELDS = ("q", "root", "host", "ext", "min_size", "max_size", "after", "before", "kind")   # the form's
+KEYS = ("ext", "size", "after", "before", "kind", "root", "host", "path")
+SEARCH_FIELDS = ("q", "root", "host", "ext", "min_size", "max_size", "after", "before", "kind", "path")   # the form's
 ESCAPE = "!"                    # the LIKE escape character
 DEFAULT_LIMIT = 100
 MAX_LIMIT = 1000
@@ -55,7 +57,12 @@ _HOST = re.compile(r"^(?:\\\\|//)([^\\/]+)")
 
 def empty() -> dict[str, Any]:
     return {"names": [], "exts": [], "min_size": None, "max_size": None, "after": None, "before": None,
-            "kind": None, "root_terms": [], "host_terms": []}
+            "kind": None, "root_terms": [], "host_terms": [], "path": None}
+
+
+def norm_path(text: str) -> str:
+    """A folder path as stored in rel_path: `/` separators, no leading or trailing slash."""
+    return text.replace("\\", "/").strip().strip("/")
 
 
 # --- values ------------------------------------------------------------------
@@ -115,6 +122,8 @@ def _apply(spec: dict[str, Any], key: str, value: str) -> None:
         spec["root_terms"].append(value)
     elif key == "host":
         spec["host_terms"].append(value)
+    elif key == "path":
+        spec["path"] = norm_path(value) or None
 
 
 def parse_query(text: str | None) -> dict[str, Any]:
@@ -135,7 +144,7 @@ def with_params(spec: dict[str, Any], p: dict[str, Any]) -> dict[str, Any]:
     """`spec` plus the separate URL parameters (ext, min_size, max_size, after, before,
     kind, root, host). A parameter narrows what the text already says."""
     spec = {k: (list(v) if isinstance(v, list) else v) for k, v in spec.items()}
-    for key in ("ext", "after", "before", "kind", "root", "host"):
+    for key in ("ext", "after", "before", "kind", "root", "host", "path"):
         if p.get(key):
             _apply(spec, key, str(p[key]))
     for key, field in (("min_size", ">="), ("max_size", "<=")):
@@ -145,7 +154,7 @@ def with_params(spec: dict[str, Any], p: dict[str, Any]) -> dict[str, Any]:
 
 
 def has_criteria(spec: dict[str, Any]) -> bool:
-    return any(spec[k] for k in ("names", "exts", "kind", "root_terms", "host_terms")) or any(
+    return any(spec[k] for k in ("names", "exts", "kind", "root_terms", "host_terms", "path")) or any(
         spec[k] is not None for k in ("min_size", "max_size", "after", "before"))
 
 
@@ -247,6 +256,8 @@ def to_query(spec: dict[str, Any], roots: list[str] | None, *, sort: str | None 
         q["not_kinds"] = ["dir", "rollup"]      # unlike files_only, unreadable files are found too
     elif kind:
         q["kind"] = kind
+    if spec.get("path"):
+        q["path"] = spec["path"]
     if roots is not None:
         q["roots"] = list(roots)
     q["sort"] = sort if sort in SORTS else "name"

@@ -460,6 +460,17 @@ class MssqlBackend(Backend):
         rows = [json.loads(r[0]) for r in cur.fetchall()]
         return {"rows": rows[:q["limit"]], "more": len(rows) > q["limit"]}
 
+    def search_facets(self, q: dict[str, Any], by: str, limit: int = 20) -> dict[str, Any]:
+        from ..browse import MSSQL, facet_result, sql_facets
+        if (err := self._facet_error(q, by)) is not None:
+            return err
+        self.flush()
+        sql, params = sql_facets(q, by, MSSQL, self._name_lc_ready())
+        cur = self.conn.cursor()
+        cur.execute(sql, params)
+        rows = cur.fetchall()
+        return facet_result(rows, limit)
+
     def subtree(self, root: str, parent: str) -> list[dict[str, Any]]:
         from ..browse import MSSQL, sql_subtree
         self.flush()

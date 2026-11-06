@@ -395,6 +395,15 @@ class SqliteBackend(Backend):
             [*params, q["limit"] + 1, q["offset"]]).fetchall()
         return {"rows": [json.loads(r[0]) for r in rows[:q["limit"]]], "more": len(rows) > q["limit"]}
 
+    def search_facets(self, q: dict[str, Any], by: str, limit: int = 20) -> dict[str, Any]:
+        from ..browse import SQLITE, facet_result, sql_facets
+        if (err := self._facet_error(q, by)) is not None:
+            return err
+        self._flush_buffer()
+        sql, params = sql_facets(q, by, SQLITE, self._name_lc_ready())
+        rows = self.conn.execute(sql, params).fetchall()
+        return facet_result(rows, limit)
+
     def subtree(self, root: str, parent: str) -> list[dict[str, Any]]:
         from ..browse import SQLITE, sql_subtree
         self._flush_buffer()

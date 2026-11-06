@@ -122,6 +122,8 @@ button.danger { color: var(--warn); }
 .saved-list summary { cursor: pointer; color: var(--muted); font-size: 12.5px; }
 .saved-list table { margin-top: 6px; }
 .pager .export { margin-left: auto; font-size: 12.5px; }
+.facets[hidden] { display: none; }
+.facets .crumbs { font-size: 13px; margin: 0 14px 8px; }
 .search-help code { background: var(--hover); border-radius: 4px; padding: 1px 5px; cursor: pointer; }
 .search-help ul { margin: 6px 0 0; padding-left: 18px; line-height: 1.8; }
 .swatch { display: inline-block; width: 12px; height: 12px; border-radius: 3px; vertical-align: -1px; margin-right: 6px; }
@@ -1717,7 +1719,60 @@ function exportParams(p, format) {
   for (const f of [...SEARCH_FIELDS, "sort", "desc"]) if (p[f]) out[f] = p[f];
   return out;
 }
-const SEARCH_FIELDS = ["q", "root", "host", "ext", "min_size", "max_size", "after", "before", "kind"];
+const SEARCH_FIELDS = ["q", "root", "host", "ext", "min_size", "max_size", "after", "before", "kind", "path"];
+// The break-down of all the matches by extension / root / folder (GET /api/search/facets), loaded
+// after the results; a click narrows the search.
+let facetBy = "ext";
+function facetPanel(p, box) {
+  const hasRoot = !!p.root;
+  if (facetBy === "folder" && !hasRoot) facetBy = "ext";
+  const to = extra => { const n = {...p, ...extra}; delete n.offset; for (const k of Object.keys(n)) if (n[k] === "") delete n[k]; go("search", n); };
+  const crumbs = () => {
+    if (!p.path) return null;
+    const segs = p.path.split("/").filter(Boolean);
+    const out = [h("a", {href: route("search", {...p, path: ""}), title: "the whole root"}, "(top)")];
+    segs.forEach((s, i) => out.push(h("span", {class: "sep"}, "/"), i === segs.length - 1 ? h("span", {}, s)
+      : h("a", {href: route("search", {...p, path: segs.slice(0, i + 1).join("/")})}, s)));
+    return h("div", {class: "crumbs"}, "In ", out);
+  };
+  const label = (by, k) => k !== "" ? k : by === "folder" ? "(files here)" : "(none)";
+  const body = h("div", {class: "facet-body"});
+  const tab = (by, text) => h("button", {class: facetBy === by ? "on" : "", disabled: by === "folder" && !hasRoot,
+    title: by === "folder" && !hasRoot ? "Choose a root first (the root box above)." : "", onclick: () => { facetBy = by; facetPanel(p, box); }}, text);
+  fill(box, h("h2", {}, "Break down", h("small", {}, "all matches, not only this page")),
+    h("div", {class: "toolbar"}, h("span", {class: "seg"}, tab("ext", "Extension"), tab("root", "Root"), tab("folder", "Folder")),
+      hasRoot ? null : h("span", {class: "note"}, "Choose a root to break down by folder.")),
+    crumbs(), body);
+  const by = facetBy;
+  fill(body, h("div", {class: "loading"}, "Counting…"));
+  const query = {};
+  for (const f of SEARCH_FIELDS) if (p[f]) query[f] = p[f];
+  api("/api/search/facets", {...query, by, limit: 20}).then(d => {
+    if (by !== facetBy || parseHash().view !== "search") return;
+    if (d.error) return fill(body, h("div", {class: "muted"}, d.error));
+    if (!d.total.count) return fill(body, h("div", {class: "muted"}, "Nothing to break down."));
+    const click = b => {
+      if (by === "ext") return b.key === "" ? null : () => to({ext: b.key, q: (p.q || "").replace(/(^|\s)ext:(?:"[^"]*"|\S+)/gi, " ").trim()});
+      if (by === "root") return () => to({root: b.key});
+      return b.key === "" ? null : () => to({path: (p.path ? p.path + "/" : "") + b.key});
+    };
+    const row = b => {
+      const act = click(b);
+      return h("tr", {class: act ? "click" : "", onclick: act, title: act ? "narrow the search to this" : ""},
+        h("td", {class: "path"}, label(by, b.key), b.host ? h("span", {class: "sub"}, b.host) : null),
+        h("td", {class: "num"}, num(b.count)), h("td", {class: "num"}, bytes(b.bytes)),
+        h("td", {class: "pct"}, h("i", {style: `width:${(b.count / d.total.count * 100).toFixed(1)}%`}),
+          h("span", {class: "muted"}, `${(b.count / d.total.count * 100).toFixed(1)}%`)));
+    };
+    fill(body, h("div", {class: "scroll"}, h("table", {},
+      h("thead", {}, h("tr", {}, h("th", {}, by === "ext" ? "extension" : by === "root" ? "root" : "folder"),
+        h("th", {class: "num"}, "files"), h("th", {class: "num"}, "size"), h("th", {}, ""))),
+      h("tbody", {}, d.buckets.map(row), d.other.buckets ? h("tr", {}, h("td", {class: "muted"}, `${num(d.other.buckets)} more`),
+        h("td", {class: "num muted"}, num(d.other.count)), h("td", {class: "num muted"}, bytes(d.other.bytes)), h("td", {})) : null),
+      h("tfoot", {}, h("tr", {}, h("td", {}, "total"), h("td", {class: "num"}, num(d.total.count)),
+        h("td", {class: "num"}, bytes(d.total.bytes)), h("td", {}))))));
+  }).catch(e => { if (by === facetBy) fill(body, h("div", {class: "muted"}, "Break-down unavailable: " + e.message)); });
+}
 async function viewSearch(params) {
   const p = {...params};
   const input = (name, attrs) => h("input", {name, value: p[name] || "", ...attrs});
@@ -1747,6 +1802,7 @@ async function viewSearch(params) {
     h("div", {class: "adv"},
       h("label", {}, "root ", roots), h("label", {}, "host ", input("host", {size: 12, placeholder: "nas-main"})),
       h("label", {}, "extension ", input("ext", {size: 10, placeholder: "exe;dll"})),
+      h("label", {title: "this folder and everything below it, relative to the root"}, "folder ", input("path", {size: 16, placeholder: "photos/2024"})),
       h("label", {}, "size ", input("min_size", {size: 7, placeholder: "min 1mb"}), " – ", input("max_size", {size: 7, placeholder: "max 1gb"})),
       h("label", {}, "modified ", input("after", {type: "date"}), " – ", input("before", {type: "date"})),
       h("label", {}, "show ", kind)));
@@ -1778,7 +1834,8 @@ async function viewSearch(params) {
     h("div", {class: "note"}, "Case-insensitive, against the file or folder name only. All terms must match. "
       + "A folder that was rolled up ([CACHE], [BACKUP], [REDACTED]) is found by its own name; what is inside it is not listed anywhere."),
     h("ul", {}, SEARCH_EXAMPLES.map(([ex, why]) => h("li", {}, h("code", {title: "use this", onclick: () => { q.value = ex; q.focus(); }}, ex), " ", h("span", {class: "muted"}, why)))));
-  show(h("div", {class: "stack"}, form, saved, holder));
+  const breakdown = h("section", {class: "card facets", hidden: true});
+  show(h("div", {class: "stack"}, form, saved, breakdown, holder));
   loadSaved();
   if (!SEARCH_FIELDS.some(f => p[f])) return fill(holder, help);
   fill(holder, h("div", {class: "loading"}, "Searching…"));
@@ -1813,6 +1870,7 @@ async function viewSearch(params) {
     h("thead", {}, h("tr", {}, sortTh("name", "name"), sortTh("rel_path", "folder"), h("th", {class: "hide-sm"}, "root"),
       sortTh("size", "size", true), sortTh("mtime_ns", "modified", true), sortTh("kind", "kind"))),
     h("tbody", {}, rows))) : null, pager);
+  if (r.rows.length) { breakdown.hidden = false; facetPanel(p, breakdown); }   // after the results, in its own request
 }
 
 // --- shell -----------------------------------------------------------

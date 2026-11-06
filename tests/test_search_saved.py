@@ -178,12 +178,36 @@ def test_login_required_for_view_gates_the_saved_searches_and_the_export(db):
     try:
         assert v.json("GET", "/api/searches")[0] == 401
         assert v.request("GET", "/api/search/export?q=report*")[0] == 401
+        assert v.json("GET", "/api/search/facets?q=report*&by=ext")[0] == 401
         assert v.json("POST", "/api/searches/save", {"name": "n", "params": {"q": "x"}})[0] == 401
         cookie = v.login()
+        assert v.json("GET", "/api/search/facets?q=report*&by=ext", cookie=cookie)[0] == 200
         assert v.json("GET", "/api/searches", cookie=cookie)[0] == 200
         assert v.request("GET", "/api/search/export?q=report*", cookie=cookie)[0] == 200
     finally:
         v.close()
+
+
+# --- the break-down over HTTP --------------------------------------------------------
+def test_facets_endpoint(v):
+    status, data = v.json("GET", "/api/search/facets?q=report*&by=ext&limit=5")
+    assert status == 200 and data["by"] == "ext" and data["buckets"] == [{"key": "pdf", "count": 12, "bytes": 1266}]
+    assert data["total"]["count"] == 12
+    status, data = v.json("GET", "/api/search/facets?q=pdf&by=root")
+    assert status == 200 and {b["key"]: b["host"] for b in data["buckets"]} == {NAS: "nas-main", LOCAL: ""}
+    status, data = v.json("GET", "/api/search/facets?q=pdf&by=folder")          # two roots
+    assert status == 200 and data["buckets"] == [] and data["error"]
+    status, data = v.json("GET", "/api/search/facets?" + "q=pdf&by=folder&root=nas-main&path=a")
+    assert status == 200 and data["buckets"] == [{"key": "", "count": 13, "bytes": 1271}]
+    assert v.json("GET", "/api/search/facets?q=report*&by=ext&path=a")[1]["total"]["count"] == 12 
+    for bad in ("", "?by=ext", "?q=x&by=nope", "?q=x&by=ext&limit=x", "?q=size:huge&by=ext"):
+        status, data = v.json("GET", "/api/search/facets" + bad)
+        assert status == 400 and data["error"], bad
+
+
+def test_a_saved_search_keeps_its_path(v):
+    status, data = v.json("POST", "/api/searches/save", {"name": "In a", "params": {"q": "pdf", "path": "a"}})
+    assert status == 200 and data["search"]["params"] == {"q": "pdf", "path": "a"}
 
 
 # --- export --------------------------------------------------------------------------

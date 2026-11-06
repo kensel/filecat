@@ -327,6 +327,172 @@ def test_api_needs_a_criterion_and_rejects_bad_values(catalog):
     assert catalog.search({"q": "x", "root": "nope"})["rows"] == []
 
 
+# --- path: and the break-down --------------------------------------------------------------
+def extra_docs():
+    return [
+        doc(NAS, "ab/x.txt", 40, kind="text"),
+        doc(NAS, "a/sub/deep.txt", 60, kind="text"),
+        doc(NAS, "a/sub/deeper/z.bin", None),                    # no size: counts as 0 bytes
+        doc(NAS, "a/sub", 0, kind="dir"),
+        doc(NAS, "a_b/p.txt", 5, kind="text"),
+        doc(NAS, "50%/q.txt", 7, kind="text"),
+    ]
+
+
+@pytest.fixture
+def fbe(be):
+    for d in extra_docs():
+        be.put(d)
+    be.flush()
+    return be
+
+
+def facets(be, by, text="", limit=20, roots=None, **params):
+    """search_facets over the test roots (or `roots`), the way Catalog.search_facets builds the query."""
+    roots = roots or [NAS, OLD, LOCAL]
+    spec = search.with_params(search.parse_query(text), params)
+    resolved = search.resolve_roots(spec, roots)
+    return be.search_facets(search.to_query(spec, resolved if resolved is not None else list(roots)), by, limit)
+
+
+def table(res):
+    return {b["key"]: (b["count"], b["bytes"]) for b in res["buckets"]}
+
+
+def test_path_parsing():
+    assert search.parse_query("path:Photos/2024")["path"] == "Photos/2024"
+    assert search.parse_query('path:"/a\\b\\c/"')["path"] == "a/b/c"
+    assert search.with_params(search.parse_query("x"), {"path": "\\a\\"})["path"] == "a"
+    assert search.parse_query("x path:/")["path"] is None and "path" not in search.to_query(search.parse_query("x"), None)
+    assert search.to_query(search.parse_query("path:a/b"), None)["path"] == "a/b"
+    assert search.has_criteria(search.parse_query("path:a"))
+    assert "path" in search.SEARCH_FIELDS and "path" in search.KEYS
+
+
+def test_path_filter(fbe):
+    docs = catalog_docs() + extra_docs()
+    under_a = sorted(d["rel_path"] for d in docs if d["rel_path"] == "a" or d["rel_path"].startswith("a/"))
+    assert names(find(fbe, path="a")) == under_a and "a" in under_a and "a/sub/deeper/z.bin" in under_a
+    assert names(find(fbe, "path:a")) == under_a                       # in the text too
+    assert names(find(fbe, path="/a/")) == under_a                      # slashes are trimmed
+    assert names(find(fbe, path="a/sub")) == ["a/sub", "a/sub/deep.txt", "a/sub/deeper/z.bin"]
+    assert names(find(fbe, "deep", path="a/sub")) == ["a/sub/deep.txt"]
+    assert names(find(fbe, "txt", path="a")) == ["a/eve.txt", "a/sub/deep.txt"]
+    assert names(find(fbe, "path:a\\sub ext:bin")) == ["a/sub/deeper/z.bin"]      # backslashes too
+    assert "ab/x.txt" not in names(find(fbe, path="a")) and "a_b/p.txt" not in names(find(fbe, path="a"))
+    assert names(find(fbe, path="ab")) == ["ab/x.txt"]
+
+
+def test_path_escapes_like_wildcards(fbe):
+    assert names(find(fbe, path="50%")) == ["50%/q.txt"]
+    assert names(find(fbe, path="a_b")) == ["a_b/p.txt"]                # not `ab`
+    for p in ("a%", "a_", "5%", "%", "_"):
+        assert names(find(fbe, path=p)) == [], p
+
+
+def test_facets_by_extension(fbe):
+    docs = catalog_docs() + extra_docs()
+    want: dict[str, list[int]] = {}
+    for d in docs:
+        row = want.setdefault(d["suffix"], [0, 0])
+        row[0] += 1
+        row[1] += d["size"] or 0
+    res = facets(fbe, "ext", kind="")
+    assert table(res) == {k: tuple(v) for k, v in want.items()}
+    assert res["total"] == {"count": len(docs), "bytes": sum(v[1] for v in want.values())}
+    assert res["other"] == {"count": 0, "bytes": 0, "buckets": 0}
+    counts = [(b["count"], b["key"]) for b in res["buckets"]]
+    assert counts == sorted(counts, key=lambda c: (-c[0], c[1]))
+    assert table(res)[""][0] == sum(1 for d in docs if d["suffix"] == "")      # folders and rollups: no extension
+    assert table(facets(fbe, "ext", "path:a/sub")) == {"txt": (1, 60), "bin": (1, 0), "": (1, 0)}   # NULL size is 0
+
+
+def test_facets_other_bucket(fbe):
+    full = facets(fbe, "ext")
+    small = facets(fbe, "ext", limit=2)
+    assert small["buckets"] == full["buckets"][:2]
+    rest = full["buckets"][2:]
+    assert small["other"] == {"count": sum(b["count"] for b in rest), "bytes": sum(b["bytes"] for b in rest),
+                              "buckets": len(rest)} and len(rest) > 0
+    assert small["total"] == full["total"]
+    assert facets(fbe, "ext", limit=1)["buckets"][0]["key"] == full["buckets"][0]["key"]
+
+
+def test_facets_with_a_name_pattern(fbe):
+    res = facets(fbe, "ext", "eve*.exe")                                # name_lc on the SQL backends
+    assert table(res) == {"exe": (5, 7_000_607)}
+    assert table(facets(fbe, "ext", "SETUP", kind="file")) == {"msi": (2, 30_001_000)}
+    assert facets(fbe, "ext", "nothing-like-this")["total"] == {"count": 0, "bytes": 0}
+    root = facets(fbe, "root", "eve*.exe")
+    assert [(b["key"], b["count"], b["bytes"]) for b in root["buckets"]] == [
+        (NAS, 3, 7_000_007), (LOCAL, 1, 300), (OLD, 1, 300)]
+
+
+def test_facets_by_root(fbe):
+    res = facets(fbe, "root")
+    docs = catalog_docs() + extra_docs()
+    for root in (NAS, OLD, LOCAL):
+        mine = [d for d in docs if d["root"] == root]
+        assert table(res)[root] == (len(mine), sum(d["size"] or 0 for d in mine))
+    assert [b["key"] for b in res["buckets"]][0] == NAS
+
+
+def test_facets_by_folder(fbe):
+    top = facets(fbe, "folder", roots=[NAS])
+    assert "error" not in top
+    t = table(top)
+    assert t["a"][0] == 11 and t["ab"] == (1, 40) and t["a_b"] == (1, 5) and t["50%"] == (1, 7) and t["cache"] == (1, 9_000_000)
+    assert t[""][0] == 3                                               # the folder records a, setup-tools and [REDACTED]
+    assert top["total"]["count"] == sum(1 for d in catalog_docs() + extra_docs() if d["root"] == NAS)
+    below = facets(fbe, "folder", roots=[NAS], path="a")
+    assert table(below) == {"": (10, 37_003_155), "sub": (2, 60)}      # a, a/sub and the 8 files; a/sub/*
+    assert below["buckets"][0]["key"] == "" and below["total"]["count"] == 12
+    assert table(facets(fbe, "folder", roots=[NAS], path="a/sub")) == {"": (2, 60), "deeper": (1, 0)}
+    assert table(facets(fbe, "folder", "path:a/sub", roots=[NAS])) == {"": (2, 60), "deeper": (1, 0)}
+    assert table(facets(fbe, "folder", roots=[NAS], path="a", ext="txt")) == {"": (1, 100), "sub": (1, 60)}
+    assert facets(fbe, "folder", roots=[NAS], path="nope")["buckets"] == []
+
+
+def test_facets_by_folder_need_one_root(fbe):
+    res = facets(fbe, "folder")                                         # three roots
+    assert res["buckets"] == [] and "root" in res["error"] and res["total"] == {"count": 0, "bytes": 0}
+    assert "error" not in facets(fbe, "folder", "eve*.exe root:backup")
+    with pytest.raises(ValueError):
+        facets(fbe, "bogus")
+
+
+def test_api_facets(catalog):
+    res = catalog.search_facets({"q": "eve*.exe", "by": "ext"})
+    assert res["by"] == "ext" and res["elapsed_ms"] >= 0
+    assert res["buckets"] == [{"key": "exe", "count": 5, "bytes": 7_000_607}]
+    assert res["total"] == {"count": 5, "bytes": 7_000_607} and res["other"]["buckets"] == 0
+    roots = catalog.search_facets({"q": "eve*.exe", "by": "root"})["buckets"]
+    assert {(b["key"], b["host"], b["count"]) for b in roots} == {(NAS, "nas-main", 3), (OLD, "nas-old", 1), (LOCAL, "", 1)}
+    assert len(catalog.search_facets({"q": "e", "by": "ext", "limit": "1"})["buckets"]) == 1
+    assert catalog.search_facets({"q": "e", "by": "ext", "limit": "1"})["other"]["buckets"] > 0
+    assert catalog.search_facets({"q": "x", "by": "ext", "root": "nope"})["total"]["count"] == 0
+    # [REDACTED] and rollup records count as themselves, like the search
+    assert catalog.search_facets({"q": "kind:rollup", "by": "ext"})["total"]["count"] == 2
+    assert catalog.search_facets({"q": "kind:rollup", "by": "ext"})["total"]["count"] == len(catalog.search({"q": "kind:rollup"})["rows"])
+
+
+def test_api_facets_by_folder_needs_a_root(catalog):
+    res = catalog.search_facets({"q": "eve*", "by": "folder"})
+    assert res["buckets"] == [] and res["error"]
+    res = catalog.search_facets({"q": "eve*", "by": "folder", "root": NAS})
+    assert "error" not in res and {b["key"]: b["count"] for b in res["buckets"]} == {"a": 4}
+    res = catalog.search_facets({"q": "eve*", "by": "folder", "root": NAS, "path": "a"})
+    assert {b["key"]: b["count"] for b in res["buckets"]} == {"": 4}
+
+
+def test_api_facets_reject_bad_values(catalog):
+    for params in ({}, {"by": "ext"}, {"q": "x", "by": "bogus"}, {"q": "x", "by": "ext", "limit": "many"},
+                   {"q": "size:huge", "by": "ext"}, {"q": "x", "root": "nope", "by": "bogus"}):
+        with pytest.raises(ValueError):
+            catalog.search_facets(params)
+    assert catalog.search_facets({"q": "x"})["by"] == "ext"             # the default
+
+
 # --- the name_lc column and index ----------------------------------------------------------
 def test_sql_name_terms_match_the_lower_cased_column():
     from filecat.browse import MSSQL, MYSQL, POSTGRES, SQLITE, sql_where

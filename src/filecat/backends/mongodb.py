@@ -346,6 +346,8 @@ class MongoBackend(Backend):
             and_.append({"kind": {"$nin": list(q["not_kinds"])}})
         if "roots" in q:
             and_.append({"root_id": {"$in": [root_id(r) for r in q["roots"]]}})
+        if "path" in q:
+            and_.append(rel("^" + re.escape(q["path"]) + "(/|$)"))
         return {"$and": and_} if and_ else {}
 
     def search_names(self, q: dict[str, Any]) -> dict[str, Any]:
@@ -358,6 +360,26 @@ class MongoBackend(Backend):
                     .sort(list(sort.items()))
                     .skip(q["offset"]).limit(q["limit"] + 1))
         return {"rows": rows[:q["limit"]], "more": len(rows) > q["limit"]}
+
+    def search_facets(self, q: dict[str, Any], by: str, limit: int = 20) -> dict[str, Any]:
+        """Backend.search_facets in Mongo: one $group over the search filter."""
+        from ..browse import facet_result
+        if (err := self._facet_error(q, by)) is not None:
+            return err
+        self.flush()
+        if by == "ext":
+            key: Any = {"$ifNull": ["$suffix", ""]}
+        elif by == "root":
+            key = "$root"
+        else:       # the segment between `path/` and the next `/`; "" when there is none
+            start = len(q["path"]) + 1 if q.get("path") else 0
+            rest = {"$substrCP": ["$rel_path", start, {"$strLenCP": "$rel_path"}]}
+            cut = {"$indexOfCP": [rest, "/"]}
+            key = {"$cond": [{"$gt": [cut, 0]}, {"$substrCP": [rest, 0, cut]}, ""]}
+        pipeline = [{"$match": self._browse_filter(q, self._name_lc_ready())},
+                    {"$group": {"_id": key, "n": {"$sum": 1}, "bytes": {"$sum": {"$ifNull": ["$size", 0]}}}}]
+        rows = self.files.aggregate(pipeline, allowDiskUse=True)
+        return facet_result(((r["_id"] or "", r["n"], r["bytes"]) for r in rows), limit)
 
     def subtree(self, root: str, parent: str) -> list[dict[str, Any]]:
         """Child folders of `parent` with their readable files and bytes, grouped
