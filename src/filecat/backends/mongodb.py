@@ -375,7 +375,8 @@ class MongoBackend(Backend):
             start = len(q["path"]) + 1 if q.get("path") else 0
             rest = {"$substrCP": ["$rel_path", start, {"$strLenCP": "$rel_path"}]}
             cut = {"$indexOfCP": [rest, "/"]}
-            key = {"$cond": [{"$gt": [cut, 0]}, {"$substrCP": [rest, 0, cut]}, ""]}
+            key = {"$cond": [{"$gt": [cut, 0]}, {"$substrCP": [rest, 0, cut]},
+                             {"$cond": [{"$in": ["$kind", ["dir", "rollup"]]}, rest, ""]}]}
         pipeline = [{"$match": self._browse_filter(q, self._name_lc_ready())},
                     {"$group": {"_id": key, "n": {"$sum": 1}, "bytes": {"$sum": {"$ifNull": ["$size", 0]}}}}]
         rows = self.files.aggregate(pipeline, allowDiskUse=True)

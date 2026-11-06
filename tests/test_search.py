@@ -441,11 +441,13 @@ def test_facets_by_folder(fbe):
     top = facets(fbe, "folder", roots=[NAS])
     assert "error" not in top
     t = table(top)
-    assert t["a"][0] == 11 and t["ab"] == (1, 40) and t["a_b"] == (1, 5) and t["50%"] == (1, 7) and t["cache"] == (1, 9_000_000)
-    assert t[""][0] == 3                                               # the folder records a, setup-tools and [REDACTED]
+    assert t["a"][0] == 12 and t["ab"] == (1, 40) and t["a_b"] == (1, 5) and t["50%"] == (1, 7) and t["cache"] == (1, 9_000_000)
+    # a sub-folder's own record counts under its name: the dir a (with what is inside it), the
+    # dir setup-tools and the rolled-up [REDACTED] folder; no top-level files, so no "" bucket
+    assert t["setup-tools"] == (1, 0) and t["[REDACTED]"] == (1, 4000) and "" not in t
     assert top["total"]["count"] == sum(1 for d in catalog_docs() + extra_docs() if d["root"] == NAS)
     below = facets(fbe, "folder", roots=[NAS], path="a")
-    assert table(below) == {"": (10, 37_003_155), "sub": (2, 60)}      # a, a/sub and the 8 files; a/sub/*
+    assert table(below) == {"": (9, 37_003_155), "sub": (3, 60)}       # a itself and its 8 files; a/sub and a/sub/*
     assert below["buckets"][0]["key"] == "" and below["total"]["count"] == 12
     assert table(facets(fbe, "folder", roots=[NAS], path="a/sub")) == {"": (2, 60), "deeper": (1, 0)}
     assert table(facets(fbe, "folder", "path:a/sub", roots=[NAS])) == {"": (2, 60), "deeper": (1, 0)}

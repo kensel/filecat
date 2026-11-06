@@ -183,12 +183,18 @@ def with_rollups(folders: list[dict[str, Any]], rollups: Iterable[dict[str, Any]
 FACET_BY = ("ext", "root", "folder")
 
 
-def folder_key(rel: str, path: str | None) -> str:
-    """The segment of rel_path just below `path` (the top segment with no path); "" for a record
-    directly in that folder (or the folder's own record)."""
+FOLDER_KINDS = ("dir", "rollup")     # a record that is itself a folder below `path` counts under its name
+
+
+def folder_key(rel: str, path: str | None, kind: str | None = None) -> str:
+    """The segment of rel_path just below `path` (the top segment with no path); "" for a file
+    directly in that folder, or the folder's own record. A sub-folder's own record (a dir, or a
+    rolled-up folder such as [CACHE]) counts under its name, like what is inside it."""
     rest = rel[len(path) + 1:] if path else rel
     cut = rest.find("/")
-    return rest[:cut] if cut >= 0 else ""
+    if cut >= 0:
+        return rest[:cut]
+    return rest if kind in FOLDER_KINDS else ""
 
 
 def facet_documents(documents: Iterable[dict[str, Any]], by: str,
@@ -202,7 +208,7 @@ def facet_documents(documents: Iterable[dict[str, Any]], by: str,
         elif by == "root":
             key = doc.get("root") or ""
         else:
-            key = folder_key(doc.get("rel_path") or "", path)
+            key = folder_key(doc.get("rel_path") or "", path, doc.get("kind"))
         row = out.setdefault(key, [0, 0])
         row[0] += 1
         row[1] += doc.get("size") or 0
@@ -394,7 +400,8 @@ def sql_facets(q: Query, by: str, d: Dialect, name_lc: bool = False) -> tuple[st
     else:
         rest = d.substr("rel_path", str(len(q["path"]) + 2 if q.get("path") else 1))
         cut = d.instr(rest, "'/'")
-        key = f"(CASE WHEN {cut} > 0 THEN {d.left(rest, f'{cut} - 1')} ELSE '' END){d.collate}"
+        key = (f"(CASE WHEN {cut} > 0 THEN {d.left(rest, f'{cut} - 1')} "
+               f"WHEN kind IN ('dir', 'rollup') THEN {rest} ELSE '' END){d.collate}")
     group = "root_id" if by == "root" else key
     return (f"SELECT {key}, COUNT(*), COALESCE(SUM(size), 0) FROM files{where} GROUP BY {group}", params)
 

@@ -448,6 +448,11 @@ Everything does for one PC (e.g. `eve*.exe` on all NAS shares at once).
   parameters, every match (not one page) streamed, capped by
   `search_export_max_rows` (default 1,000,000), behind the same login. CSV cells
   that would start a formula get a leading `'`; `[REDACTED]` rollups are left out.
+- [x] **Break down** (decided 2026-11-06, instead of a Meilisearch sidecar: it
+  matches words, not `eve*.exe` or `*setup*`, and would need a scan change feed to
+  stay current): counts and bytes of the matches by extension, root and folder
+  (one level below `path:`), from one GROUP BY / `$group` in the catalog,
+  `GET /api/search/facets`; a new `path:` filter; click to narrow.
 - [x] **Cleanup**: `ScanServer.ps1` moved to `scripts/`,
   `file-catalog-requirements.md` to `docs/`, `docs/TODO.md` folded into the
   backlog below, the draft `docs/research/rust-agent/` sources removed.

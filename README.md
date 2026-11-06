@@ -573,7 +573,7 @@ has these views:
   case-insensitive: `eve*.exe` (`*` any run, `?` one character, the whole name
   must match), plain text is a substring (`setup` is `*setup*`), and `ext:exe;dll`,
   `size:>10mb` (or `1mb..1gb`), `after:2024-01-01`, `before:`, `kind:dir`,
-  `root:` and `host:nas-*` narrow it. Results show the name, its folder (a link
+  `root:`, `host:nas-*` and `path:games/steam` (that folder and below it) narrow it. Results show the name, its folder (a link
   to Browse), root, size, modified time and kind, 100 at a time (up to 1000 per
   page) with the time the query took; click one to open the record. Only names
   are matched, on a lower-cased copy of the name (`name_lc`) with its own index:
@@ -585,6 +585,13 @@ has these views:
   index); until then searches stay correct but slow. A rolled-up folder
   (`[CACHE]`, `[REDACTED]`) is found by its own name only; nothing inside it is
   stored. `GET /api/search` is the same query as JSON.
+  - **Break down**: beside the results, the matches counted (and their bytes) by
+    extension, by root and, once a root is chosen, by folder one level at a time
+    below the current `path:`. Click a row to narrow the search to it; a folder
+    drills down, with a breadcrumb back up. It is one grouping query in the
+    catalog, loaded after the results: quick when the name index serves the
+    query, as slow as the search itself when it reads every name.
+    `GET /api/search/facets?by=ext|root|folder&limit=20&q=...`.
   - **Saved searches**: **Save** keeps the current query and filters under a
     name, for everyone who uses this viewer (one shared list, stored in the
     catalog; per-user lists wait for accounts). **Pin** puts one as a chip at the
