@@ -1,5 +1,5 @@
 """Tests for filecat.importer: PowerShell Get-ChildItem exports and filecat jsonl,
-streamed into a MemoryBackend. See file-catalog-requirements.md, "Record".
+streamed into a MemoryBackend. See docs/file-catalog-requirements.md, "Record".
 """
 from __future__ import annotations
 

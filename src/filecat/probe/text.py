@@ -1,7 +1,7 @@
 """Encoding/newline detection, text sampling, and the text-kind refinements:
 CSV / semicolon tables, XML declared encoding, scene-text, lang.dat.
 
-See file-catalog-requirements.md, "Encoding and newlines" and "Probe order" step 11.
+See docs/file-catalog-requirements.md, "Encoding and newlines" and "Probe order" step 11.
 """
 from __future__ import annotations
 

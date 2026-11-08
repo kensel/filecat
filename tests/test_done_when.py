@@ -1,4 +1,4 @@
-"""End-to-end checks from the "Done when" list in file-catalog-requirements.md,
+"""End-to-end checks from the "Done when" list in docs/file-catalog-requirements.md,
 driven through the CLI with the real probe, identifier and backends."""
 from __future__ import annotations
 

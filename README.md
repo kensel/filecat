@@ -6,7 +6,7 @@ encodings, image and texture sizes, PE headers and toolchain, archive listings,
 and freedesktop/libmagic types. Optional Ollama summaries for a bounded set of
 files. The `programs` command inventories the software installed on this PC.
 
-The requirements are in [`file-catalog-requirements.md`](file-catalog-requirements.md).
+The requirements are in [`docs/file-catalog-requirements.md`](docs/file-catalog-requirements.md).
 That note is the specification; this README covers installing and running the tool.
 
 ## Install
@@ -110,6 +110,7 @@ filecat summary --disagree                                # name says one type, 
 filecat summaries [--root R] [--all | --stale]             # rebuild the stored summaries the viewer shows (default: roots changed since)
 filecat summaries status [--json]                         # what is stored, when built, when the root last changed
 filecat show "sub/dir/file.txt" --root D:\Games
+filecat search reindex [--batch N] [--json]              # fill the name index of records stored before v0.2.5 (resumable)
 filecat roots                                             # last scan, in progress, newest file, last error
 filecat roots missing                                     # shares storage collect found that are not roots yet
 filecat roots case-check                                  # one share recorded as two roots (server\share case)?
@@ -572,13 +573,38 @@ has these views:
   case-insensitive: `eve*.exe` (`*` any run, `?` one character, the whole name
   must match), plain text is a substring (`setup` is `*setup*`), and `ext:exe;dll`,
   `size:>10mb` (or `1mb..1gb`), `after:2024-01-01`, `before:`, `kind:dir`,
-  `root:` and `host:nas-*` narrow it. Results show the name, its folder (a link
+  `root:`, `host:nas-*` and `path:games/steam` (that folder and below it) narrow it. Results show the name, its folder (a link
   to Browse), root, size, modified time and kind, 100 at a time (up to 1000 per
   page) with the time the query took; click one to open the record. Only names
-  are matched, and the lookup scans the catalog (no name index yet), so a
-  substring search of tens of millions of records takes seconds. A rolled-up
-  folder (`[CACHE]`, `[REDACTED]`) is found by its own name only; nothing inside
-  it is stored. `GET /api/search` is the same query as JSON.
+  are matched, on a lower-cased copy of the name (`name_lc`) with its own index:
+  a pattern with a literal start (`eve*.exe`) is an index lookup on every SQL
+  backend and MongoDB, and on PostgreSQL a trigram index (`pg_trgm`) serves
+  substrings (`*setup*`) too; elsewhere a substring search still reads every
+  name. A catalog made before v0.2.5 gets the column when it is opened; run
+  `filecat search reindex` once to fill it (and, on a large catalog, build the
+  index); until then searches stay correct but slow. A rolled-up folder
+  (`[CACHE]`, `[REDACTED]`) is found by its own name only; nothing inside it is
+  stored. `GET /api/search` is the same query as JSON.
+  - **Break down**: beside the results, the matches counted (and their bytes) by
+    extension, by root and, once a root is chosen, by folder one level at a time
+    below the current `path:`. Click a row to narrow the search to it; a folder
+    drills down, with a breadcrumb back up. It is one grouping query in the
+    catalog, loaded after the results: quick when the name index serves the
+    query, as slow as the search itself when it reads every name.
+    `GET /api/search/facets?by=ext|root|folder&limit=20&q=...`.
+  - **Saved searches**: **Save** keeps the current query and filters under a
+    name, for everyone who uses this viewer (one shared list, stored in the
+    catalog; per-user lists wait for accounts). **Pin** puts one as a chip at the
+    top of the page. Once a password is set, saving, pinning and deleting need a
+    login. `GET /api/searches`, `POST /api/searches/save` and
+    `POST /api/searches/delete`.
+  - **Export**: the **CSV** and **JSONL** links under the results download every
+    match, not just the page (host, root, path, name, ext, size, mtime, kind,
+    sha256), streamed, at most `[server] search_export_max_rows` rows (default
+    1,000,000; a cut-short export has the `X-Filecat-Truncated: 1` header and,
+    in JSONL, a final `{"truncated": true}` line). CSV cells that would start a
+    spreadsheet formula get a leading `'`. `[REDACTED]` rollups are left out.
+    `GET /api/search/export?format=csv|jsonl&q=...`.
 
 The **Backend** selector in the top-right corner switches the viewer to
 another catalog without a restart. It lists every backend with a location in
@@ -748,6 +774,7 @@ src/filecat/
   rootinfo.py roots_cmd.py  root index (scan history) and `filecat roots`
   root_remove.py    `roots remove` and the viewer's Remove button
   search.py         the Search page's query language (patterns, LIKE and regex translations)
+  search_saved.py search_cmd.py  saved searches and the export; `filecat search reindex`
   programs.py reg.py lnk.py
   importer.py enrich.py
   data/             vendored freedesktop.org.xml and richprint comp_id.txt

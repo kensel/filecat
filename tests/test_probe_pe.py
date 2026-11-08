@@ -1,5 +1,5 @@
 """Synthetic PE32+ images hand-assembled byte by byte, plus the Rich-header
-comp_id.txt mapping. See file-catalog-requirements.md 'Executables' and
+comp_id.txt mapping. See docs/file-catalog-requirements.md 'Executables' and
 'Rich header and toolchain'.
 """
 from __future__ import annotations

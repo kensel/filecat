@@ -20,7 +20,7 @@ KINDS = ("storage-collect", "scan", "store-resum", "summaries")
 LOCAL_AGENT = "(local)"     # the "agent" of work that reads the catalog or the local disk, not through an agent
 SERVER_KEYS = ("health_interval", "health_timeout", "health_backoff_max", "max_concurrent", "progress_interval", "lease_ttl",
                "shutdown_grace", "history_keep", "history_days", "serve", "control_password_hash", "login_max_failures", "login_window", "login_block",
-               "login_global_max_failures", "login_required_for_view", "tls", "jobs")
+               "login_global_max_failures", "login_required_for_view", "search_export_max_rows", "tls", "jobs")
 JOB_KEYS = ("name", "kind", "agent", "roots", "every", "at", "options", "enabled", "min_age", "max_runtime",
             "run_on_start")
 # the catalog and the agent are the server's to decide
@@ -101,6 +101,7 @@ class ServerConfig:
     login_block: timedelta = timedelta(minutes=15)
     login_global_max_failures: int = 20         # across all addresses within login_window: all logins refused
     login_required_for_view: bool = False       # the whole viewer needs a session, not only "run now"
+    search_export_max_rows: int = 1_000_000     # the most rows one search export (CSV/JSONL) streams
     tls: tls.TlsConfig | None = None            # [server.tls]: serve the viewer over HTTPS (tls.py)
     jobs: tuple[JobSpec, ...] = field(default_factory=tuple)
 
@@ -291,7 +292,8 @@ def load_server(cfg: dict[str, Any], agents: list[AgentConfig]) -> ServerConfig:
         login_window=duration("login_window", ServerConfig.login_window),
         login_block=duration("login_block", ServerConfig.login_block),
         login_global_max_failures=count("login_global_max_failures", 20, 1) or 20,
-        login_required_for_view=required, tls=tls_cfg, jobs=tuple(jobs))
+        login_required_for_view=required, tls=tls_cfg,
+        search_export_max_rows=count("search_export_max_rows", 1_000_000, 1) or 1_000_000, jobs=tuple(jobs))
 
 
 def parse_listen(text: str | None) -> tuple[str, int] | None:

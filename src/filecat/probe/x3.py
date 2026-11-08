@@ -1,7 +1,7 @@
 """The X3 pack formats: BOB1 meshes, the .cat/.dat catalogue pair, XSA3 saves.
 
 A refinement of probe-order steps 6 (gzip), 8 (BOB1) and 11 (text). See
-file-catalog-requirements.md, "Archives, images, models, data".
+docs/file-catalog-requirements.md, "Archives, images, models, data".
 """
 from __future__ import annotations
 

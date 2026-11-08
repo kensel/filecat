@@ -3,7 +3,7 @@
 A summary of how `filecat scan` (and `scan-everything`) walks a root, what it
 reads from each file, how files over 64 MiB are hashed, and which files are
 never opened. The specification is
-[`file-catalog-requirements.md`](../file-catalog-requirements.md); this note is
+[`file-catalog-requirements.md`](file-catalog-requirements.md); this note is
 the short version, with pointers to the code.
 
 ## 1. How a scan runs

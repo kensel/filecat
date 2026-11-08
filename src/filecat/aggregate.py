@@ -2,7 +2,7 @@
 
 `build_aggregates(documents, depth)` groups file records **per root**,
 because percent is "of the bytes successfully sized in that root" (see
-file-catalog-requirements.md, "Overview") -- mixing roots together would
+docs/file-catalog-requirements.md, "Overview") -- mixing roots together would
 make that percentage meaningless. Shape returned:
 
     {"roots": {root_string: {

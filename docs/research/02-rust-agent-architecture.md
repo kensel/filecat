@@ -4,7 +4,7 @@ This document details the architecture, cross-compilation workflow, security mod
 
 ## 1. Source Code Reference (rust-agent/ Subfolder)
 
-All Rust source files are stored in the rust-agent subfolder inside this research directory:
+The draft sources once kept in a `rust-agent/` subfolder here were removed in v0.2.5; the agent that was built is [`agent/`](../../agent/) (`agent/src/main.rs`, `tls.rs`, `walk.rs`, ...). The drafts were:
 
 - **rust-agent/Cargo.toml**: Crate manifest and static musl cross-compilation targets.
 - **rust-agent/main.rs**: NDJSON-over-TLS RPC server, lstat directory walker, rollup group aggregator, byte-exact sha256 / sha256_partial hashing engine, and random-access read_range handler.

@@ -8,10 +8,10 @@ Legacy, kept for SMB-only servers that run no filecat-agent: it discovers the sh
 [[agents]] and [[server.jobs]] with `filecat server` (docs/agent-server.md, section 9).
 
 .EXAMPLE
-.\ScanServer.ps1 -ServerName nas-vm
+.\scripts\ScanServer.ps1 -ServerName nas-vm
 
 .EXAMPLE
-.\ScanServer.ps1 -ServerName 192.0.2.13 -Alias nas-main -User nas-main\admin
+.\scripts\ScanServer.ps1 -ServerName 192.0.2.13 -Alias nas-main -User nas-main\admin
 Connects to the NAS by IP as the admin account (prompting for its password),
 so a mapping of \\nas-main under your own account is left alone, and records
 the shares as \\nas-main\<share>.
@@ -25,7 +25,7 @@ param(
     [int]$Workers = 8
 )
 
-$ProjectRoot = $PSScriptRoot
+$ProjectRoot = Split-Path -Parent $PSScriptRoot
 Push-Location $ProjectRoot
 try {
     $VenvPython = Join-Path $ProjectRoot ".venv\Scripts\python.exe"

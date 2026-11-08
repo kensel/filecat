@@ -14,14 +14,18 @@ table is streamed rather than materialized client-side.
 from __future__ import annotations
 
 import json
+import logging
 import time
-from typing import Any, Iterable, Iterator
+from typing import Any, Callable, Iterable, Iterator
 
-from ..record import root_id
+from ..record import name_lc, root_id
 from .base import Backend, Document, chunks
 
 BATCH_SIZE = 500
 BATCH_SECONDS = 2.0
+INDEX_AT_CONNECT_MAX_ROWS = 200_000   # a bigger table gets its name indexes from `filecat search reindex`
+SCHEMA_VERSION = 2     # 2: files.name_lc (see _migrate)
+log = logging.getLogger(__name__)
 
 _SCHEMA = """
 CREATE TABLE IF NOT EXISTS files (
@@ -38,6 +42,7 @@ CREATE TABLE IF NOT EXISTS files (
     sha256 TEXT,
     sha256_partial TEXT,
     document JSONB NOT NULL,
+    name_lc TEXT,
     UNIQUE (root_id, rel_path)
 );
 CREATE INDEX IF NOT EXISTS idx_files_root_id ON files(root_id);
@@ -46,6 +51,11 @@ CREATE INDEX IF NOT EXISTS idx_files_sha256 ON files(sha256);
 CREATE INDEX IF NOT EXISTS idx_files_kind ON files(kind);
 CREATE INDEX IF NOT EXISTS idx_files_suffix ON files(suffix);
 CREATE INDEX IF NOT EXISTS idx_files_mime ON files(mime);
+
+CREATE TABLE IF NOT EXISTS meta (
+    key TEXT PRIMARY KEY,
+    value TEXT
+);
 
 CREATE TABLE IF NOT EXISTS programs (
     program_id TEXT PRIMARY KEY,
@@ -171,13 +181,14 @@ CREATE TABLE IF NOT EXISTS server_state (
 
 _UPSERT_SQL = """
 INSERT INTO files (root_id, root, rel_path, name, size, mtime_ns, kind,
-                    suffix, mime, sha256, sha256_partial, document)
-VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s::jsonb)
+                    suffix, mime, sha256, sha256_partial, document, name_lc)
+VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s::jsonb,%s)
 ON CONFLICT (root_id, rel_path) DO UPDATE SET
     root=excluded.root, name=excluded.name, size=excluded.size,
     mtime_ns=excluded.mtime_ns, kind=excluded.kind, suffix=excluded.suffix,
     mime=excluded.mime, sha256=excluded.sha256,
-    sha256_partial=excluded.sha256_partial, document=excluded.document
+    sha256_partial=excluded.sha256_partial, document=excluded.document,
+    name_lc=excluded.name_lc
 """
 
 
@@ -218,8 +229,100 @@ class PostgresBackend(Backend):
         with self.conn.cursor() as cur:
             cur.execute(_SCHEMA)
         self.conn.commit()
+        self._migrate()
+        self._names_ready = False
         self._buffer: list[Document] = []
         self._last_flush = time.monotonic()
+
+    def _migrate(self) -> None:
+        """Bring a catalog made by an older filecat up to SCHEMA_VERSION. Version 2 adds
+        files.name_lc: the column and its indexes appear here at once, the values are
+        filled by reindex_names() (`filecat search reindex`), and name searches use the old
+        predicate until no row lacks one. The trigram index (pg_trgm, for `%setup%`) needs
+        the extension; without the privilege it is skipped with a warning."""
+        with self.conn.cursor() as cur:
+            cur.execute("ALTER TABLE files ADD COLUMN IF NOT EXISTS name_lc TEXT")
+            cur.execute("INSERT INTO meta (key, value) VALUES ('schema_version', %s) "
+                        "ON CONFLICT (key) DO UPDATE SET value = excluded.value", (str(SCHEMA_VERSION),))
+        self.conn.commit()
+        n = self._files_estimate()
+        if n <= INDEX_AT_CONNECT_MAX_ROWS:
+            self._name_indexes()
+        elif not self._has_name_index():
+            log.warning("files.name_lc has no index yet (%s rows): run `filecat search reindex` "
+                        "to fill it and build the index; name searches scan until then", n)
+
+    def _files_estimate(self) -> int:
+        """Rows in files from the planner's statistics (-1: never analyzed, so count a bounded few)."""
+        with self.conn.cursor() as cur:
+            cur.execute("SELECT reltuples::bigint FROM pg_class WHERE oid = to_regclass('files')")
+            n = cur.fetchone()[0]
+            if n < 0:
+                cur.execute("SELECT COUNT(*) FROM (SELECT 1 FROM files LIMIT %s) t", (INDEX_AT_CONNECT_MAX_ROWS + 1,))
+                n = cur.fetchone()[0]
+        self.conn.commit()
+        return n
+
+    def _has_name_index(self) -> bool:
+        with self.conn.cursor() as cur:
+            cur.execute("SELECT 1 FROM pg_indexes WHERE tablename = 'files' AND indexname = 'idx_files_name_lc'")
+            found = cur.fetchone() is not None
+        self.conn.commit()
+        return found
+
+    def _name_indexes(self, say: Callable[[str], None] | None = None) -> None:
+        """The name_lc indexes (idempotent): the btree for prefixes and, where pg_trgm can be
+        had, the trigram index for substrings."""
+        say = say or (lambda text: None)
+        say("building index idx_files_name_lc")
+        with self.conn.cursor() as cur:
+            cur.execute("CREATE INDEX IF NOT EXISTS idx_files_name_lc ON files(name_lc text_pattern_ops)")
+        self.conn.commit()
+        try:
+            say("building index idx_files_name_trgm (trigram; slow on a large catalog)")
+            with self.conn.cursor() as cur:
+                cur.execute("CREATE EXTENSION IF NOT EXISTS pg_trgm")
+                cur.execute("CREATE INDEX IF NOT EXISTS idx_files_name_trgm "
+                            "ON files USING gin (name_lc gin_trgm_ops)")
+            self.conn.commit()
+        except self._psycopg.Error as exc:
+            self.conn.rollback()
+            log.warning("no trigram index on files.name_lc (%s); substring name searches "
+                        "will scan the table", str(exc).strip().splitlines()[0])
+
+    def _name_lc_ready(self) -> bool:
+        """True once every row has a name_lc (cached: a put always fills it)."""
+        if not self._names_ready:
+            with self.conn.cursor() as cur:
+                cur.execute("SELECT 1 FROM files WHERE name_lc IS NULL LIMIT 1")
+                self._names_ready = cur.fetchone() is None
+            self.conn.commit()
+        return self._names_ready
+
+    def reindex_names(self, progress: Callable[[int], None] | None = None, batch: int = 5000,
+                      say: Callable[[str], None] | None = None) -> int:
+        self.flush()
+        # walk the table by id once: re-asking for 'name_lc IS NULL' rescans the filled rows
+        # on every batch when that column has no index yet (quadratic on a large catalog)
+        done, last = 0, -1
+        while True:
+            with self.conn.cursor() as cur:
+                cur.execute("SELECT id, name, name_lc FROM files WHERE id > %s ORDER BY id LIMIT %s",
+                            (last, batch))
+                rows = cur.fetchall()
+                todo = [(name_lc(n), i) for i, n, lc in rows if lc is None]
+                if todo:
+                    cur.executemany("UPDATE files SET name_lc = %s WHERE id = %s", todo)
+            self.conn.commit()
+            if not rows:
+                break
+            last = rows[-1][0]
+            done += len(todo)
+            if progress:
+                progress(done)
+        self._names_ready = True
+        self._name_indexes(say)
+        return done
 
     def _row(self, doc: Document) -> tuple:
         sha_partial = doc.get("sha256_partial")
@@ -229,7 +332,7 @@ class PostgresBackend(Backend):
             doc["root_id"], doc["root"], doc["rel_path"], doc.get("name"),
             doc.get("size"), doc.get("mtime_ns"), doc.get("kind"),
             doc.get("suffix"), doc.get("mime"), doc.get("sha256"), sha_partial,
-            json.dumps(doc, ensure_ascii=False),
+            json.dumps(doc, ensure_ascii=False), name_lc(doc.get("name")),
         )
 
     def put(self, document: Document) -> None:
@@ -303,13 +406,25 @@ class PostgresBackend(Backend):
         from ..browse import POSTGRES, sql_order, sql_where
         self.flush()
         rid = root_id(q["root"]) if q.get("root") is not None else None
-        where, params = sql_where(q, POSTGRES, rid)
+        where, params = sql_where(q, POSTGRES, rid, self._name_lc_ready())
         with self.conn.cursor() as cur:
             cur.execute(f"SELECT document FROM files{where} ORDER BY {sql_order(q, POSTGRES)} "
                         "LIMIT %s OFFSET %s", [*params, q["limit"] + 1, q["offset"]])
             rows = [r[0] for r in cur.fetchall()]
         self.conn.commit()
         return {"rows": rows[:q["limit"]], "more": len(rows) > q["limit"]}
+
+    def search_facets(self, q: dict[str, Any], by: str, limit: int = 20) -> dict[str, Any]:
+        from ..browse import POSTGRES, facet_result, sql_facets
+        if (err := self._facet_error(q, by)) is not None:
+            return err
+        self.flush()
+        sql, params = sql_facets(q, by, POSTGRES, self._name_lc_ready())
+        with self.conn.cursor() as cur:
+            cur.execute(sql, params)
+            rows = cur.fetchall()
+        self.conn.commit()
+        return facet_result(rows, limit)
 
     def subtree(self, root: str, parent: str) -> list[dict[str, Any]]:
         from ..browse import POSTGRES, sql_subtree

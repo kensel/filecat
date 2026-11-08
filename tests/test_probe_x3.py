@@ -1,6 +1,6 @@
 """BOB1 mesh chunk walk, the .cat/.dat catalogue pair, mesh ext_only fallback.
 
-See file-catalog-requirements.md 'Archives, images, models, data'.
+See docs/file-catalog-requirements.md 'Archives, images, models, data'.
 """
 from __future__ import annotations
 

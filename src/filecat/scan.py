@@ -1,6 +1,6 @@
 """filecat scan: walk roots, measure entries, write documents, rebuild aggregates.
 
-See file-catalog-requirements.md, "Run" and "How a large or remote tree is
+See docs/file-catalog-requirements.md, "Run" and "How a large or remote tree is
 walked". The walk itself (os.scandir, post-order directory records, resume
 skip, per-entry timeout) lives in walker.py; this module measures one
 regular file (`measure_file`) and drives a whole scan (`scan_roots`, `run`).

@@ -1,6 +1,6 @@
 """`filecat signatures status`: list signature database files and the date
 recorded inside each one. Never fetches anything -- see
-file-catalog-requirements.md, "Signature files live under ...".
+docs/file-catalog-requirements.md, "Signature files live under ...".
 """
 from __future__ import annotations
 

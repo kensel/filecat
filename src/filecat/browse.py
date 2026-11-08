@@ -99,7 +99,7 @@ def matches(doc: dict[str, Any], q: Query) -> bool:
 
 def matches_search(doc: dict[str, Any], q: Query) -> bool:
     """The file-name search keys (filecat.search): names, exts, min_size, max_size,
-    after, before, not_kinds and roots. A query without them matches everything here."""
+    after, before, not_kinds, roots and path. A query without them matches everything here."""
     if "names" in q:
         from .search import name_matches
         name = doc.get("name")
@@ -118,6 +118,10 @@ def matches_search(doc: dict[str, Any], q: Query) -> bool:
         return False
     if "roots" in q and doc.get("root") not in q["roots"]:
         return False
+    if "path" in q:
+        rel = doc.get("rel_path") or ""
+        if rel != q["path"] and not rel.startswith(q["path"] + "/"):
+            return False
     return True
 
 
@@ -174,6 +178,52 @@ def with_rollups(folders: list[dict[str, Any]], rollups: Iterable[dict[str, Any]
         row["rollup_files"] = row.get("rollup_files", 0) + (((doc.get("probe") or {}).get("rollup") or {})
                                                             .get("total_files", 0))
     return sorted(by_name.values(), key=lambda r: (-(r["bytes"] + r.get("rollup_bytes", 0)), r["name"]))
+
+
+FACET_BY = ("ext", "root", "folder")
+
+
+FOLDER_KINDS = ("dir", "rollup")     # a record that is itself a folder below `path` counts under its name
+
+
+def folder_key(rel: str, path: str | None, kind: str | None = None) -> str:
+    """The segment of rel_path just below `path` (the top segment with no path); "" for a file
+    directly in that folder, or the folder's own record. A sub-folder's own record (a dir, or a
+    rolled-up folder such as [CACHE]) counts under its name, like what is inside it."""
+    rest = rel[len(path) + 1:] if path else rel
+    cut = rest.find("/")
+    if cut >= 0:
+        return rest[:cut]
+    return rest if kind in FOLDER_KINDS else ""
+
+
+def facet_documents(documents: Iterable[dict[str, Any]], by: str,
+                    path: str | None = None) -> dict[str, list[int]]:
+    """{key: [count, bytes]} of search hits grouped by suffix ("" for none), root or the folder
+    segment below `path` (folder_key)."""
+    out: dict[str, list[int]] = {}
+    for doc in documents:
+        if by == "ext":
+            key = doc.get("suffix") or ""
+        elif by == "root":
+            key = doc.get("root") or ""
+        else:
+            key = folder_key(doc.get("rel_path") or "", path, doc.get("kind"))
+        row = out.setdefault(key, [0, 0])
+        row[0] += 1
+        row[1] += doc.get("size") or 0
+    return out
+
+
+def facet_result(groups: Iterable[tuple[str, int, int]], limit: int = 20) -> dict[str, Any]:
+    """Backend.search_facets' answer from (key, count, bytes) groups: the top `limit` by count
+    (then key), the rest folded into "other", and the total."""
+    rows = sorted(((str(k), int(c), int(b)) for k, c, b in groups), key=lambda r: (-r[1], r[0]))
+    limit = max(1, int(limit))
+    keep, rest = rows[:limit], rows[limit:]
+    return {"buckets": [{"key": k, "count": c, "bytes": b} for k, c, b in keep],
+            "other": {"count": sum(r[1] for r in rest), "bytes": sum(r[2] for r in rest), "buckets": len(rest)},
+            "total": {"count": sum(r[1] for r in rows), "bytes": sum(r[2] for r in rows)}}
 
 
 def size_rows(documents: Iterable[dict[str, Any]], prefix: str) -> Iterator[tuple[str, int, str, str]]:
@@ -242,9 +292,11 @@ MSSQL = Dialect("?", lambda e, p: f"SUBSTRING({e}, {p}, 4000)", lambda e, n: f"S
                 brackets=True)
 
 
-def sql_where(q: Query, d: Dialect, root_id_value: str | None) -> tuple[str, list[Any]]:
+def sql_where(q: Query, d: Dialect, root_id_value: str | None,
+              name_lc: bool = False) -> tuple[str, list[Any]]:
     """WHERE clause (with leading ' WHERE ', or '') and its parameters, over
-    the `files` table columns every SQL backend shares."""
+    the `files` table columns every SQL backend shares. name_lc: the name_lc
+    column is filled for every row, so name terms use it (and its index)."""
     ph = d.ph
     clauses: list[str] = []
     params: list[Any] = []
@@ -303,16 +355,19 @@ def sql_where(q: Query, d: Dialect, root_id_value: str | None) -> tuple[str, lis
             no_slash_after(len(q["parent"]) + 2)
     if "q" in q:
         add(f"{d.instr(d.lower + '(rel_path)', d.lower + '(' + ph + ')')} > 0", q["q"])
-    _search_where(q, d, add)
+    _search_where(q, d, add, name_lc)
     return (" WHERE " + " AND ".join(clauses)) if clauses else "", params
 
 
-def _search_where(q: Query, d: Dialect, add: Callable[..., None]) -> None:
+def _search_where(q: Query, d: Dialect, add: Callable[..., None], name_lc: bool = False) -> None:
     """The file-name search keys of matches_search(), as SQL over the files columns."""
     from .search import like_of
     ph = d.ph
     for glob in q.get("names", ()):
-        add(d.name_like("name"), like_of(glob, d.brackets))
+        if name_lc:     # lower-cased pattern on the lower-cased column: a prefix LIKE uses the index
+            add(f"name_lc LIKE {ph} ESCAPE '!'", like_of(glob.lower(), d.brackets))
+        else:
+            add(d.name_like("name"), like_of(glob, d.brackets))
     if "exts" in q:
         add(f"suffix IN ({', '.join([ph] * len(q['exts']))})", *q["exts"])
     for key, sql in (("min_size", "size >= "), ("max_size", "size <= "),
@@ -325,6 +380,30 @@ def _search_where(q: Query, d: Dialect, add: Callable[..., None]) -> None:
         from .record import root_id
         ids = [root_id(r) for r in q["roots"]]
         add(f"root_id IN ({', '.join([ph] * len(ids))})" if ids else "1 = 0", *ids)
+    if "path" in q:     # the folder itself or anything below it; plain comparisons, so `%` and `_` are literal
+        p = q["path"]
+        if d.byte_ranges:
+            add(f"(rel_path = {ph} OR (rel_path >= {ph} AND rel_path < {ph}))", p, p + "/", p + "0")
+        else:
+            add(f"(rel_path = {ph} OR {d.instr('rel_path', ph)} = 1)", p, p + "/")
+
+
+def sql_facets(q: Query, by: str, d: Dialect, name_lc: bool = False) -> tuple[str, list[Any]]:
+    """SELECT key, count, bytes grouped by `by` (ext, root or folder) over the search `q`: one
+    GROUP BY. Positions are inlined, so only the WHERE takes parameters (SQL Server needs the
+    SELECT and GROUP BY expressions to be the same text)."""
+    where, params = sql_where(q, d, None, name_lc)
+    if by == "ext":
+        key = "COALESCE(suffix, '')"
+    elif by == "root":
+        key = "MAX(root)"
+    else:
+        rest = d.substr("rel_path", str(len(q["path"]) + 2 if q.get("path") else 1))
+        cut = d.instr(rest, "'/'")
+        key = (f"(CASE WHEN {cut} > 0 THEN {d.left(rest, f'{cut} - 1')} "
+               f"WHEN kind IN ('dir', 'rollup') THEN {rest} ELSE '' END){d.collate}")
+    group = "root_id" if by == "root" else key
+    return (f"SELECT {key}, COUNT(*), COALESCE(SUM(size), 0) FROM files{where} GROUP BY {group}", params)
 
 
 def sql_subtree(parent: str, d: Dialect, root_id_value: str) -> tuple[str, list[Any]]:

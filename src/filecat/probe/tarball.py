@@ -8,7 +8,7 @@ next entry, 'g' for a block of following entries). GNU base-256 size/mtime
 encoding is handled. Old V7 tar (no "ustar" magic) is accepted when the
 header checksum validates.
 
-See file-catalog-requirements.md, "Probe order" step 5b (tar) and
+See docs/file-catalog-requirements.md, "Probe order" step 5b (tar) and
 "Archives, images, models, data".
 """
 from __future__ import annotations

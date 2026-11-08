@@ -54,9 +54,13 @@ def names(result):
     return sorted(r["rel_path"] for r in result["rows"])
 
 
-def run(backend, text="", roots=None, **params):
+def run(backend, text="", roots=None, scope=False, **params):
+    """scope: with no root:/host: term, search only `roots` rather than every root (a shared
+    server database holds other tests' records too)."""
     spec = search.with_params(search.parse_query(text), params)
     resolved = search.resolve_roots(spec, roots if roots is not None else backend.roots())
+    if resolved is None and scope:
+        resolved = list(roots)
     q = search.to_query(spec, resolved, **{k: v for k, v in params.items()
                                             if k in ("sort", "desc", "offset", "limit")})
     return backend.search_names(q) if resolved != [] else {"rows": [], "more": False}
@@ -210,7 +214,7 @@ def be(backend_name, fixture_dir):
 
 def find(be, text="", **params):
     """The search over the three test roots (a server database may hold others)."""
-    return run(be, text, roots=params.pop("roots", [NAS, OLD, LOCAL]), **params)
+    return run(be, text, roots=params.pop("roots", [NAS, OLD, LOCAL]), scope=True, **params)
 
 
 def test_substring_and_case(be):
@@ -321,3 +325,319 @@ def test_api_needs_a_criterion_and_rejects_bad_values(catalog):
         with pytest.raises(ValueError):
             catalog.search(params)
     assert catalog.search({"q": "x", "root": "nope"})["rows"] == []
+
+
+# --- path: and the break-down --------------------------------------------------------------
+def extra_docs():
+    return [
+        doc(NAS, "ab/x.txt", 40, kind="text"),
+        doc(NAS, "a/sub/deep.txt", 60, kind="text"),
+        doc(NAS, "a/sub/deeper/z.bin", None),                    # no size: counts as 0 bytes
+        doc(NAS, "a/sub", 0, kind="dir"),
+        doc(NAS, "a_b/p.txt", 5, kind="text"),
+        doc(NAS, "50%/q.txt", 7, kind="text"),
+    ]
+
+
+@pytest.fixture
+def fbe(be):
+    for d in extra_docs():
+        be.put(d)
+    be.flush()
+    return be
+
+
+def facets(be, by, text="", limit=20, roots=None, **params):
+    """search_facets over the test roots (or `roots`), the way Catalog.search_facets builds the query."""
+    roots = roots or [NAS, OLD, LOCAL]
+    spec = search.with_params(search.parse_query(text), params)
+    resolved = search.resolve_roots(spec, roots)
+    return be.search_facets(search.to_query(spec, resolved if resolved is not None else list(roots)), by, limit)
+
+
+def table(res):
+    return {b["key"]: (b["count"], b["bytes"]) for b in res["buckets"]}
+
+
+def test_path_parsing():
+    assert search.parse_query("path:Photos/2024")["path"] == "Photos/2024"
+    assert search.parse_query('path:"/a\\b\\c/"')["path"] == "a/b/c"
+    assert search.with_params(search.parse_query("x"), {"path": "\\a\\"})["path"] == "a"
+    assert search.parse_query("x path:/")["path"] is None and "path" not in search.to_query(search.parse_query("x"), None)
+    assert search.to_query(search.parse_query("path:a/b"), None)["path"] == "a/b"
+    assert search.has_criteria(search.parse_query("path:a"))
+    assert "path" in search.SEARCH_FIELDS and "path" in search.KEYS
+
+
+def test_path_filter(fbe):
+    docs = catalog_docs() + extra_docs()
+    under_a = sorted(d["rel_path"] for d in docs if d["rel_path"] == "a" or d["rel_path"].startswith("a/"))
+    assert names(find(fbe, path="a")) == under_a and "a" in under_a and "a/sub/deeper/z.bin" in under_a
+    assert names(find(fbe, "path:a")) == under_a                       # in the text too
+    assert names(find(fbe, path="/a/")) == under_a                      # slashes are trimmed
+    assert names(find(fbe, path="a/sub")) == ["a/sub", "a/sub/deep.txt", "a/sub/deeper/z.bin"]
+    assert names(find(fbe, "deep", path="a/sub")) == ["a/sub/deep.txt"]
+    assert names(find(fbe, "txt", path="a")) == ["a/eve.txt", "a/sub/deep.txt"]
+    assert names(find(fbe, "path:a\\sub ext:bin")) == ["a/sub/deeper/z.bin"]      # backslashes too
+    assert "ab/x.txt" not in names(find(fbe, path="a")) and "a_b/p.txt" not in names(find(fbe, path="a"))
+    assert names(find(fbe, path="ab")) == ["ab/x.txt"]
+
+
+def test_path_escapes_like_wildcards(fbe):
+    assert names(find(fbe, path="50%")) == ["50%/q.txt"]
+    assert names(find(fbe, path="a_b")) == ["a_b/p.txt"]                # not `ab`
+    for p in ("a%", "a_", "5%", "%", "_"):
+        assert names(find(fbe, path=p)) == [], p
+
+
+def test_facets_by_extension(fbe):
+    docs = catalog_docs() + extra_docs()
+    want: dict[str, list[int]] = {}
+    for d in docs:
+        row = want.setdefault(d["suffix"], [0, 0])
+        row[0] += 1
+        row[1] += d["size"] or 0
+    res = facets(fbe, "ext", kind="")
+    assert table(res) == {k: tuple(v) for k, v in want.items()}
+    assert res["total"] == {"count": len(docs), "bytes": sum(v[1] for v in want.values())}
+    assert res["other"] == {"count": 0, "bytes": 0, "buckets": 0}
+    counts = [(b["count"], b["key"]) for b in res["buckets"]]
+    assert counts == sorted(counts, key=lambda c: (-c[0], c[1]))
+    assert table(res)[""][0] == sum(1 for d in docs if d["suffix"] == "")      # folders and rollups: no extension
+    assert table(facets(fbe, "ext", "path:a/sub")) == {"txt": (1, 60), "bin": (1, 0), "": (1, 0)}   # NULL size is 0
+
+
+def test_facets_other_bucket(fbe):
+    full = facets(fbe, "ext")
+    small = facets(fbe, "ext", limit=2)
+    assert small["buckets"] == full["buckets"][:2]
+    rest = full["buckets"][2:]
+    assert small["other"] == {"count": sum(b["count"] for b in rest), "bytes": sum(b["bytes"] for b in rest),
+                              "buckets": len(rest)} and len(rest) > 0
+    assert small["total"] == full["total"]
+    assert facets(fbe, "ext", limit=1)["buckets"][0]["key"] == full["buckets"][0]["key"]
+
+
+def test_facets_with_a_name_pattern(fbe):
+    res = facets(fbe, "ext", "eve*.exe")                                # name_lc on the SQL backends
+    assert table(res) == {"exe": (5, 7_000_607)}
+    assert table(facets(fbe, "ext", "SETUP", kind="file")) == {"msi": (2, 30_001_000)}
+    assert facets(fbe, "ext", "nothing-like-this")["total"] == {"count": 0, "bytes": 0}
+    root = facets(fbe, "root", "eve*.exe")
+    assert [(b["key"], b["count"], b["bytes"]) for b in root["buckets"]] == [
+        (NAS, 3, 7_000_007), (LOCAL, 1, 300), (OLD, 1, 300)]
+
+
+def test_facets_by_root(fbe):
+    res = facets(fbe, "root")
+    docs = catalog_docs() + extra_docs()
+    for root in (NAS, OLD, LOCAL):
+        mine = [d for d in docs if d["root"] == root]
+        assert table(res)[root] == (len(mine), sum(d["size"] or 0 for d in mine))
+    assert [b["key"] for b in res["buckets"]][0] == NAS
+
+
+def test_facets_by_folder(fbe):
+    top = facets(fbe, "folder", roots=[NAS])
+    assert "error" not in top
+    t = table(top)
+    assert t["a"][0] == 12 and t["ab"] == (1, 40) and t["a_b"] == (1, 5) and t["50%"] == (1, 7) and t["cache"] == (1, 9_000_000)
+    # a sub-folder's own record counts under its name: the dir a (with what is inside it), the
+    # dir setup-tools and the rolled-up [REDACTED] folder; no top-level files, so no "" bucket
+    assert t["setup-tools"] == (1, 0) and t["[REDACTED]"] == (1, 4000) and "" not in t
+    assert top["total"]["count"] == sum(1 for d in catalog_docs() + extra_docs() if d["root"] == NAS)
+    below = facets(fbe, "folder", roots=[NAS], path="a")
+    assert table(below) == {"": (9, 37_003_155), "sub": (3, 60)}       # a itself and its 8 files; a/sub and a/sub/*
+    assert below["buckets"][0]["key"] == "" and below["total"]["count"] == 12
+    assert table(facets(fbe, "folder", roots=[NAS], path="a/sub")) == {"": (2, 60), "deeper": (1, 0)}
+    assert table(facets(fbe, "folder", "path:a/sub", roots=[NAS])) == {"": (2, 60), "deeper": (1, 0)}
+    assert table(facets(fbe, "folder", roots=[NAS], path="a", ext="txt")) == {"": (1, 100), "sub": (1, 60)}
+    assert facets(fbe, "folder", roots=[NAS], path="nope")["buckets"] == []
+
+
+def test_facets_by_folder_need_one_root(fbe):
+    res = facets(fbe, "folder")                                         # three roots
+    assert res["buckets"] == [] and "root" in res["error"] and res["total"] == {"count": 0, "bytes": 0}
+    assert "error" not in facets(fbe, "folder", "eve*.exe root:backup")
+    with pytest.raises(ValueError):
+        facets(fbe, "bogus")
+
+
+def test_api_facets(catalog):
+    res = catalog.search_facets({"q": "eve*.exe", "by": "ext"})
+    assert res["by"] == "ext" and res["elapsed_ms"] >= 0
+    assert res["buckets"] == [{"key": "exe", "count": 5, "bytes": 7_000_607}]
+    assert res["total"] == {"count": 5, "bytes": 7_000_607} and res["other"]["buckets"] == 0
+    roots = catalog.search_facets({"q": "eve*.exe", "by": "root"})["buckets"]
+    assert {(b["key"], b["host"], b["count"]) for b in roots} == {(NAS, "nas-main", 3), (OLD, "nas-old", 1), (LOCAL, "", 1)}
+    assert len(catalog.search_facets({"q": "e", "by": "ext", "limit": "1"})["buckets"]) == 1
+    assert catalog.search_facets({"q": "e", "by": "ext", "limit": "1"})["other"]["buckets"] > 0
+    assert catalog.search_facets({"q": "x", "by": "ext", "root": "nope"})["total"]["count"] == 0
+    # [REDACTED] and rollup records count as themselves, like the search
+    assert catalog.search_facets({"q": "kind:rollup", "by": "ext"})["total"]["count"] == 2
+    assert catalog.search_facets({"q": "kind:rollup", "by": "ext"})["total"]["count"] == len(catalog.search({"q": "kind:rollup"})["rows"])
+
+
+def test_api_facets_by_folder_needs_a_root(catalog):
+    res = catalog.search_facets({"q": "eve*", "by": "folder"})
+    assert res["buckets"] == [] and res["error"]
+    res = catalog.search_facets({"q": "eve*", "by": "folder", "root": NAS})
+    assert "error" not in res and {b["key"]: b["count"] for b in res["buckets"]} == {"a": 4}
+    res = catalog.search_facets({"q": "eve*", "by": "folder", "root": NAS, "path": "a"})
+    assert {b["key"]: b["count"] for b in res["buckets"]} == {"": 4}
+
+
+def test_api_facets_reject_bad_values(catalog):
+    for params in ({}, {"by": "ext"}, {"q": "x", "by": "bogus"}, {"q": "x", "by": "ext", "limit": "many"},
+                   {"q": "size:huge", "by": "ext"}, {"q": "x", "root": "nope", "by": "bogus"}):
+        with pytest.raises(ValueError):
+            catalog.search_facets(params)
+    assert catalog.search_facets({"q": "x"})["by"] == "ext"             # the default
+
+
+# --- the name_lc column and index ----------------------------------------------------------
+def test_sql_name_terms_match_the_lower_cased_column():
+    from filecat.browse import MSSQL, MYSQL, POSTGRES, SQLITE, sql_where
+    for d in (SQLITE, POSTGRES, MYSQL, MSSQL):
+        where, params = sql_where({"names": ["EVE*.exe", "Setup"]}, d, None, name_lc=True)
+        assert where.count(f"name_lc LIKE {d.ph} ESCAPE '!'") == 2 and "lower" not in where.lower()
+        # a literal prefix and no leading wildcard: an index range; plain text stays `%x%`
+        assert params == ["eve%.exe", "%setup%"]
+    assert sql_where({"names": ["[x]*"]}, MSSQL, None, name_lc=True)[1] == ["![x]%"]
+    assert sql_where({"names": ["100%"]}, SQLITE, None, name_lc=True)[1] == ["%100!%%"]
+    # until every row has name_lc: the old predicate on `name`
+    assert "name_lc" not in sql_where({"names": ["eve*"]}, SQLITE, None)[0]
+    assert "lower(name)" in sql_where({"names": ["eve*"]}, MYSQL, None)[0].lower()
+
+
+def test_mongo_name_terms_are_anchored_case_sensitive_regexes_on_name_lc():
+    from filecat.backends.mongodb import MongoBackend
+    q = {"names": ["EVE*.exe", "Setup"], "depth": 2}
+    assert MongoBackend._browse_filter(q, True) == {"$and": [
+        {"name_lc": {"$regex": r"^eve.*\.exe$", "$options": "s"}},
+        {"name_lc": {"$regex": "setup", "$options": "s"}}]}
+    assert MongoBackend._browse_filter(q)["$and"][0] == {"name": {"$regex": r"^EVE.*\.exe$", "$options": "is"}}
+
+
+def test_reindex_names_is_a_no_op_on_a_filled_catalog_and_searches_stay_right(be):
+    assert be.reindex_names() == 0
+    assert names(find(be, "EVE*.EXE")) == ["a/Eve-Online.exe", "a/evening.exe", "a/everything.EXE",
+                                            "eve.local.exe", "x/eve-old.exe"]
+    assert names(find(be, "*SETUP*", kind="file")) == ["a/Setup_100%.msi", "a/setup[1].msi"]
+    assert names(find(be, "100%")) == ["a/Setup_100%.msi"]
+
+
+def test_sqlite_fills_name_lc_on_put(fixture_dir):
+    b = SqliteBackend(str(fixture_dir / "c.sqlite"))
+    b.put(doc(NAS, "a/Eve-Online.EXE"))
+    b.put({k: v for k, v in doc(NAS, "a/x") .items() if k != "name"})      # no name at all
+    b.put(doc(NAS, "a/\u00c4rger.txt"))
+    b.flush()
+    got = dict(b.conn.execute("SELECT rel_path, name_lc FROM files"))
+    assert got == {"a/Eve-Online.EXE": "eve-online.exe", "a/x": "", "a/\u00c4rger.txt": "\u00e4rger.txt"}
+    b.put(doc(NAS, "a/Eve-Online.EXE", 99))                                 # an update refreshes it
+    assert b.search_names(search.to_query(search.parse_query("EVE-"), None))["rows"][0]["size"] == 99
+    b.close()
+
+
+def _old_catalog(path, rows):
+    """A catalog as filecat 0.2.4 left it: no name_lc column, schema_version 1."""
+    import json
+    import sqlite3
+    from filecat.backends import sqlite as sq
+    conn = sqlite3.connect(path)
+    conn.executescript(sq._SCHEMA.replace("    name_lc TEXT COLLATE NOCASE,\n", "")
+                       .replace("    name_lc TEXT COLLATE NOCASE,\r\n", ""))
+    conn.execute("INSERT INTO meta(key, value) VALUES ('schema_version', '1')")
+    for d in rows:
+        conn.execute("INSERT INTO files (root_id, root, rel_path, name, size, mtime_ns, kind, suffix, document) "
+                     "VALUES (?,?,?,?,?,?,?,?,?)", (d["root_id"], d["root"], d["rel_path"], d["name"], d["size"],
+                                                    d["mtime_ns"], d["kind"], d["suffix"], json.dumps(d)))
+    assert "name_lc" not in {r[1] for r in conn.execute("PRAGMA table_info(files)")}
+    conn.commit()
+    conn.close()
+
+
+def test_sqlite_adds_name_lc_to_an_old_catalog_and_reindex_fills_it(fixture_dir):
+    path = str(fixture_dir / "old.sqlite")
+    _old_catalog(path, catalog_docs()[:-1])
+    b = SqliteBackend(path)
+    cols = {r[1] for r in b.conn.execute("PRAGMA table_info(files)")}
+    assert "name_lc" in cols
+    assert b.conn.execute("SELECT value FROM meta WHERE key='schema_version'").fetchone()[0] == "2"
+    assert b.conn.execute("SELECT 1 FROM sqlite_master WHERE name='idx_files_name_lc'").fetchone()
+    assert b.conn.execute("SELECT COUNT(*) FROM files WHERE name_lc IS NULL").fetchone()[0] == 13
+
+    everything = [NAS, OLD, LOCAL]
+    want = ["a/Eve-Online.exe", "a/evening.exe", "a/everything.EXE", "x/eve-old.exe"]
+    assert names(run(b, "EVE*.exe", roots=everything)) == want      # the old predicate, still right
+    assert names(run(b, "100%", roots=everything)) == ["a/Setup_100%.msi"]
+    assert not b._name_lc_ready()
+
+    b.put(doc(LOCAL, "eve.local.exe", 300, kind="executable"))      # a new row has it, an old one not yet
+    b.flush()
+    assert b.conn.execute("SELECT COUNT(*) FROM files WHERE name_lc IS NULL").fetchone()[0] == 13
+    assert names(run(b, "EVE*.exe", roots=everything)) == sorted(want + ["eve.local.exe"])
+
+    seen = []
+    assert b.reindex_names(seen.append, batch=5) == 13
+    assert seen == [5, 10, 13]
+    assert b.conn.execute("SELECT COUNT(*) FROM files WHERE name_lc IS NULL").fetchone()[0] == 0
+    assert dict(b.conn.execute("SELECT rel_path, name_lc FROM files"))["a/Eve-Online.exe"] == "eve-online.exe"
+    assert b._name_lc_ready()
+    assert names(run(b, "EVE*.exe", roots=everything)) == sorted(want + ["eve.local.exe"])
+    assert names(run(b, "setup[1]*", roots=everything)) == ["a/setup[1].msi"]
+    assert b.reindex_names() == 0                                   # nothing left: safe to run again
+    b.close()
+
+    again = SqliteBackend(path)                                     # reopening a version 2 catalog
+    assert again._name_lc_ready() and names(run(again, "my file", roots=everything)) == ["a/my file.doc"]
+    again.close()
+
+
+def test_sqlite_prefix_search_uses_the_name_lc_index(fixture_dir):
+    from filecat.browse import SQLITE, sql_where
+    b = SqliteBackend(str(fixture_dir / "c.sqlite"))
+    for q, indexed in (({"names": ["eve*.exe"]}, True), ({"names": ["EVE*"]}, True),
+                       ({"names": ["a!b*"]}, True), ({"names": ["setup"]}, False)):
+        where, params = sql_where(q, SQLITE, None, name_lc=True)
+        plan = " ".join(r[3] for r in b.conn.execute(f"EXPLAIN QUERY PLAN SELECT document FROM files{where}", params))
+        assert ("idx_files_name_lc" in plan) is indexed, plan
+    b.close()
+
+
+def test_search_reindex_command(fixture_dir, capsys):
+    from filecat import search_cmd
+    path = str(fixture_dir / "old.sqlite")
+    _old_catalog(path, catalog_docs()[:3])
+    args = SimpleNamespace(backend="sqlite", out=path, dsn=None, batch=2, json=True)
+    assert search_cmd.run(args) == 0
+    assert '"filled": 3' in capsys.readouterr().out
+    assert search_cmd.run(args) == 0
+    assert '"filled": 0' in capsys.readouterr().out
+
+
+def test_a_large_catalog_gets_its_name_index_from_reindex_not_from_connect(fixture_dir, monkeypatch, capsys):
+    from filecat import search_cmd
+    from filecat.backends import sqlite as sq
+    path = str(fixture_dir / "old.sqlite")
+    _old_catalog(path, catalog_docs()[:5])
+    monkeypatch.setattr(sq, "INDEX_AT_CONNECT_MAX_ROWS", 0)         # five rows count as large
+    b = SqliteBackend(path)
+    has = lambda: bool(b.conn.execute("SELECT 1 FROM sqlite_master WHERE name='idx_files_name_lc'").fetchone())
+    assert "name_lc" in {r[1] for r in b.conn.execute("PRAGMA table_info(files)")} and not has()
+    assert names(run(b, "EVE*", roots=[NAS])) == ["a/Eve-Online.exe", "a/eve.txt", "a/everything.EXE"]  # before backfill
+    said = []
+    assert b.reindex_names(say=said.append) == 5
+    assert has() and said == ["building index idx_files_name_lc"]
+    assert names(run(b, "EVE*", roots=[NAS])) == ["a/Eve-Online.exe", "a/eve.txt", "a/everything.EXE"]
+    said.clear()
+    assert b.reindex_names(say=said.append) == 0 and said == []     # idempotent
+    b.close()
+
+    path = str(fixture_dir / "old2.sqlite")
+    _old_catalog(path, catalog_docs()[:5])
+    sq.SqliteBackend(path).close()                                  # connect only: no index
+    args = SimpleNamespace(backend="sqlite", out=path, dsn=None, batch=2, json=False)
+    assert search_cmd.run(args) == 0
+    assert "building index idx_files_name_lc" in capsys.readouterr().err

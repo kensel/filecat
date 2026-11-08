@@ -542,7 +542,7 @@
       "problems": [],
       "notes": [
         "Compressed tars are listed for gzip, bzip2 and xz only; zstd, lzma, lz4, lzip, lzop, brotli and .Z tars are identified by name but not unpacked.",
-        "docs/TODO.md: an .ova is a tar whose first member is an .ovf; not yet read."
+        "docs/roadmap.md (Backlog): an .ova is a tar whose first member is an .ovf; not yet read."
       ]
     },
     {
@@ -598,7 +598,7 @@
       "spec": "https://ecma-international.org/publications-and-standards/standards/ecma-119/ (ISO 9660); https://ecma-international.org/publications-and-standards/standards/ecma-167/ (ECMA-167, the base of UDF; OSTA's UDF 2.60 spec is osta.org/specs); https://dr-emann.github.io/squashfs/ (SquashFS)",
       "reads": "Headers, a few sectors and mapping tables with targeted seeks; partitions become member rows (role volume) and ISO files become member rows by name.",
       "member_fields": ["path", "size", "role"],
-      "probe_keys": ["see probe/disk.py and file-catalog-requirements.md, Probe order step 4b"],
+      "probe_keys": ["see probe/disk.py and docs/file-catalog-requirements.md, Probe order step 4b"],
       "problems": [],
       "notes": ["Listed here because freedesktop files SquashFS and compressed ISOs with the archives; the detail lives in probe/disk.py."]
     }

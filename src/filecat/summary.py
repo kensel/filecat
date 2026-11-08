@@ -1,7 +1,7 @@
 """`filecat summary`: the WinDirStat-style overview (extension / type /
 directory totals and percentages), plus `--disagree` and `--rebuild`.
 
-See file-catalog-requirements.md, "Overview".
+See docs/file-catalog-requirements.md, "Overview".
 """
 from __future__ import annotations
 

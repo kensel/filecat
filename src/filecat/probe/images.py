@@ -1,7 +1,7 @@
 """Image and GPU-texture header sniffing: JPEG, PNG, GIF, DDS, TGA.
 
 No pixel decode -- dimensions and container-level fields only.
-See file-catalog-requirements.md, "Archives, images, models, data".
+See docs/file-catalog-requirements.md, "Archives, images, models, data".
 """
 from __future__ import annotations
 

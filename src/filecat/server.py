@@ -861,7 +861,8 @@ def run(args: Any) -> int:
             host, port = server_cfg.parse_listen(listen)             # type: ignore[misc]
             viewer = serve.start_viewer(argparse.Namespace(
                 backend=catalog.backend, out=catalog.out, dsn=catalog.dsn, host=host, port=port, quiet=True,
-                no_save=False, graph_max_age=120, open=False, control_auth=auth, tls=tls_cfg), coord)
+                no_save=False, graph_max_age=120, open=False, control_auth=auth, tls=tls_cfg,
+                search_export_max_rows=cfg.search_export_max_rows), coord)
             if viewer is None:
                 coord.shutdown()
                 return 2

@@ -1,4 +1,4 @@
-"""Ollama summaries, added after the walk. See file-catalog-requirements.md,
+"""Ollama summaries, added after the walk. See docs/file-catalog-requirements.md,
 "Ollama". Off unless options.ollama is set (scan.scan_roots only imports
 this module when that flag is on).
 """

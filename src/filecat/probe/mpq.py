@@ -1,7 +1,7 @@
 """MPQ (Blizzard) archives: header, hash/block tables, (listfile) names.
 
 Reads the header, both tables, and the (listfile) member only -- never the
-other members' bytes. See file-catalog-requirements.md and the MoPaQ format
+other members' bytes. See docs/file-catalog-requirements.md and the MoPaQ format
 description (Justin Olbrantz / Ladislav Zezula) for the on-disk layout this
 module parses.
 """

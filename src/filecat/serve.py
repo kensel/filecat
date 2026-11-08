@@ -16,7 +16,10 @@ Read-only. Serves one page (filecat/web/index.html) and a JSON API:
                                        on demand and reused for --graph-max-age
     GET /api/treemap?id=               one stored snapshot (a pinned one, say)
     GET /api/pins?root=&prefix=&depth= the pinned snapshots of that view, grouped by pin
-    GET /api/search?q=&root=&host=&ext=&min_size=&max_size=&after=&before=&kind=&sort=&limit=&offset=
+    GET /api/search/facets?<the search parameters>&by=ext|root|folder&limit=
+                                       a break-down of all the matches (counts and bytes per extension,
+                                       root or folder)
+    GET /api/search?q=&root=&host=&ext=&min_size=&max_size=&after=&before=&kind=&path=&sort=&limit=&offset=
                                        file-name search, Everything-style (filecat/search.py); a page of
                                        rows and `more`, never anything inside a rollup
     GET /api/record?root=&rel_path=    the full stored document
@@ -71,7 +74,9 @@ anything else prints a warning.
 from __future__ import annotations
 
 import copy
+import csv
 import gzip
+import io
 import itertools
 import json
 import logging
@@ -93,7 +98,7 @@ from pathlib import Path, PureWindowsPath
 from typing import Any, Callable
 from urllib.parse import parse_qs, urlsplit
 
-from . import browse, config, control_auth, rootinfo, summaries, tls, treemap
+from . import browse, config, control_auth, rootinfo, search_saved, summaries, tls, treemap
 from .backends import open_backend
 
 _EMPTY = {"suffix": [], "mime": [], "dir": [], "total_files": 0, "total_bytes": 0, "unreadable": 0}
@@ -811,6 +816,34 @@ class Catalog:
         return self.call(lambda b: rollups_view.build(b, p.get("root") or None, p.get("tag") or None))
 
     # --- search (filecat/search.py) ------------------------------------------
+    def _search_query(self, p: dict[str, Any]) -> tuple[dict[str, Any], list[str] | None, dict[str, Any]]:
+        """(criteria, resolved roots, backend query) of the /api/search parameters; ValueError when
+        they are bad or name no criterion. Shared by the search and its export."""
+        from . import search as srch
+        spec = srch.with_params(srch.parse_query(p.get("q")), p)
+        if not srch.has_criteria(spec):
+            raise ValueError("type a name pattern or a filter (ext:, size:, root:, host:, ...)")
+        query_roots = srch.resolve_roots(spec, self.call(lambda b: b.roots()))
+        q = srch.to_query(spec, query_roots, sort=p.get("sort"), desc=p.get("desc"),
+                          offset=p.get("offset"), limit=p.get("limit"))
+        return spec, query_roots, q
+
+    def export_max_rows(self) -> int:
+        cap = getattr(self.args, "search_export_max_rows", None)
+        return cap if isinstance(cap, int) and cap >= 1 else search_saved.DEFAULT_EXPORT_MAX
+
+    def searches(self, p: dict[str, Any]) -> dict[str, Any]:
+        """GET /api/searches: the saved searches (shared by every viewer user)."""
+        return {"searches": self.call(search_saved.listing), "max": search_saved.MAX_SAVED}
+
+    def search_save(self, p: dict[str, Any]) -> dict[str, Any]:
+        """POST {"id"?, "name", "params", "pinned"}: create a saved search, or update the one with `id`."""
+        return {"search": self.call(lambda b: search_saved.save(b, p))}
+
+    def search_delete(self, p: dict[str, Any]) -> dict[str, Any]:
+        """POST {"id"}: delete a saved search."""
+        return {"deleted": self.call(lambda b: search_saved.delete(b, p.get("id")))}
+
     def search(self, p: dict[str, str]) -> dict[str, Any]:
         """GET /api/search?q=&root=&host=&ext=&min_size=&max_size=&after=&before=&kind=&sort=&desc=&limit=&offset=
 
@@ -822,12 +855,7 @@ class Catalog:
         match, so a [REDACTED] or [CACHE] folder is found as itself."""
         from . import search as srch
         started = time.perf_counter()
-        spec = srch.with_params(srch.parse_query(p.get("q")), p)
-        if not srch.has_criteria(spec):
-            raise ValueError("type a name pattern or a filter (ext:, size:, root:, host:, ...)")
-        query_roots = srch.resolve_roots(spec, self.call(lambda b: b.roots()))
-        q = srch.to_query(spec, query_roots, sort=p.get("sort"), desc=p.get("desc"),
-                          offset=p.get("offset"), limit=p.get("limit"))
+        spec, query_roots, q = self._search_query(p)
         found = {"rows": [], "more": False} if query_roots == [] else self.call(lambda b: b.search_names(q))
         rows = []
         for doc in found["rows"]:
@@ -839,13 +867,46 @@ class Catalog:
                 "limit": q["limit"], "sort": q["sort"], "desc": q["desc"],
                 "elapsed_ms": round((time.perf_counter() - started) * 1000, 1)}
 
+    def search_facets(self, p: dict[str, str]) -> dict[str, Any]:
+        """GET /api/search/facets?<the /api/search parameters>&by=ext|root|folder&limit=20
+
+        A break-down of everything the search matches (not one page): {"by", "buckets": [{"key",
+        "count", "bytes"}] (roots also carry "host"), "other": {"count", "bytes", "buckets"} for
+        what the top `limit` leave out, "total", "elapsed_ms"}. "folder" groups by the path
+        segment below `path:` and needs one root: with several, "error" says to pick one
+        (key "" is the records directly in the folder). Counts are the search's own."""
+        from . import search as srch
+        started = time.perf_counter()
+        by = (p.get("by") or "ext").strip().lower()
+        try:
+            limit = min(200, max(1, int(p.get("limit") or 20)))
+        except ValueError:
+            raise ValueError("limit must be a number") from None
+        spec, query_roots, q = self._search_query(p)
+        if query_roots == []:
+            from .browse import FACET_BY, facet_result
+            if by not in FACET_BY:
+                raise ValueError(f"cannot break down by {by!r} (use {', '.join(FACET_BY)})")
+            found = facet_result([])
+        else:
+            found = self.call(lambda b: b.search_facets(q, by, limit))
+        if by == "root":
+            for bucket in found["buckets"]:
+                bucket["host"] = srch.host_of(bucket["key"])
+        return {"by": by, **found, "elapsed_ms": round((time.perf_counter() - started) * 1000, 1)}
+
 
 ROUTES = {"/api/info": "info", "/api/roots": "roots", "/api/summary": "summary", "/api/records": "records",
           "/api/subtree": "subtree", "/api/treemap": "treemap", "/api/record": "record", "/api/members": "members",
           "/api/backends": "backends", "/api/pins": "pins", "/api/agents": "agents", "/api/jobs": "jobs",
           "/api/search": "search"}
 ROUTES.update({"/api/topology": "topology", "/api/rollups": "rollups"})
-POST_ROUTES = {"/api/backend": "select", "/api/pin": "pin", "/api/unpin": "unpin"}
+ROUTES["/api/searches"] = "searches"
+ROUTES["/api/search/facets"] = "search_facets"
+SHARED_WRITES = ("search_save", "search_delete")    # need a session (and the CSRF checks) once a password is set
+EXPORT_PATH = "/api/search/export"      # streamed by the handler (Handler._export), not a Catalog method
+POST_ROUTES = {"/api/backend": "select", "/api/pin": "pin", "/api/unpin": "unpin",
+               "/api/searches/save": "search_save", "/api/searches/delete": "search_delete"}
 ROOT_ACTIONS = {"/api/roots/scan": "scan_root", "/api/roots/remove": "remove_root",
                 "/api/summaries/refresh": "refresh_summary"}   # POST only, like run now
 RUN_PATH = re.compile(r"^/api/jobs/([A-Za-z0-9._@-]{1,128})/run$")      # POST only: "run now"
@@ -890,6 +951,62 @@ def make_handler(catalog: Catalog, page: bytes) -> type[BaseHTTPRequestHandler]:
             body = json.dumps(data, ensure_ascii=False, default=str).encode("utf-8")
             self._send(status, body, "application/json; charset=utf-8", headers, compress=True)
 
+        def _export(self, params: dict[str, str]) -> None:
+            """GET /api/search/export?format=csv|jsonl&<the /api/search parameters>: every match,
+            written as it is read (no Content-Length: the connection closes at the end), at most
+            catalog.export_max_rows() records. X-Filecat-Truncated: 1 when more matched."""
+            fmt = (params.get("format") or "csv").lower()
+            try:
+                if fmt not in ("csv", "jsonl"):
+                    raise ValueError("format must be csv or jsonl")
+                _, query_roots, q = catalog._search_query(params)
+                cap = catalog.export_max_rows()
+                empty = query_roots == []
+                truncated = not empty and search_saved.has_more_after(catalog.call, q, cap)
+            except (KeyError, ValueError) as exc:
+                return self._json(HTTPStatus.BAD_REQUEST, {"error": f"{type(exc).__name__}: {exc}"})
+            except Exception as exc:
+                return self._json(HTTPStatus.INTERNAL_SERVER_ERROR, {"error": f"{type(exc).__name__}: {exc}"})
+            stamp = datetime.now().strftime("%Y%m%d-%H%M%S")
+            self.close_connection = True
+            self.send_response(HTTPStatus.OK)
+            self.send_header("Content-Type", "text/csv; charset=utf-8" if fmt == "csv"
+                             else "application/x-ndjson; charset=utf-8")
+            self.send_header("Content-Disposition", f'attachment; filename="filecat-search-{stamp}.{fmt}"')
+            self.send_header("Cache-Control", "no-store")
+            self.send_header("Connection", "close")
+            if truncated:
+                self.send_header("X-Filecat-Truncated", "1")
+            self.end_headers()
+            cols = search_saved.EXPORT_COLUMNS
+            try:
+                if fmt == "csv":
+                    self.wfile.write(b"\xef\xbb\xbf")
+                buf = io.StringIO()
+                writer = csv.writer(buf, lineterminator="\r\n")
+                if fmt == "csv":
+                    writer.writerow(cols)
+                pending = 0
+                rows = iter(()) if empty else search_saved.export_rows(catalog.call, q, cap)
+                for row in rows:
+                    if fmt == "csv":
+                        writer.writerow([search_saved.csv_cell(row[c]) for c in cols])
+                    else:
+                        buf.write(json.dumps(row, ensure_ascii=False) + "\n")
+                    pending += 1
+                    if pending >= 500:
+                        self.wfile.write(buf.getvalue().encode("utf-8"))
+                        buf.seek(0)
+                        buf.truncate()
+                        pending = 0
+                if fmt == "jsonl" and truncated:
+                    buf.write(json.dumps({"truncated": True, "max_rows": cap}) + "\n")
+                self.wfile.write(buf.getvalue().encode("utf-8"))
+            except (BrokenPipeError, ConnectionError):
+                pass                                    # the client went away
+            except Exception as exc:                    # the headers are out: end the stream and log it
+                log.warning("search export failed: %s: %s", type(exc).__name__, exc)
+
         def do_GET(self) -> None:
             url = urlsplit(self.path)
             if url.path in ("/", "/index.html"):
@@ -897,6 +1014,10 @@ def make_handler(catalog: Catalog, page: bytes) -> type[BaseHTTPRequestHandler]:
             if RUN_PATH.match(url.path) or url.path in ("/api/login", "/api/logout") or url.path in ROOT_ACTIONS:
                 return self._json(HTTPStatus.METHOD_NOT_ALLOWED, {"error": "POST only"}, {"Allow": "POST"})
             method = ROUTES.get(url.path)
+            if url.path == EXPORT_PATH:
+                if catalog.auth is not None and catalog.auth.login_required_for_view and not self._logged_in():
+                    return self._json(HTTPStatus.UNAUTHORIZED, {"error": "log in first", "login": True})
+                return self._export({k: v[-1] for k, v in parse_qs(url.query, keep_blank_values=True).items()})
             if method is None:
                 return self._json(HTTPStatus.NOT_FOUND, {"error": f"no such path {url.path}"})
             if catalog.auth is not None and catalog.auth.login_required_for_view and not self._logged_in():
@@ -1067,6 +1188,12 @@ def make_handler(catalog: Catalog, page: bytes) -> type[BaseHTTPRequestHandler]:
             method = POST_ROUTES.get(path)
             if method is None:
                 return self._json(HTTPStatus.NOT_FOUND, {"error": f"no such path {path}"})
+            if method in SHARED_WRITES and catalog.auth is not None and catalog.auth.enabled:
+                # a password is set: changing what every viewer user sees takes a session and the CSRF checks
+                if not self._csrf_ok():
+                    return
+                if not self._logged_in():
+                    return self._json(HTTPStatus.UNAUTHORIZED, {"error": "log in first", "login": True})
             # JSON only: a cross-site form post cannot send it without a CORS preflight
             if self.headers.get_content_type() != "application/json":
                 return self._json(HTTPStatus.UNSUPPORTED_MEDIA_TYPE, {"error": "send application/json"})
@@ -1181,6 +1308,9 @@ def run(args: Any) -> int:
     except config.ConfigError as exc:
         print(f"filecat serve: {exc}", file=sys.stderr)
         return 2
+    cap = (cfg.get("server") or {}).get("search_export_max_rows")
+    if isinstance(cap, int) and not isinstance(cap, bool) and cap >= 1 and not getattr(args, "search_export_max_rows", None):
+        args.search_export_max_rows = cap
     try:
         catalog = Catalog(args)
     except Exception as exc:

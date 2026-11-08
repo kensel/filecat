@@ -1,7 +1,7 @@
 """Audio/video container sniffing: RIFF/WAVE, ID3, MP3 frame sync, ISO BMFF, EBML.
 
 Duration is omitted -- it is not available from the header bytes this probe reads.
-See file-catalog-requirements.md, "Probe order" step 9.
+See docs/file-catalog-requirements.md, "Probe order" step 9.
 """
 from __future__ import annotations
 

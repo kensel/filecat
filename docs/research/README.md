@@ -1,8 +1,9 @@
 # Research
 
-Design research for future work, imported from Word documents (21 Oct 2026).
-None of it is implemented yet; where these notes and the code or
-[`file-catalog-requirements.md`](../../file-catalog-requirements.md) disagree,
+Design research imported from Word documents (21 Oct 2026). Much of it has
+since been built (the agent, rollups, samples, members, storage topology), and
+the build differs from the notes in places; where these notes and the code or
+[`file-catalog-requirements.md`](../file-catalog-requirements.md) disagree,
 the code and the requirements win.
 
 | Note | Covers |
@@ -15,6 +16,5 @@ the code and the requirements win.
 
 The wire protocol that came out of note 02 is [agent-protocol.md](../agent-protocol.md); the commands the agent may run and the native crates it links, for review before it is built, are in [agent-allowlist.md](../agent-allowlist.md). Storage topology is built in Python, not in the agent ([storage-topology.md](../storage-topology.md)).
 
-[`rust-agent/`](rust-agent/) holds the draft agent sources referenced by notes
-02 and 03 (`Cargo.toml`, `main.rs`, `tls.rs`; `synology_storage.rs` was deleted, its logic is Python now). They are
-not part of the build.
+The draft agent sources notes 02 and 03 referred to (`rust-agent/`) were removed
+in v0.2.5; the agent that was built is in [`agent/`](../../agent/).
