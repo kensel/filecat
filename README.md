@@ -21,10 +21,10 @@ From GitHub at a release tag, without a checkout (pick the extras you need):
 
 ```
 # as a command-line tool (its own environment, `filecat` on PATH)
-uv tool install "filecat[mongo,tls] @ git+https://github.com/kensel/filecat@v0.2.4"
+uv tool install "filecat[mongo,tls] @ git+https://github.com/kensel/filecat@v0.2.5"
 
 # into the active virtual environment
-uv pip install -U "filecat[mongo,tls] @ git+https://github.com/kensel/filecat@v0.2.4"
+uv pip install -U "filecat[mongo,tls] @ git+https://github.com/kensel/filecat@v0.2.5"
 ```
 
 The static Linux agents for each tag are on the

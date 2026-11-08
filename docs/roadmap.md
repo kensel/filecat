@@ -390,7 +390,7 @@ After the v0.2.0 rollups (stages A and B of [rollups.md](rollups.md)):
   `test_summaries.py` may share the cause (`test_roots_actions.py`'s was the
   refused-POST reset, fixed in v0.2.4).
 
-## v0.2.5: file-name search
+## v0.2.5: file-name search (done)
 
 Use the catalog as a file-name search across every host, as voidtools
 Everything does for one PC (e.g. `eve*.exe` on all NAS shares at once).

@@ -116,7 +116,7 @@ Answered before and after `auth`; it reveals nothing secret.
 
 ```json
 {"cmd": "hello", "label": "scan \\\\nas3\\Apps by kense@DESKTOP"}
-{"ok": true, "protocol": 1, "agent_version": "0.2.4", "hostname": "nas-main",
+{"ok": true, "protocol": 1, "agent_version": "0.2.5", "hostname": "nas-main",
  "os": "linux", "arch": "x86_64"}
 ```
 
